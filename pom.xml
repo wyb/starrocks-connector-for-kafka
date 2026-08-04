@@ -30,8 +30,12 @@
                             <artifactSet>
                                 <includes>
                                     <include>com.starrocks:starrocks-stream-load-sdk</include>
+                                    <include>org.mariadb.jdbc:mariadb-java-client</include>
                                 </includes>
                             </artifactSet>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
                         </configuration>
                     </execution>
                     <execution>
