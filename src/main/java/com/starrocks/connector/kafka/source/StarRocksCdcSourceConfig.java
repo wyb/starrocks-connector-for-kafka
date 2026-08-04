@@ -76,6 +76,25 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public StarRocksCdcSourceConfig(Map<String, String> props) {
         super(CONFIG_DEF, props);
         this.table2Topic = parseTable2Topic(getString(TABLE2TOPIC_MAP));
+        rejectNoSnapshotWithResnapshot();
+    }
+
+    /**
+     * Rejects {@code source.snapshot.mode=no_snapshot} together with {@code
+     * source.nontrackable.policy=resnapshot}, which would be silently lossy rather than
+     * self-healing: the resnapshot path discards the table's position and pins a fresh bookmark at
+     * the current version, and with no snapshot to rebuild from it reads nothing at all -- so every
+     * change between the unusable base and that new bookmark is dropped while the operator believes
+     * the table healed itself.
+     */
+    private void rejectNoSnapshotWithResnapshot() {
+        if ("no_snapshot".equals(snapshotMode()) && "resnapshot".equals(nonTrackablePolicy())) {
+            throw new ConfigException(
+                    NONTRACKABLE_POLICY + "=resnapshot cannot be combined with " + SNAPSHOT_MODE + "=no_snapshot: "
+                            + "resnapshot rebuilds a table's position from a fresh snapshot, so with snapshots "
+                            + "disabled it would silently drop every change between the unusable base bookmark and "
+                            + "the new one. Use " + SNAPSHOT_MODE + "=initial, or " + NONTRACKABLE_POLICY + "=fail.");
+        }
     }
 
     public static ConfigDef newConfigDef() {

@@ -84,4 +84,35 @@ public class StarRocksCdcSourceConfigTest {
         m.put(StarRocksCdcSourceConfig.TABLE2TOPIC_MAP, "orders");
         new StarRocksCdcSourceConfig(m);
     }
+
+    /**
+     * no_snapshot + resnapshot is silently lossy, not self-healing: the resnapshot path pins a
+     * fresh bookmark at the current version and, with snapshots off, reads nothing -- dropping every
+     * change between the unusable base and that new bookmark. It must be rejected up front.
+     */
+    @Test
+    public void testNoSnapshotWithResnapshotPolicyRejected() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, "no_snapshot");
+        m.put(StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, "resnapshot");
+
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("expected ConfigException for no_snapshot + resnapshot");
+        } catch (ConfigException e) {
+            assertTrue("message was: " + e.getMessage(),
+                    e.getMessage().contains(StarRocksCdcSourceConfig.SNAPSHOT_MODE));
+            assertTrue("message was: " + e.getMessage(),
+                    e.getMessage().contains(StarRocksCdcSourceConfig.NONTRACKABLE_POLICY));
+        }
+    }
+
+    @Test
+    public void testNoSnapshotWithFailPolicyAccepted() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, "no_snapshot");
+        StarRocksCdcSourceConfig c = new StarRocksCdcSourceConfig(m);
+        assertEquals("no_snapshot", c.snapshotMode());
+        assertEquals("fail", c.nonTrackablePolicy());
+    }
 }

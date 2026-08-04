@@ -23,9 +23,11 @@ package com.starrocks.connector.kafka.source;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.junit.Test;
 
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -37,8 +39,9 @@ import static org.junit.Assert.fail;
 
 /**
  * Tests for {@link StarRocksCdcSourceConnector}: the fail-fast preflight checks run from {@code
- * start()} (unique-key rejection, PK-without-CDC rejection, metadata pseudo-column collisions)
- * and the round-robin table sharding performed by {@code taskConfigs()}.
+ * start()} (unique-key rejection, PK-without-CDC rejection, metadata pseudo-column collisions, and
+ * the bookmark-meta-function probe) and the round-robin table sharding performed by {@code
+ * taskConfigs()}.
  */
 public class StarRocksCdcSourceConnectorTest {
 
@@ -174,10 +177,53 @@ public class StarRocksCdcSourceConnectorTest {
     }
 
     /**
+     * The bookmark-function probe is the check that catches the likeliest first-run blocker:
+     * {@code Config.enable_bookmark_meta_functions} defaults to false in StarRocks, and every
+     * bookmark call then fails. Preflight must surface the remedy rather than let tasks start and
+     * bury it inside a per-table poll failure.
+     */
+    @Test
+    public void testPreflightRejectsDisabledBookmarkFunctions() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "DUP_KEYS");
+        fake.bookmarkCreateFailure = new SQLException(
+                "Bookmark meta functions are disabled. Set enable_bookmark_meta_functions=true");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+        StarRocksCdcSourceConnector connector = newConnector(fake);
+
+        try {
+            connector.start(props);
+            fail("expected ConnectException when bookmark meta functions are disabled");
+        } catch (ConnectException e) {
+            assertTrue("message was: " + e.getMessage(), e.getMessage().contains(
+                    "ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\")"));
+            assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+        }
+    }
+
+    @Test
+    public void testPreflightProbesAndReleasesOneBookmark() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "DUP_KEYS");
+        fake.modelByTable.put("t2", "DUP_KEYS");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1,t2");
+        props.put("name", "c1");
+
+        newConnector(fake).start(props);
+
+        // One throwaway bookmark on the first table only, released again straight away.
+        assertEquals(Collections.singletonList("db1.t1:kc:c1"), fake.createdBookmarks);
+        assertEquals(Collections.singletonList("db1.t1:1:kc:c1"), fake.releasedBookmarks);
+    }
+
+    /**
      * Minimal scriptable {@link CdcClient} test double covering only what {@code
-     * StarRocksCdcSourceConnector}'s preflight checks call: {@code fetchTableModel}, {@code
-     * cdcPropertyEnabled}, and {@code fetchColumns}. Every other method is unused by the
-     * connector and throws {@link UnsupportedOperationException} if ever invoked.
+     * StarRocksCdcSourceConnector}'s preflight calls: {@code fetchTableModel}, {@code
+     * cdcPropertyEnabled}, {@code fetchColumns}, and the {@code bookmarkCreate}/{@code
+     * bookmarkRelease} probe. Every other method is unused by the connector and throws {@link
+     * UnsupportedOperationException} if ever invoked.
      */
     static final class FakeCdcClient implements CdcClient {
 
@@ -188,15 +234,24 @@ public class StarRocksCdcSourceConnectorTest {
         final Map<String, String> modelByTable = new HashMap<>();
         final Map<String, Boolean> cdcEnabledByTable = new HashMap<>();
         final Map<String, List<ColumnMeta>> colsByTable = new HashMap<>();
+        final List<String> createdBookmarks = new ArrayList<>();
+        final List<String> releasedBookmarks = new ArrayList<>();
+        /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
+        SQLException bookmarkCreateFailure;
+        private long nextBookmarkId = 1L;
 
         @Override
-        public long bookmarkCreate(String db, String table, String holder, long ttlMs) {
-            throw new UnsupportedOperationException();
+        public long bookmarkCreate(String db, String table, String holder, long ttlMs) throws SQLException {
+            createdBookmarks.add(db + "." + table + ":" + holder);
+            if (bookmarkCreateFailure != null) {
+                throw bookmarkCreateFailure;
+            }
+            return nextBookmarkId++;
         }
 
         @Override
         public void bookmarkRelease(String db, String table, long bookmarkId, String holder) {
-            throw new UnsupportedOperationException();
+            releasedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
         }
 
         @Override

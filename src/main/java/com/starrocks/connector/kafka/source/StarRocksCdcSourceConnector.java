@@ -24,6 +24,8 @@ import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceConnector;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.util.ArrayList;
@@ -45,18 +47,26 @@ import java.util.Map;
  *       it, so the failure is directly actionable;</li>
  *   <li>a table with a column named {@code __CHANGE_TYPE__} or {@code __ROW_VERSION__}, which
  *       would collide with the CDC metadata pseudo-columns appended to every CHANGES read (see
- *       {@code StarRocksJdbcClient#streamChanges}).</li>
+ *       {@code StarRocksJdbcClient#streamChanges});</li>
+ *   <li>bookmark meta functions being disabled cluster-wide, proven by actually creating and
+ *       releasing one throwaway bookmark -- see {@link #probeBookmarkFunctions}.</li>
  * </ul>
  * Any other {@link SQLException} encountered while probing a table (e.g. the table does not
  * exist) is likewise wrapped into a {@link ConnectException} rather than left to propagate raw.
  */
 public class StarRocksCdcSourceConnector extends SourceConnector {
 
+    private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceConnector.class);
+
     // The two CDC metadata pseudo-columns appended to every CHANGES projection; see
     // StarRocksJdbcClient#streamChanges. A captured table must not declare a real column with
     // either name, or the two would be indistinguishable downstream.
     private static final String CHANGE_TYPE_COLUMN = "__CHANGE_TYPE__";
     private static final String ROW_VERSION_COLUMN = "__ROW_VERSION__";
+
+    // TTL of the throwaway preflight bookmark. Short, because it is released immediately and only
+    // needs to survive its own round trip: if the release fails, it expires on its own shortly.
+    private static final long PROBE_BOOKMARK_TTL_MS = 60_000L;
 
     private Map<String, String> props;
 
@@ -86,13 +96,50 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
         this.props = props;
 
         String db = config.databaseName();
+        List<String> tables = config.tableNames();
         CdcClient client = createClient(config);
         try {
-            for (String t : config.tableNames()) {
+            for (String t : tables) {
                 preflightCheckTable(client, db, t);
+            }
+            if (!tables.isEmpty()) {
+                probeBookmarkFunctions(client, config, db, tables.get(0));
             }
         } finally {
             client.close();
+        }
+        LOG.info("CDC source connector preflight passed for {} table(s) in database {}: {}",
+                tables.size(), db, tables);
+    }
+
+    /**
+     * Proves that bookmark meta functions actually work, by creating one short-TTL bookmark on the
+     * first captured table and releasing it again.
+     *
+     * <p>Worth its own round trip because {@code Config.enable_bookmark_meta_functions} defaults to
+     * {@code false} in StarRocks, making this the single likeliest first-run blocker -- and without
+     * this probe the configuration validates, tasks start, and the real cause only surfaces two
+     * {@code getCause()} levels inside a per-table poll failure after the client's silent retries.
+     * The release is best-effort: it is the create that proves the gate is open, and a leaked
+     * probe bookmark expires within {@link #PROBE_BOOKMARK_TTL_MS}.
+     */
+    private void probeBookmarkFunctions(CdcClient client, StarRocksCdcSourceConfig config, String db, String table) {
+        String holder = config.holderId(props.getOrDefault("name", "default"));
+        long bookmarkId;
+        try {
+            bookmarkId = client.bookmarkCreate(db, table, holder, PROBE_BOOKMARK_TTL_MS);
+        } catch (SQLException e) {
+            throw new ConnectException(
+                    "Failed to create a bookmark on " + db + "." + table + "; bookmark meta functions are most "
+                            + "likely disabled (Config.enable_bookmark_meta_functions defaults to false). On the FE "
+                            + "leader run: ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\") "
+                            + "-- and make sure the connector user holds OPERATE ON SYSTEM.", e);
+        }
+        try {
+            client.bookmarkRelease(db, table, bookmarkId, holder);
+        } catch (SQLException e) {
+            LOG.warn("Failed to release preflight probe bookmark {} for {}.{}; it expires in {} ms",
+                    bookmarkId, db, table, PROBE_BOOKMARK_TTL_MS, e);
         }
     }
 
