@@ -20,6 +20,9 @@
 
 package com.starrocks.connector.kafka.source;
 
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
@@ -29,8 +32,10 @@ import java.sql.SQLNonTransientConnectionException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Calendar;
 import java.util.List;
 import java.util.Properties;
+import java.util.TimeZone;
 
 /**
  * {@link CdcClient} implementation backed by the MariaDB JDBC driver, talking to a StarRocks FE
@@ -41,14 +46,34 @@ import java.util.Properties;
  * leader" failure rotates to the next configured host and retries there, since those two
  * functions can only execute on the current FE leader.
  *
+ * <p><b>Not thread-safe.</b> The single reused {@link Connection}, the URL rotation index, and
+ * any open streaming {@link ResultSet} are all plain mutable state, and the MariaDB driver itself
+ * serializes Connection/streaming-result access on one lock. Every caller must therefore drive one
+ * client instance from a single thread; {@code StarRocksCdcSourceTask} keeps all of its JDBC on the
+ * poll thread for exactly this reason (its {@code commit()} callback runs on a different Connect
+ * thread and deliberately issues no SQL of its own).
+ *
  * <p>Not unit-tested per the implementation plan for this task; connection behavior is exercised
  * by the Task 8 integration smoke test instead.
  */
 public class StarRocksJdbcClient implements CdcClient {
 
+    private static final Logger LOG = LoggerFactory.getLogger(StarRocksJdbcClient.class);
+
     private static final String MYSQL_SCHEME_PREFIX = "jdbc:mysql://";
     private static final String MARIADB_SCHEME_PREFIX = "jdbc:mariadb://";
     private static final long RETRY_PAUSE_MS = 500L;
+
+    /**
+     * Fetch size used for the two streaming reads. MariaDB streams a result set row-by-row for
+     * <em>any</em> positive fetch size, so a plain batch size is all that is needed here.
+     *
+     * <p>It must not be {@code Integer.MIN_VALUE}: that is the MySQL Connector/J streaming idiom
+     * and is MySQL-driver-specific. {@code org.mariadb.jdbc.Statement#setFetchSize} rejects every
+     * negative value with {@code SQLException("invalid fetch size")}, so passing it here would
+     * throw before the query was ever sent -- i.e. no row could ever be read.
+     */
+    private static final int STREAM_FETCH_SIZE = 1024;
 
     static {
         try {
@@ -77,7 +102,18 @@ public class StarRocksJdbcClient implements CdcClient {
     public long bookmarkCreate(String db, String table, String holder, long ttlMs) throws SQLException {
         String sql = SqlBuilder.bookmarkCreateSql(db, table, holder, ttlMs);
         String result = executeBookmarkFunction(sql);
-        return Long.parseLong(result);
+        // executeBookmarkFunction returns null for an empty result set, and a raw parseLong would
+        // then throw NumberFormatException -- unchecked, so it escapes poll()'s catch (SQLException)
+        // and kills the task instead of being handled as the SQL failure it is.
+        if (result == null) {
+            throw new SQLException("bookmark_create returned no bookmark id for " + db + "." + table);
+        }
+        try {
+            return Long.parseLong(result.trim());
+        } catch (NumberFormatException e) {
+            throw new SQLException(
+                    "bookmark_create returned a non-numeric bookmark id for " + db + "." + table + ": " + result, e);
+        }
     }
 
     @Override
@@ -140,7 +176,9 @@ public class StarRocksJdbcClient implements CdcClient {
             Connection c = getConnection();
             try (Statement stmt = c.createStatement();
                  ResultSet rs = stmt.executeQuery(sql)) {
-                rs.next();
+                if (!rs.next()) {
+                    throw new SQLException("table not found: " + db + "." + table);
+                }
                 String ddl = rs.getString(2);
                 return ddl != null && ddl.contains("\"enable_change_data_capture\" = \"true\"");
             }
@@ -157,10 +195,11 @@ public class StarRocksJdbcClient implements CdcClient {
         try {
             Connection c = getConnection();
             try (Statement stmt = c.createStatement()) {
-                stmt.setFetchSize(Integer.MIN_VALUE);
+                stmt.setFetchSize(STREAM_FETCH_SIZE);
+                Calendar utc = newUtcCalendar();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
-                        consumer.accept(extractRow(rs, cols.size()));
+                        consumer.accept(extractRow(rs, cols.size(), utc));
                     }
                 }
             }
@@ -177,7 +216,8 @@ public class StarRocksJdbcClient implements CdcClient {
         try {
             Connection c = getConnection();
             try (Statement stmt = c.createStatement()) {
-                stmt.setFetchSize(Integer.MIN_VALUE);
+                stmt.setFetchSize(STREAM_FETCH_SIZE);
+                Calendar utc = newUtcCalendar();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     // The last two projected columns are always __CHANGE_TYPE__ (int) and
                     // __ROW_VERSION__ (long); extractRow only covers the leading cols.size()
@@ -185,7 +225,7 @@ public class StarRocksJdbcClient implements CdcClient {
                     int changeTypeIdx = cols.size() + 1;
                     int rowVersionIdx = cols.size() + 2;
                     while (rs.next()) {
-                        Object[] row = extractRow(rs, cols.size());
+                        Object[] row = extractRow(rs, cols.size(), utc);
                         int changeType = rs.getInt(changeTypeIdx);
                         long rowVersion = rs.getLong(rowVersionIdx);
                         consumer.accept(row, changeType, rowVersion);
@@ -223,9 +263,9 @@ public class StarRocksJdbcClient implements CdcClient {
      */
     private String executeBookmarkFunction(String sql) throws SQLException {
         int totalUrls = urls.size();
+        int attempts = Math.max(1, config.maxRetries());
         SQLException lastEx = null;
         for (int lap = 0; lap < totalUrls; lap++) {
-            int attempts = Math.max(1, config.maxRetries());
             boolean redirected = false;
             for (int attempt = 0; attempt < attempts; attempt++) {
                 try {
@@ -238,7 +278,10 @@ public class StarRocksJdbcClient implements CdcClient {
                     lastEx = e;
                     if (isLeaderRedirect(e)) {
                         closeQuietlyCurrent();
+                        String from = urls.get(urlIndex);
                         rotateUrl();
+                        LOG.warn("Bookmark function must run on the FE leader; rotating from {} to {}",
+                                from, urls.get(urlIndex));
                         redirected = true;
                         break;
                     }
@@ -315,16 +358,37 @@ public class StarRocksJdbcClient implements CdcClient {
     // Row extraction shared by streamSnapshot/streamChanges.
     // ------------------------------------------------------------------
 
-    private static Object[] extractRow(ResultSet rs, int columnCount) throws SQLException {
+    /**
+     * Builds the UTC calendar handed to every {@code getDate}/{@code getTimestamp} call of one
+     * streaming read.
+     *
+     * <p>Without an explicit calendar the driver materializes temporal values in the JVM default
+     * zone, which breaks Kafka Connect's logical types on any worker not running in UTC. Connect's
+     * {@code Date} logical type is defined as UTC midnight, so a local-midnight {@code
+     * java.sql.Date} makes JsonConverter/AvroConverter throw {@code DataException("Kafka Connect
+     * Date type should not have any time fields set to non-zero values")}; a {@code Timestamp}
+     * read in local time silently lands the instant off by the worker's UTC offset.
+     *
+     * <p>{@link Calendar} is not thread-safe, so this is deliberately not a shared static: one
+     * instance is created per streaming read and stays confined to the poll thread driving it
+     * (the MariaDB date/timestamp codecs {@code clear()} it before each use, so reuse across the
+     * rows of a single read is safe).
+     */
+    private static Calendar newUtcCalendar() {
+        return Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+    }
+
+    private static Object[] extractRow(ResultSet rs, int columnCount, Calendar utc) throws SQLException {
         ResultSetMetaData meta = rs.getMetaData();
         Object[] row = new Object[columnCount];
         for (int i = 1; i <= columnCount; i++) {
-            row[i - 1] = extractValue(rs, meta, i);
+            row[i - 1] = extractValue(rs, meta, i, utc);
         }
         return row;
     }
 
-    private static Object extractValue(ResultSet rs, ResultSetMetaData meta, int index) throws SQLException {
+    private static Object extractValue(ResultSet rs, ResultSetMetaData meta, int index, Calendar utc)
+            throws SQLException {
         Object value;
         switch (meta.getColumnType(index)) {
             case Types.DECIMAL:
@@ -332,10 +396,10 @@ public class StarRocksJdbcClient implements CdcClient {
                 value = rs.getBigDecimal(index);
                 break;
             case Types.DATE:
-                value = rs.getDate(index);
+                value = rs.getDate(index, utc);
                 break;
             case Types.TIMESTAMP:
-                value = rs.getTimestamp(index);
+                value = rs.getTimestamp(index, utc);
                 break;
             case Types.BIT:
             case Types.BOOLEAN:
