@@ -33,6 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
@@ -214,8 +215,42 @@ public class StarRocksCdcSourceConnectorTest {
         newConnector(fake).start(props);
 
         // One throwaway bookmark on the first table only, released again straight away.
-        assertEquals(Collections.singletonList("db1.t1:kc:c1"), fake.createdBookmarks);
-        assertEquals(Collections.singletonList("db1.t1:1:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList("db1.t1:kc:c1:preflight"), fake.createdBookmarks);
+        assertEquals(Collections.singletonList("db1.t1:1:kc:c1:preflight"), fake.releasedBookmarks);
+    }
+
+    /**
+     * The probe must never borrow the tasks' holder id. {@code bookmark_create} is idempotent per
+     * holder: on a restart where the first captured table is idle, a probe running under the task
+     * holder would be handed back the table's still-held committed bookmark, and the probe's
+     * release would then drop the task's own reference to it and delete the very bookmark the
+     * durable offset names -- a task that dies (or silently re-reads the whole table) on every
+     * restart. A distinct holder makes create acquire a second, independent reference and makes
+     * the release drop only that one.
+     */
+    @Test
+    public void testPreflightProbeUsesDistinctHolder() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "DUP_KEYS");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+        props.put("name", "c1");
+
+        newConnector(fake).start(props);
+
+        // The holder StarRocksCdcSourceTask#start would compute for this same connector name.
+        String taskHolder = new StarRocksCdcSourceConfig(props).holderId("c1");
+        assertEquals("kc:c1", taskHolder);
+
+        assertEquals(1, fake.createHolders.size());
+        assertEquals(1, fake.releaseHolders.size());
+        String probeHolder = fake.createHolders.get(0);
+        assertEquals("the probe must release under the very holder it created with",
+                probeHolder, fake.releaseHolders.get(0));
+        assertNotEquals("the preflight probe must not share the task's holder id",
+                taskHolder, probeHolder);
+        assertTrue("the probe holder should still be derived from the task holder, was: " + probeHolder,
+                probeHolder.startsWith(taskHolder));
     }
 
     /**
@@ -236,6 +271,9 @@ public class StarRocksCdcSourceConnectorTest {
         final Map<String, List<ColumnMeta>> colsByTable = new HashMap<>();
         final List<String> createdBookmarks = new ArrayList<>();
         final List<String> releasedBookmarks = new ArrayList<>();
+        /** Holder ids, verbatim, as handed to bookmarkCreate / bookmarkRelease. */
+        final List<String> createHolders = new ArrayList<>();
+        final List<String> releaseHolders = new ArrayList<>();
         /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
         SQLException bookmarkCreateFailure;
         private long nextBookmarkId = 1L;
@@ -243,6 +281,7 @@ public class StarRocksCdcSourceConnectorTest {
         @Override
         public long bookmarkCreate(String db, String table, String holder, long ttlMs) throws SQLException {
             createdBookmarks.add(db + "." + table + ":" + holder);
+            createHolders.add(holder);
             if (bookmarkCreateFailure != null) {
                 throw bookmarkCreateFailure;
             }
@@ -252,6 +291,7 @@ public class StarRocksCdcSourceConnectorTest {
         @Override
         public void bookmarkRelease(String db, String table, long bookmarkId, String holder) {
             releasedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
+            releaseHolders.add(holder);
         }
 
         @Override

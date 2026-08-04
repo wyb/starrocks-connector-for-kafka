@@ -49,7 +49,8 @@ import java.util.Map;
  *       would collide with the CDC metadata pseudo-columns appended to every CHANGES read (see
  *       {@code StarRocksJdbcClient#streamChanges});</li>
  *   <li>bookmark meta functions being disabled cluster-wide, proven by actually creating and
- *       releasing one throwaway bookmark -- see {@link #probeBookmarkFunctions}.</li>
+ *       releasing one throwaway bookmark under a holder id of the probe's own -- see {@link
+ *       #probeBookmarkFunctions}.</li>
  * </ul>
  * Any other {@link SQLException} encountered while probing a table (e.g. the table does not
  * exist) is likewise wrapped into a {@link ConnectException} rather than left to propagate raw.
@@ -67,6 +68,10 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     // TTL of the throwaway preflight bookmark. Short, because it is released immediately and only
     // needs to survive its own round trip: if the release fails, it expires on its own shortly.
     private static final long PROBE_BOOKMARK_TTL_MS = 60_000L;
+
+    // Suffix that makes the preflight probe's holder id distinct from the one the tasks use.
+    // See probeBookmarkFunctions() for why the two must never be the same string.
+    private static final String PROBE_HOLDER_SUFFIX = ":preflight";
 
     private Map<String, String> props;
 
@@ -122,9 +127,27 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * {@code getCause()} levels inside a per-table poll failure after the client's silent retries.
      * The release is best-effort: it is the create that proves the gate is open, and a leaked
      * probe bookmark expires within {@link #PROBE_BOOKMARK_TTL_MS}.
+     *
+     * <p><b>The probe's holder id must differ from the tasks' holder id -- do not "simplify" the
+     * {@link #PROBE_HOLDER_SUFFIX} away.</b> {@code bookmark_create} is idempotent per holder: when
+     * the table's partition meta is unchanged <i>and</i> the given holder already references the
+     * table's newest bookmark, FE's {@code TableBookmarkTracker.create} raises
+     * {@code AlreadyAtLatestException} and {@code MetaFunctions.bookmark_create} turns that into a
+     * plain return of the <i>existing</i> bookmark id (this is exactly the connector's idle-dedup
+     * behavior, see {@code StarRocksCdcSourceTask#poll}). So if the probe reused the task holder
+     * {@code kc:<name>}, then on any restart of {@link #start} -- worker restart, config edit,
+     * rebalance -- where the first captured table has produced no new version since its last
+     * committed bookmark {@code B}, the probe would be handed back that still-held {@code B} and
+     * its release would drop the task's own reference to it, deleting {@code B} once the tracker
+     * empties. The task would then restore durable offset {@code B}, issue
+     * {@code [_CHANGES_B_head_]}, and get "bookmark B not found": a task killed on every restart
+     * under {@code policy=fail}, or a silent full re-read of the table under
+     * {@code policy=resnapshot}. With a distinct holder, {@code create} takes the
+     * {@code AcquireReference} branch instead and the release drops only the probe's own reference,
+     * leaving the task's reference -- and therefore the bookmark itself -- intact.
      */
     private void probeBookmarkFunctions(CdcClient client, StarRocksCdcSourceConfig config, String db, String table) {
-        String holder = config.holderId(props.getOrDefault("name", "default"));
+        String holder = config.holderId(props.getOrDefault("name", "default")) + PROBE_HOLDER_SUFFIX;
         long bookmarkId;
         try {
             bookmarkId = client.bookmarkCreate(db, table, holder, PROBE_BOOKMARK_TTL_MS);
