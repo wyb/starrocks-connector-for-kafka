@@ -104,7 +104,12 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     private void preflightCheckTable(CdcClient client, String db, String t) {
         try {
             String model = client.fetchTableModel(db, t);
-            if (model != null && model.contains("UNQ")) {
+            // TABLE_MODEL is FE's KeysType enum rendered via toString(): the real runtime value
+            // is "UNIQUE_KEYS" (InformationSchemaDataSource sets table_model from
+            // olapTable.getKeysType().toString(), and the KeysType enum has no toString()
+            // override), while some docs describe it as "UNQ_KEYS". Both spellings are checked
+            // so this guard cannot go inert against either one.
+            if (model != null && (model.contains("UNQ") || model.contains("UNIQUE"))) {
                 throw new ConnectException(
                         "table " + db + "." + t + " uses UNIQUE KEY model, which CHANGES does not support");
             }
