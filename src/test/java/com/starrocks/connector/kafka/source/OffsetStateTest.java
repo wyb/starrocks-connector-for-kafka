@@ -67,4 +67,13 @@ public class OffsetStateTest {
         assertEquals(5L, s.bookmarkId);
         assertFalse(s.snapshotDone);
     }
+
+    @Test
+    public void testMissingBookmarkIdIgnoresSnapshotDone() {
+        Map<String, Object> m = new HashMap<>();
+        m.put(OffsetState.KEY_SNAPSHOT_DONE, true);
+        OffsetState s = OffsetState.fromMap(m);
+        assertEquals(-1L, s.bookmarkId);
+        assertFalse(s.snapshotDone);
+    }
 }

@@ -68,16 +68,14 @@ public final class OffsetState {
      * snapshot_done 缺失或非 Boolean.TRUE → false。
      */
     public static OffsetState fromMap(Map<String, Object> raw) {
-        if (raw == null) {
+        if (raw == null || !raw.containsKey(KEY_BOOKMARK_ID)) {
             return fresh();
         }
 
         long bookmarkId = -1L;
-        if (raw.containsKey(KEY_BOOKMARK_ID)) {
-            Object bmId = raw.get(KEY_BOOKMARK_ID);
-            if (bmId instanceof Number) {
-                bookmarkId = ((Number) bmId).longValue();
-            }
+        Object bmId = raw.get(KEY_BOOKMARK_ID);
+        if (bmId instanceof Number) {
+            bookmarkId = ((Number) bmId).longValue();
         }
 
         boolean snapshotDone = false;
