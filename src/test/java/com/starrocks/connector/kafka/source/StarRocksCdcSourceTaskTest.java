@@ -199,8 +199,9 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     // ------------------------------------------------------------------
-    // Invariant 1: a bookmark is released only once commit() has authorized it, and commit() never
-    // authorizes the bookmark the durable offset names (the newest one Connect actually acked).
+    // Invariant 1: a bookmark is released only once commit() has authorized it, and commit()
+    // authorizes strictly below the ack watermark as it stood at the PREVIOUS commit() -- one whole
+    // commit cycle behind, so the fence can never be ahead of what the last flush made durable.
     // ------------------------------------------------------------------
 
     /** Acks every record as Kafka Connect would once its producer send completed. */
@@ -223,11 +224,63 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     /**
+     * The release fence lags the acks by one commit cycle, deliberately.
+     *
+     * <p>Connect calls {@code commitRecord} from the producer send callback, but the flush that
+     * precedes a {@code commit()} only persists the offsets snapshotted earlier on the task thread.
+     * So at the moment {@code commit()} runs, the ack watermark can already name a bookmark newer
+     * than the durable offset -- and releasing everything below the ack watermark would drop
+     * exactly the bookmark that flush just made durable. Acting on the previous cycle's watermark
+     * instead keeps the fence at or behind durability: the first {@code commit()} after acks
+     * arrive releases nothing, the second releases what has by then provably been superseded.
+     */
+    @Test
+    public void testCommitLagsOneCycleBehindAcks() throws Exception {
+        fake.enqueueHead("orders", 100L); // B1
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
+        task.start(baseProps());
+        List<SourceRecord> b1Records = task.poll();
+
+        fake.enqueueHead("orders", 101L); // B2
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        List<SourceRecord> b2Records = task.poll();
+
+        assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
+
+        // Both windows' records have been acked, so the ack watermark is 101 -- but the flush that
+        // is about to trigger this commit() may only have persisted the offset naming 100.
+        ack(b1Records);
+        ack(b2Records);
+
+        task.commit();
+        pollToFlushReleases();
+
+        assertTrue("first commit after acks released " + fake.released, fake.released.isEmpty());
+        assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
+
+        // One more commit cycle has now elapsed, so 101's offset is durable too and 100 is safe.
+        task.commit();
+        pollToFlushReleases();
+
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
+
+        // Still nothing newer: 101 is the ack watermark and stays pinned however often commit runs.
+        task.commit();
+        pollToFlushReleases();
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
+    }
+
+    /**
      * Safety property: whatever else commit() releases, it must never release the bookmark the
      * durably-committed offset names -- releasing it unpins that version for vacuum, and a restart
      * then resumes from a base StarRocks can no longer read ("bookmark N not found"), which
      * {@code policy=fail} turns into a permanently dead task and {@code policy=resnapshot} into a
-     * silent full re-read.
+     * silent full re-read. Commits are repeated here so the assertions bite after the one-cycle
+     * release lag has been paid off, not merely because the fence had not caught up yet.
      */
     @Test
     public void testCommitNeverReleasesTheAckedBookmark() throws Exception {
@@ -255,16 +308,23 @@ public class StarRocksCdcSourceTaskTest {
         ack(b1Records);
         ack(b2Records);
 
+        // First commit only arms the fence at the ack watermark; the second is the one that acts.
+        task.commit();
+        pollToFlushReleases();
         task.commit();
         pollToFlushReleases();
 
         assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
         assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
-        // Repeating commit() must not start releasing the acked bookmark either.
+        // Repeating commit() must not start releasing the acked bookmark either, however many
+        // further cycles run with no newer ack.
+        task.commit();
+        pollToFlushReleases();
         task.commit();
         pollToFlushReleases();
         assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
         // (b) Zero-row windows: two polls advance the position and append to the deque without
         // emitting any record, so no newer offset can ever become durable. The acked bookmark is
@@ -289,8 +349,12 @@ public class StarRocksCdcSourceTaskTest {
 
         assertEquals(Arrays.asList(200L, 201L, 202L), liveBookmarksOf(zeroRowTask));
 
-        zeroRowTask.commit();
-        zeroRowTask.poll();
+        // Run several commit cycles so the one-cycle release lag is fully paid off: the acked
+        // bookmark must still be there afterwards, because it is the oldest live one.
+        for (int cycle = 0; cycle < 3; cycle++) {
+            zeroRowTask.commit();
+            zeroRowTask.poll();
+        }
 
         assertTrue("released " + zeroRowFake.released, zeroRowFake.released.isEmpty());
         assertEquals(Arrays.asList(200L, 201L, 202L), liveBookmarksOf(zeroRowTask));
@@ -312,9 +376,12 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
 
         // No record has been acked, so no offset is known to be durable and nothing may be dropped,
-        // however many bookmarks have piled up.
-        task.commit();
-        pollToFlushReleases();
+        // however many bookmarks have piled up -- and however many commit cycles run, so that this
+        // pins the no-ack rule itself rather than just the one-cycle release lag.
+        for (int cycle = 0; cycle < 3; cycle++) {
+            task.commit();
+            pollToFlushReleases();
+        }
 
         assertTrue("released " + fake.released, fake.released.isEmpty());
         assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
