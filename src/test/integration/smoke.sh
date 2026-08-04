@@ -79,21 +79,55 @@ EOF
 docker compose cp "$OUT_DIR/worker.properties" kafka:/tmp/worker.properties
 docker compose cp ./source.properties kafka:/tmp/source.properties
 
+# Record the worker's PID inside the container. `&` forks, so $! is the child,
+# and the connect-standalone -> kafka-run-class -> java chain is all `exec`, which
+# preserves that PID. Matching by name does NOT work: the final argv contains the
+# class `org.apache.kafka.connect.cli.ConnectStandalone`, never the hyphenated
+# script name, so `pkill -f connect-standalone` silently matches nothing.
 start_worker() {
   docker compose exec -d kafka bash -c \
-    '/opt/kafka/bin/connect-standalone.sh /tmp/worker.properties /tmp/source.properties > /tmp/connect.log 2>&1'
+    'nohup /opt/kafka/bin/connect-standalone.sh /tmp/worker.properties /tmp/source.properties > /tmp/connect.log 2>&1 & echo $! > /tmp/connect.pid'
+  sleep 2
+  worker_pid=$(docker compose exec -T kafka cat /tmp/connect.pid 2>/dev/null | tr -d '\r\n' || true)
+  [ -n "$worker_pid" ] || fail "worker PID was not recorded — connect-standalone did not start"
+  docker compose exec -T kafka kill -0 "$worker_pid" 2>/dev/null \
+    || { docker compose exec -T kafka tail -40 /tmp/connect.log || true; fail "worker (pid $worker_pid) died immediately after start"; }
+  echo "worker started, pid=$worker_pid"
 }
+
+# Graceful SIGTERM so Connect flushes offsets, then prove the process is really
+# gone. Without this proof a failed kill would leave the original worker running
+# and the no-replay assertion below would pass for the wrong reason.
+stop_worker() {
+  local pid="$1"
+  docker compose exec -T kafka kill "$pid" || fail "kill of worker pid $pid failed"
+  for _ in $(seq 1 15); do
+    docker compose exec -T kafka kill -0 "$pid" 2>/dev/null || { echo "worker pid $pid stopped"; return 0; }
+    sleep 1
+  done
+  fail "worker pid $pid still alive 15s after SIGTERM — restart assertion would be meaningless"
+}
+
+# One partition, created explicitly: the d-before-c ordering assertion reads
+# consumer output line order as message order, which only holds within a partition.
+kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 \
+  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor 1
+
 start_worker
 
-echo "waiting for topic $TOPIC..."
-for _ in $(seq 1 24); do
-  if kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list 2>/dev/null | grep -qx "$TOPIC"; then
-    break
-  fi
-  sleep 5
+# Wait for the snapshot records themselves, not for the topic to exist — the
+# topic was pre-created above, so its presence proves nothing about the connector.
+echo "waiting for snapshot records in $TOPIC..."
+snapshot_count=0
+for _ in $(seq 1 20); do
+  snapshot_count=$(kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+    --topic "$TOPIC" --from-beginning --timeout-ms 5000 2>/dev/null | wc -l | tr -d ' ')
+  [ "${snapshot_count:-0}" -ge 3 ] && break
+  sleep 3
 done
-kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list 2>/dev/null | grep -qx "$TOPIC" \
-  || { docker compose exec -T kafka tail -50 /tmp/connect.log || true; fail "topic $TOPIC never appeared"; }
+[ "${snapshot_count:-0}" -ge 3 ] \
+  || { docker compose exec -T kafka tail -50 /tmp/connect.log || true; fail "snapshot records never arrived (saw ${snapshot_count:-0}, expected >= 3)"; }
+echo "snapshot records present ($snapshot_count)"
 
 step "4. apply UPDATE and DELETE"
 sr_sql "UPDATE $DB.$TABLE SET v=200 WHERE id=2;"
@@ -123,10 +157,11 @@ grep '"op":"d"' "$CONSUMED" | grep -q '"v":30' || fail "DELETE: missing op=d for
 echo "DELETE: op=d OK"
 
 step "6. crash recovery: no snapshot replay"
-docker compose exec -T kafka pkill -f connect-standalone || true
-sleep 3
+old_pid="$worker_pid"
+stop_worker "$old_pid"
 sr_sql "INSERT INTO $DB.$TABLE VALUES (4,40);"
 start_worker
+[ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart — the old process was never replaced"
 sleep 25
 
 kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \

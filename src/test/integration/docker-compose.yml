@@ -44,9 +44,9 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: smoke-cluster-00000000
     volumes:
-      # The shaded plugin jar and the generated worker/connector configs.
+      # The shaded plugin jar. Worker/connector configs are placed at /tmp by
+      # smoke.sh via `docker compose cp`.
       - ../../../target:/plugins:ro
-      - ./:/smoke:ro
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 5s
