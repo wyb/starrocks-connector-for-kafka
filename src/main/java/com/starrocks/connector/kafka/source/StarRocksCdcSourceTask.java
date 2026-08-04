@@ -20,17 +20,23 @@
 
 package com.starrocks.connector.kafka.source;
 
+import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
 import org.apache.kafka.connect.storage.OffsetStorageReader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Deque;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
  * Poll loop and bookmark state machine for the StarRocks CDC source connector's tasks.
@@ -38,11 +44,16 @@ import java.util.Map;
  * <p>This class is the correctness core of the connector. Three invariants hold across every
  * code path below and are pinned down by {@code StarRocksCdcSourceTaskTest}:
  * <ol>
- *   <li><b>Release-after-commit.</b> A bookmark is only ever released from {@link #commit()},
- *       which Connect invokes only after the offsets carried by previously returned records have
- *       been durably flushed. {@link #poll()} itself never releases anything, and {@code
- *       commit()} always keeps the two most-recently-created live bookmarks per table so a
- *       release can never race an offset flush that is still in flight.</li>
+ *   <li><b>Release-after-commit, fenced by the acked offset.</b> Nothing is released until {@link
+ *       #commit()} -- which Connect invokes only after the offsets carried by previously returned
+ *       records have been durably flushed -- has authorized it. {@code commit()} authorizes only
+ *       bookmarks strictly older than {@code lastAckedBookmark}, the newest bookmark id Connect
+ *       has actually confirmed for that table via {@link #commitRecord}; the acked bookmark itself
+ *       is always kept, since it is the version the durable offset names and therefore the vacuum
+ *       fence a restart must be able to resume from. Nothing has been acked yet means nothing is
+ *       released. {@code commit()} performs no SQL: it only hands the authorized ids to {@code
+ *       pendingReleases}, and {@link #poll()} issues the actual {@code bookmarkRelease} calls on
+ *       the task thread, so all JDBC stays on one thread (see {@code StarRocksJdbcClient}).</li>
  *   <li><b>Snapshot-crash semantics.</b> Every snapshot row's offset carries {@code
  *       snapshot_done=false}; every change record's offset carries {@code snapshot_done=true}.
  *       A crash at any point before the first change record's offset is durably committed
@@ -56,6 +67,8 @@ import java.util.Map;
  */
 public class StarRocksCdcSourceTask extends SourceTask {
 
+    private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceTask.class);
+
     static final class TableState {
         final String table;
         final String topic;
@@ -64,19 +77,25 @@ public class StarRocksCdcSourceTask extends SourceTask {
         ChangeRecordMapper mapper;
         long committedBookmark = -1L;
         boolean snapshotDone = false;
-        // Set once bootstrap() finishes a snapshot. The snapshot_done flag handed to
-        // toChangeRecord() is unconditionally true regardless of this field (change records are
-        // only ever produced once snapshotDone is true) -- this is kept for readability of the
-        // "first change record after a snapshot" narrative and possible future use, not because
-        // poll() branches on it.
-        boolean pendingSnapshotDoneFlag = false;
+        // The newest bookmark id Kafka Connect has confirmed a record for, per commitRecord();
+        // -1 while nothing has been acked yet. Only written from commitRecord() and only read from
+        // commit() -- both of which run on Connect's producer-callback / offset-committer threads
+        // rather than the poll thread -- so it is guarded by synchronized (liveBookmarks) too.
+        long lastAckedBookmark = -1L;
+        // Every bookmark this task has created for the table and not yet released, oldest first.
         // Shared between two threads per the Kafka Connect runtime contract: the task's own poll
         // thread appends via addLast (poll()/bootstrap()), while SourceTaskOffsetCommitter's
-        // single scheduled-executor thread drains it via size()/pollFirst() (commit(), scheduled
+        // single scheduled-executor thread drains the release-eligible prefix (commit(), scheduled
         // every offset.flush.interval.ms, default 60s) -- genuinely concurrent, not just
         // interleaved. Every access must hold synchronized (liveBookmarks); see poll(),
-        // bootstrap(), and commit().
+        // bootstrap(), commitRecord(), and commit().
         final Deque<Long> liveBookmarks = new ArrayDeque<>();
+        // Bookmarks commit() has authorized for release, handed over for the poll thread to
+        // actually release. commit() must not call into the JDBC client itself: the client is
+        // single-threaded and the poll thread may be mid-scan on it (see StarRocksJdbcClient's
+        // class javadoc), so the SQL round trip is deferred to the next poll() instead. Thread-safe
+        // on its own, so unlike liveBookmarks it needs no external monitor.
+        final Queue<Long> pendingReleases = new ConcurrentLinkedQueue<>();
 
         TableState(String table, String topic) {
             this.table = table;
@@ -140,6 +159,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 started.add(ts);
             }
             tables = started;
+            LOG.info("CDC source task started: tables={}, holder={}, snapshot.mode={}, nontrackable.policy={}, "
+                            + "poll.intervalms={}, bookmark.ttlms={}",
+                    taskTables, holder, config.snapshotMode(), config.nonTrackablePolicy(), pollIntervalMs, ttlMs);
         } catch (SQLException e) {
             throw new ConnectException("Failed to start CDC source task", e);
         }
@@ -170,6 +192,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     public List<SourceRecord> poll() throws InterruptedException {
         List<SourceRecord> out = new ArrayList<>();
         for (TableState t : tables) {
+            drainPendingReleases(t);
             try {
                 if (!t.snapshotDone) {
                     bootstrap(t, out);
@@ -183,15 +206,17 @@ public class StarRocksCdcSourceTask extends SourceTask {
                     t.liveBookmarks.addLast(head);
                 }
                 final long base = t.committedBookmark;
+                final int emittedBefore = out.size();
                 client.streamChanges(db, t.table, colNames(t), base, head, (row, changeType, rowVersion) -> {
-                    SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head,
-                            consumeSnapshotDoneFlag(t));
+                    SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true);
                     out.add(r);
                     if (tombstones && changeType == 1) {
                         out.add(t.mapper.tombstoneFor(r));
                     }
                 });
                 t.committedBookmark = head;
+                LOG.info("Emitted CDC window for {}.{}: bookmark {} -> {}, {} record(s)",
+                        db, t.table, base, head, out.size() - emittedBefore);
             } catch (NonTrackableException e) {
                 applyPolicy(t, e);
             } catch (SQLException e) {
@@ -211,48 +236,121 @@ public class StarRocksCdcSourceTask extends SourceTask {
             t.liveBookmarks.addLast(b0);
         }
         if (snapshotInitial) {
+            LOG.info("Starting snapshot of {}.{} at bookmark {}", db, t.table, b0);
+            int rowsBefore = out.size();
             client.streamSnapshot(db, t.table, colNames(t), b0, row -> out.add(t.mapper.toSnapshotRecord(row, b0)));
+            LOG.info("Finished snapshot of {}.{} at bookmark {}: {} row(s)",
+                    db, t.table, b0, out.size() - rowsBefore);
+        } else {
+            LOG.info("Snapshot skipped for {}.{}; streaming changes from bookmark {}", db, t.table, b0);
         }
         t.committedBookmark = b0;
         t.snapshotDone = true;
-        t.pendingSnapshotDoneFlag = true;
     }
 
     private void applyPolicy(TableState t, NonTrackableException e) {
         if (policyResnapshot) {
             // Leave liveBookmarks untouched: the bookmark just opened for this failed window was
-            // still really created server-side, so it is real and commit()'s retention rule (plus
+            // still really created server-side, so it is real and commit()'s release rule (plus
             // TTL as a backstop) still owns cleaning it up.
+            LOG.warn("CHANGES window not trackable for {}.{} from base bookmark {}; {}=resnapshot, so this table's "
+                            + "position is discarded and the whole table is re-read on the next poll. Cause: {}",
+                    db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, e.getMessage());
             t.snapshotDone = false;
             t.committedBookmark = -1L;
-            t.pendingSnapshotDoneFlag = false;
         } else {
+            LOG.error("CHANGES window not trackable for {}.{} from base bookmark {}; {}=fail, so the task stops. "
+                            + "Cause: {}",
+                    db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, e.getMessage());
             throw new ConnectException("CHANGES window not trackable for table " + t.table, e);
         }
     }
 
+    /**
+     * Issues the {@code bookmarkRelease} calls {@link #commit()} authorized, on the poll thread.
+     *
+     * <p>{@code commit()} runs on Connect's offset-committer thread and must not touch the JDBC
+     * client (single-threaded; the poll thread may be mid-scan on it), so it only enqueues ids and
+     * this drains them at the top of each table's poll iteration. Best-effort by design: a failed
+     * release leaks one pinned version until its TTL expires, which is survivable but invisible
+     * otherwise, hence the WARN naming the table and the id.
+     */
+    private void drainPendingReleases(TableState t) {
+        Long id;
+        while ((id = t.pendingReleases.poll()) != null) {
+            try {
+                client.bookmarkRelease(db, t.table, id, holder);
+            } catch (Exception e) {
+                LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
+                        + "expires", id, db, t.table, holder, e);
+            }
+        }
+    }
+
+    /**
+     * Records the newest bookmark id Kafka Connect has actually confirmed a record for, per table.
+     *
+     * <p>This is what makes {@link #commit()} safe. Connect's {@code commit()} says only "some
+     * offset flush completed", not which offset, and a bookmark can be created without ever
+     * producing a record (an empty CHANGES window still advances {@code committedBookmark}), so
+     * "keep the newest N" would eventually release the very bookmark the durable offset names --
+     * after which a restart resumes from a released base and the read fails as non-trackable.
+     * Tracking the acked id instead gives {@code commit()} a real fence.
+     */
+    @Override
+    public void commitRecord(SourceRecord record, RecordMetadata metadata) throws InterruptedException {
+        super.commitRecord(record, metadata);
+        if (tables == null || record == null) {
+            return;
+        }
+        Map<String, ?> offset = record.sourceOffset();
+        if (offset == null) {
+            return;
+        }
+        Object rawBookmark = offset.get(OffsetState.KEY_BOOKMARK_ID);
+        if (!(rawBookmark instanceof Number)) {
+            return;
+        }
+        TableState t = tableOf(record);
+        if (t == null) {
+            return;
+        }
+        // Records for one table can be acked out of order, so take the max rather than the latest.
+        long acked = ((Number) rawBookmark).longValue();
+        synchronized (t.liveBookmarks) {
+            if (acked > t.lastAckedBookmark) {
+                t.lastAckedBookmark = acked;
+            }
+        }
+    }
+
+    /**
+     * Authorizes the release of every bookmark strictly older than the table's acked bookmark.
+     *
+     * <p>Per the release-after-commit invariant, the acked bookmark itself is always kept: it is
+     * the version the durable offset names, so it must stay pinned against vacuum for a restart to
+     * be able to resume from it. Nothing acked yet ({@code lastAckedBookmark == -1}) releases
+     * nothing at all. The authorized ids are only enqueued here -- the {@code bookmarkRelease}
+     * round trips happen on the poll thread, in {@link #drainPendingReleases}, because this method
+     * runs on Connect's offset-committer thread and the JDBC client is single-threaded.
+     */
     @Override
     public void commit() {
-        if (tables == null || client == null) {
+        if (tables == null) {
             return;
         }
         for (TableState t : tables) {
-            // Compute the release set while holding the monitor, but make the actual
-            // client.bookmarkRelease call (a blocking SQL round-trip) outside it: this thread
-            // (the SourceTaskOffsetCommitter's committer thread) must never hold the lock across
-            // a slow or failing release, since that would block the poll thread out of its own
-            // addLast() calls in poll()/bootstrap() for as long as the release takes.
-            List<Long> toRelease = new ArrayList<>();
             synchronized (t.liveBookmarks) {
-                while (t.liveBookmarks.size() > 2) {
-                    toRelease.add(t.liveBookmarks.pollFirst());
+                if (t.lastAckedBookmark < 0) {
+                    continue;
                 }
-            }
-            for (Long old : toRelease) {
-                try {
-                    client.bookmarkRelease(db, t.table, old, holder);
-                } catch (Exception ignore) {
-                    // Best-effort: a release that fails here is cleaned up later by TTL expiry.
+                Iterator<Long> it = t.liveBookmarks.iterator();
+                while (it.hasNext()) {
+                    Long live = it.next();
+                    if (live < t.lastAckedBookmark) {
+                        it.remove();
+                        t.pendingReleases.add(live);
+                    }
                 }
             }
         }
@@ -265,16 +363,19 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /**
-     * Change records are only ever produced once {@code t.snapshotDone} is true, so the flag
-     * handed to {@link ChangeRecordMapper#toChangeRecord} is unconditionally {@code true}.
-     * Clearing {@code pendingSnapshotDoneFlag} here is purely bookkeeping for readability -- it
-     * does not gate the return value -- so every change record after a snapshot, first or not,
-     * correctly carries {@code snapshot_done=true}.
-     */
-    private boolean consumeSnapshotDoneFlag(TableState t) {
-        t.pendingSnapshotDoneFlag = false;
-        return true;
+    /** Resolves the {@link TableState} a record belongs to via its source partition, or null. */
+    private TableState tableOf(SourceRecord record) {
+        Map<String, ?> partition = record.sourcePartition();
+        if (partition == null) {
+            return null;
+        }
+        Object table = partition.get(OffsetState.KEY_TABLE);
+        for (TableState t : tables) {
+            if (t.table.equals(table)) {
+                return t;
+            }
+        }
+        return null;
     }
 
     private static List<String> colNames(TableState t) {

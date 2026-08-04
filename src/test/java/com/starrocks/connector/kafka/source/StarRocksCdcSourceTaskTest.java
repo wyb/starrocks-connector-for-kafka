@@ -199,12 +199,107 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     // ------------------------------------------------------------------
-    // Invariant 1: old bookmarks are released only from commit(), keeping the newest two.
+    // Invariant 1: a bookmark is released only once commit() has authorized it, and commit() never
+    // authorizes the bookmark the durable offset names (the newest one Connect actually acked).
     // ------------------------------------------------------------------
 
+    /** Acks every record as Kafka Connect would once its producer send completed. */
+    private void ack(List<SourceRecord> records) throws Exception {
+        for (SourceRecord r : records) {
+            task.commitRecord(r, null);
+        }
+    }
+
+    /**
+     * The release SQL is issued from the poll thread, so an authorized release only reaches the
+     * client on the next poll; this drives one idle poll to flush it.
+     */
+    private void pollToFlushReleases() throws Exception {
+        task.poll();
+    }
+
+    private static List<Long> liveBookmarksOf(StarRocksCdcSourceTask task) {
+        return new ArrayList<>(task.tables.get(0).liveBookmarks);
+    }
+
+    /**
+     * Safety property: whatever else commit() releases, it must never release the bookmark the
+     * durably-committed offset names -- releasing it unpins that version for vacuum, and a restart
+     * then resumes from a base StarRocks can no longer read ("bookmark N not found"), which
+     * {@code policy=fail} turns into a permanently dead task and {@code policy=resnapshot} into a
+     * silent full re-read.
+     */
     @Test
-    public void testCommitReleasesAllButNewestTwo() throws Exception {
+    public void testCommitNeverReleasesTheAckedBookmark() throws Exception {
+        // (a) Four bookmarks live, acked only through B2=101: B1=100 is releasable, B2 is not.
+        fake.enqueueHead("orders", 100L); // B1
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
+        task.start(baseProps());
+        List<SourceRecord> b1Records = task.poll();
+
+        fake.enqueueHead("orders", 101L); // B2
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        List<SourceRecord> b2Records = task.poll();
+
+        fake.enqueueHead("orders", 102L); // B3
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
+        task.poll();
+
+        fake.enqueueHead("orders", 103L); // B4
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{3, 300L}, 0, 5003L));
+        task.poll();
+
+        assertEquals(Arrays.asList(100L, 101L, 102L, 103L), liveBookmarksOf(task));
+
+        // Kafka Connect confirmed records up to and including B2's; B3/B4's are still in flight.
+        ack(b1Records);
+        ack(b2Records);
+
+        task.commit();
+        pollToFlushReleases();
+
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
+
+        // Repeating commit() must not start releasing the acked bookmark either.
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+
+        // (b) Zero-row windows: two polls advance the position and append to the deque without
+        // emitting any record, so no newer offset can ever become durable. The acked bookmark is
+        // then the oldest live one and nothing at all may be released -- releasing "all but the
+        // newest two" here would release exactly the acked bookmark.
+        FakeCdcClient zeroRowFake = new FakeCdcClient();
+        zeroRowFake.setColumns("orders", ORDERS_COLS);
+        zeroRowFake.setPrimaryKeys("orders", ORDERS_PKS);
+        StarRocksCdcSourceTask zeroRowTask = newTask(zeroRowFake);
+
+        zeroRowFake.enqueueHead("orders", 200L); // acked bookmark
+        zeroRowFake.enqueueSnapshotRows("orders", rows(new Object[]{7, 700L}));
+        zeroRowTask.start(baseProps());
+        for (SourceRecord r : zeroRowTask.poll()) {
+            zeroRowTask.commitRecord(r, null);
+        }
+
+        zeroRowFake.enqueueHead("orders", 201L);
+        assertNull(zeroRowTask.poll()); // window folded to zero rows: nothing emitted
+        zeroRowFake.enqueueHead("orders", 202L);
+        assertNull(zeroRowTask.poll());
+
+        assertEquals(Arrays.asList(200L, 201L, 202L), liveBookmarksOf(zeroRowTask));
+
+        zeroRowTask.commit();
+        zeroRowTask.poll();
+
+        assertTrue("released " + zeroRowFake.released, zeroRowFake.released.isEmpty());
+        assertEquals(Arrays.asList(200L, 201L, 202L), liveBookmarksOf(zeroRowTask));
+    }
+
+    @Test
+    public void testCommitReleasesNothingBeforeAnyAck() throws Exception {
         fake.enqueueHead("orders", 100L);
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
         task.start(baseProps());
         task.poll();
 
@@ -216,11 +311,13 @@ public class StarRocksCdcSourceTaskTest {
         fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
         task.poll();
 
+        // No record has been acked, so no offset is known to be durable and nothing may be dropped,
+        // however many bookmarks have piled up.
         task.commit();
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        pollToFlushReleases();
 
-        task.commit();
-        assertEquals(1, fake.released.size());
+        assertTrue("released " + fake.released, fake.released.isEmpty());
+        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
     }
 
     @Test
