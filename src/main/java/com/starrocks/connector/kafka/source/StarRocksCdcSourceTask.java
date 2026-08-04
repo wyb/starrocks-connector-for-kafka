@@ -70,6 +70,12 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // "first change record after a snapshot" narrative and possible future use, not because
         // poll() branches on it.
         boolean pendingSnapshotDoneFlag = false;
+        // Shared between two threads per the Kafka Connect runtime contract: the task's own poll
+        // thread appends via addLast (poll()/bootstrap()), while SourceTaskOffsetCommitter's
+        // single scheduled-executor thread drains it via size()/pollFirst() (commit(), scheduled
+        // every offset.flush.interval.ms, default 60s) -- genuinely concurrent, not just
+        // interleaved. Every access must hold synchronized (liveBookmarks); see poll(),
+        // bootstrap(), and commit().
         final Deque<Long> liveBookmarks = new ArrayDeque<>();
 
         TableState(String table, String topic) {
@@ -173,7 +179,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 if (head == t.committedBookmark) {
                     continue; // idle dedup: no new version since the last poll
                 }
-                t.liveBookmarks.addLast(head);
+                synchronized (t.liveBookmarks) {
+                    t.liveBookmarks.addLast(head);
+                }
                 final long base = t.committedBookmark;
                 client.streamChanges(db, t.table, colNames(t), base, head, (row, changeType, rowVersion) -> {
                     SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head,
@@ -199,7 +207,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     private void bootstrap(TableState t, List<SourceRecord> out) throws SQLException {
         long b0 = client.bookmarkCreate(db, t.table, holder, ttlMs);
-        t.liveBookmarks.addLast(b0);
+        synchronized (t.liveBookmarks) {
+            t.liveBookmarks.addLast(b0);
+        }
         if (snapshotInitial) {
             client.streamSnapshot(db, t.table, colNames(t), b0, row -> out.add(t.mapper.toSnapshotRecord(row, b0)));
         }
@@ -227,8 +237,18 @@ public class StarRocksCdcSourceTask extends SourceTask {
             return;
         }
         for (TableState t : tables) {
-            while (t.liveBookmarks.size() > 2) {
-                Long old = t.liveBookmarks.pollFirst();
+            // Compute the release set while holding the monitor, but make the actual
+            // client.bookmarkRelease call (a blocking SQL round-trip) outside it: this thread
+            // (the SourceTaskOffsetCommitter's committer thread) must never hold the lock across
+            // a slow or failing release, since that would block the poll thread out of its own
+            // addLast() calls in poll()/bootstrap() for as long as the release takes.
+            List<Long> toRelease = new ArrayList<>();
+            synchronized (t.liveBookmarks) {
+                while (t.liveBookmarks.size() > 2) {
+                    toRelease.add(t.liveBookmarks.pollFirst());
+                }
+            }
+            for (Long old : toRelease) {
                 try {
                     client.bookmarkRelease(db, t.table, old, holder);
                 } catch (Exception ignore) {
