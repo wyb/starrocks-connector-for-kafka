@@ -25,9 +25,10 @@ import java.util.Locale;
 
 /**
  * Signals that a CHANGES read failed because the requested version range is no longer
- * trackable by the BE (the window has aged out, or the bookmark pinning it has expired/been
- * released), as opposed to a transient or unrelated failure. Callers use this to decide when to
- * fall back to a fresh snapshot instead of retrying the same range.
+ * trackable -- the window has aged out, the bookmark pinning it has expired/been released, or
+ * FE-side planning rejected it outright (e.g. a partition was dropped, truncated, rewritten, or
+ * resharded since the base bookmark) -- as opposed to a transient or unrelated failure. Callers
+ * use this to decide when to fall back to a fresh snapshot instead of retrying the same range.
  */
 public class NonTrackableException extends Exception {
 
@@ -39,9 +40,12 @@ public class NonTrackableException extends Exception {
      * Classifies a SQLException raised while executing a CHANGES read.
      *
      * <p>Returns a wrapping {@link NonTrackableException} when the message contains
-     * {@code "CDC-ERROR-"}, or contains both {@code "bookmark"} and {@code "not found"}
-     * (case-insensitive in both checks); returns {@code null} for every other message, including
-     * a null message, telling the caller to propagate the original SQLException unchanged.
+     * {@code "CDC-ERROR-"} (a BE execution-time error), contains both {@code "bookmark"} and
+     * {@code "not found"} (a stale/expired bookmark reference), or contains
+     * {@code "not trackable"} (an FE planning-time {@code SemanticException} rejection, e.g. a
+     * dropped/rewritten/resharded partition or a partition/tablet hint that no longer resolves)
+     * -- all checks case-insensitive; returns {@code null} for every other message, including a
+     * null message, telling the caller to propagate the original SQLException unchanged.
      */
     public static NonTrackableException classify(SQLException e) {
         String message = e.getMessage();
@@ -51,7 +55,8 @@ public class NonTrackableException extends Exception {
         String lower = message.toLowerCase(Locale.ROOT);
         boolean isCdcError = lower.contains("cdc-error-");
         boolean isStaleBookmark = lower.contains("bookmark") && lower.contains("not found");
-        if (isCdcError || isStaleBookmark) {
+        boolean isPlanningTimeNotTrackable = lower.contains("not trackable");
+        if (isCdcError || isStaleBookmark || isPlanningTimeNotTrackable) {
             return new NonTrackableException(message, e);
         }
         return null;

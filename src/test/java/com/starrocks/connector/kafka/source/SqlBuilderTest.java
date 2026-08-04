@@ -69,6 +69,13 @@ public class SqlBuilderTest {
         assertNotNull(NonTrackableException.classify(new SQLException(
                 "CDC-ERROR-1 (CHANGE_NOT_TRACKABLE): CHANGES window on tablet 1 spans version 3 ...")));
         assertNotNull(NonTrackableException.classify(new SQLException("Bookmark 11952 not found")));
+        // FE planning-time SemanticExceptions (partition dropped/rewritten/resharded, or a
+        // partition/tablet hint that no longer resolves) never contain "CDC-ERROR-" or
+        // "bookmark"+"not found", but always contain "not trackable".
+        assertNotNull(NonTrackableException.classify(new SQLException(
+                "CHANGES from bookmark 5 to 9 on table 't' not trackable: physical partition 100 dropped")));
+        assertNotNull(NonTrackableException.classify(new SQLException(
+                "CHANGES on table 't' not trackable: partition p1 not present in the changeset")));
         assertNull(NonTrackableException.classify(new SQLException("Connection refused")));
         assertNull(NonTrackableException.classify(new SQLException((String) null)));
     }
