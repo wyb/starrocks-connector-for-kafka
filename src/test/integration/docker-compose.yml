@@ -1,8 +1,8 @@
 # Integration smoke environment for the StarRocks CDC source connector.
 #
 # Two services only. Kafka Connect is NOT a service: smoke.sh runs
-# connect-standalone inside the kafka container, mounting the shaded plugin
-# jar from ../../../target.
+# connect-standalone inside the kafka container, mounting the single-jar plugin
+# directory smoke.sh stages at ../../../target/smoke-plugin.
 #
 # Override images from the environment, e.g.
 #   STARROCKS_IMAGE=my-registry/celerdata-allin1:4.2 ./smoke.sh
@@ -44,9 +44,12 @@ services:
       KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
       CLUSTER_ID: smoke-cluster-00000000
     volumes:
-      # The shaded plugin jar. Worker/connector configs are placed at /tmp by
-      # smoke.sh via `docker compose cp`.
-      - ../../../target:/plugins:ro
+      # Exactly one plugin location, holding only the primary shaded jar: smoke.sh
+      # stages it there (step 0) before `docker compose up`. Mounting ../../../target
+      # itself would expose several plugin locations at once -- including
+      # original-*.jar, which has no bundled JDBC driver. Worker/connector configs are
+      # placed at /tmp by smoke.sh via `docker compose cp`.
+      - ../../../target/smoke-plugin:/plugins:ro
     healthcheck:
       test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list >/dev/null 2>&1"]
       interval: 5s

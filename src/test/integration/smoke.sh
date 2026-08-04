@@ -18,6 +18,8 @@ set -euo pipefail
 cd "$(dirname "$0")"
 REPO_ROOT="$(cd ../../.. && pwd)"
 JAR="$REPO_ROOT/target/starrocks-connector-for-kafka-1.0.5.jar"
+# Dedicated single-jar plugin directory, mounted at /plugins by docker-compose.yml.
+PLUGIN_DIR="$REPO_ROOT/target/smoke-plugin"
 OUT_DIR="$(mktemp -d)"
 CONSUMED="$OUT_DIR/consumed.json"
 DB=smoke
@@ -32,7 +34,7 @@ kafka()  { docker compose exec -T kafka "$@"; }
 cleanup() {
   printf '\n=== cleanup ===\n'
   docker compose down -v >/dev/null 2>&1 || true
-  rm -rf "$OUT_DIR"
+  rm -rf "$OUT_DIR" "$PLUGIN_DIR"
 }
 trap cleanup EXIT
 
@@ -43,6 +45,16 @@ jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSource
 jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
   || fail "mariadb JDBC driver missing from $JAR — the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
 echo "plugin jar OK (connector + JDBC driver present)"
+
+# Stage exactly one jar as the only plugin location. target/ itself must NOT be
+# mounted: after `mvn package` it also holds the -with-dependencies jar, the
+# original-*.jar (connector present, JDBC driver ABSENT -> IllegalStateException
+# at worker startup), classes/ and the assembly dirs. Connect scans each of those
+# as a separate plugin location, so which copy of the connector wins is arbitrary.
+rm -rf "$PLUGIN_DIR"
+mkdir -p "$PLUGIN_DIR"
+cp "$JAR" "$PLUGIN_DIR/"
+echo "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
 
 step "1. start containers"
 docker compose up -d
