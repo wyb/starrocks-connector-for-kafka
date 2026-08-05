@@ -1,0 +1,422 @@
+<title>StarRocks CDC Source Connector 使用指南</title>
+<style>
+  :root {
+    --bg: #f7f8f9;
+    --surface: #ffffff;
+    --ink: #1f262e;
+    --ink-2: #5a646e;
+    --line: #e3e6e9;
+    --accent: #0e7c86;
+    --accent-ink: #0a5b63;
+    --amber: #b26a00;
+    --code-bg: #eff1f3;
+    --chip-bg: #e9edee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181d;
+      --surface: #1a1f26;
+      --ink: #d9dee4;
+      --ink-2: #8b96a1;
+      --line: #2a3138;
+      --accent: #4fb3bd;
+      --accent-ink: #6fc5cd;
+      --amber: #e0a458;
+      --code-bg: #1c2228;
+      --chip-bg: #232a32;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181d;
+    --surface: #1a1f26;
+    --ink: #d9dee4;
+    --ink-2: #8b96a1;
+    --line: #2a3138;
+    --accent: #4fb3bd;
+    --accent-ink: #6fc5cd;
+    --amber: #e0a458;
+    --code-bg: #1c2228;
+    --chip-bg: #232a32;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f8f9;
+    --surface: #ffffff;
+    --ink: #1f262e;
+    --ink-2: #5a646e;
+    --line: #e3e6e9;
+    --accent: #0e7c86;
+    --accent-ink: #0a5b63;
+    --amber: #b26a00;
+    --code-bg: #eff1f3;
+    --chip-bg: #e9edee;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.85;
+    margin: 0;
+  }
+  main {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 48px 28px 96px;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 12.8px;
+    line-height: 1.7;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c { color: var(--ink-2); }
+
+  header.doc { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 8px; }
+  .eyebrow {
+    color: var(--accent);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    font-weight: 600;
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: 27px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; }
+  .meta span {
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .meta b { color: var(--ink); font-weight: 600; margin-left: 4px; }
+
+  h2 {
+    font-size: 19px;
+    font-weight: 700;
+    margin: 52px 0 14px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    text-wrap: balance;
+  }
+  h2 .no { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  h3 { font-size: 16px; font-weight: 650; margin: 30px 0 8px; }
+  p { margin: 10px 0; }
+  ul, ol { padding-left: 1.6em; margin: 10px 0; }
+  li { margin: 5px 0; }
+  strong { font-weight: 650; }
+
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.8px; line-height: 1.7; }
+  th {
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    font-weight: 650;
+    border-bottom: 1.5px solid var(--ink);
+    padding: 8px 14px 6px 2px;
+    white-space: nowrap;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 8px 14px 8px 2px; vertical-align: top; }
+  td code { white-space: nowrap; }
+
+  .invariant {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 12px 0;
+  }
+  .invariant .tag {
+    color: var(--accent-ink);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    display: block;
+    margin-bottom: 4px;
+  }
+  .decision { color: var(--amber); font-weight: 650; }
+
+  .arch { display: grid; gap: 10px; margin: 18px 0; }
+  .arch .box {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 12px 16px;
+  }
+  .arch .box h4 { margin: 0 0 6px; font-size: 13.5px; font-weight: 700; color: var(--accent-ink); }
+  .arch .box p { margin: 2px 0; font-size: 13.5px; color: var(--ink-2); }
+  .arch .flow { text-align: center; color: var(--ink-2); font-size: 12.5px; }
+
+  .dlog dt { font-weight: 650; margin-top: 10px; }
+  .dlog dt .d { color: var(--ink-2); font-weight: 400; font-size: 12.5px; margin-right: 8px; font-variant-numeric: tabular-nums; }
+  .dlog dd { margin: 2px 0 0 0; color: var(--ink-2); }
+</style>
+
+<main>
+<header class="doc">
+  <p class="eyebrow">STARROCKS-CONNECTOR-FOR-KAFKA · 使用指南</p>
+  <h1>StarRocks CDC Source Connector 使用指南</h1>
+  <div class="meta">
+    <span>版本<b>v1</b></span>
+    <span>交付语义<b>at-least-once</b></span>
+    <span>状态<b>未提交</b></span>
+  </div>
+</header>
+
+<h2 id="what-it-does"><span class="no">1</span>What It Does</h2>
+<p>StarRocks CDC source connector 是一个 Kafka Connect <strong>source</strong>（源）连接器——方向与本仓库中已有的 StarRocks sink connector 相反。它会把变更数据捕获（CDC）事件从 StarRocks 的<strong>存算分离（云原生）</strong>表持续流出到 Kafka topic，每个被捕获的表对应一个 topic。</p>
+<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium 风格的 envelope（<code>op</code>/<code>before</code>/<code>after</code>/<code>source</code>/<code>ts_ms</code>）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
+
+<h2 id="prerequisites"><span class="no">2</span>前置条件</h2>
+<ul>
+  <li><strong>需要一个 StarRocks 存算分离（云原生）集群。</strong> 本连接器依赖的 <code>[_BOOKMARK_]</code>/<code>[_CHANGES_]</code> 查询提示，以及 bookmark 元函数，在存算一体（shared-nothing）集群上不可用。</li>
+  <li><strong>必须开启 <code>enable_bookmark_meta_functions</code></strong>（默认值为 <code>false</code>）。在每个 FE 上执行：
+    <pre><code>ADMIN SET FRONTEND CONFIG ("enable_bookmark_meta_functions" = "true");</code></pre>
+    同时把这一行也加进 <code>fe.conf</code>，以便在 FE 重启后依然生效。
+  </li>
+  <li><strong>连接用户需要系统级 <code>OPERATE</code> 权限。</strong> <code>bookmark_create</code>/<code>bookmark_release</code> 受该权限管控，且只能在当前 FE leader 上执行：
+    <pre><code>GRANT OPERATE ON SYSTEM TO USER 'cdc_user'@'%';</code></pre>
+    你不需要自己把连接器指向 leader——在 <code>starrocks.jdbc.url</code> 中列出每一个 FE endpoint，当某次 bookmark 调用报出 "must run on the FE leader" 时，连接器会自动透明地轮转到 leader。
+  </li>
+  <li><strong>PRIMARY KEY 表必须把 <code>enable_change_data_capture</code> 设置为 <code>true</code></strong>——可以在 <code>CREATE TABLE</code> 时设置，也可以提前通过 <code>ALTER TABLE</code> 设置：
+    <pre><code>ALTER TABLE db1.orders SET ("enable_change_data_capture" = "true");</code></pre>
+    该属性只适用于存算分离的 PRIMARY KEY 表。请在连接器需要覆盖的版本范围<em>之前</em>就把它打开：该属性关闭期间写入的行无法被重放，任何跨越"关闭"时段的 CHANGES 窗口都会因不可追踪而失败（<code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)</code>）。
+  </li>
+  <li><strong>DUPLICATE KEY 和 AGGREGATE KEY 表不需要修改任何表属性即可使用</strong>，但仅限于只插入（insert-only）的工作负载。对这类表执行 <code>DELETE</code>/<code>TRUNCATE</code>，或者对任意表进行分区 drop/重写、schema 重写型的 <code>ALTER</code>、bucket 数量或 reshard 变更，都会使跨越该操作的 CHANGES 窗口变为不可追踪——参见<a href="#limitations">限制</a>。</li>
+  <li><strong>不支持 UNIQUE KEY 表。</strong> <code>CHANGES</code> 无法读取此类表，<code>StarRocksCdcSourceConnector</code> 会在启动时就直接拒绝该配置，而不是留到之后某个 task 运行时才失败。</li>
+  <li><strong>除上述条件外，没有额外的 FE 版本要求。</strong> 连接器只依赖已经发布的能力（<code>bookmark_create</code>/<code>bookmark_release</code>，以及 <code>[_CHANGES_]</code>/<code>[_BOOKMARK_]</code> 查询提示）；代码中没有最低版本检查。</li>
+</ul>
+
+<h2 id="full-configuration-example"><span class="no">3</span>完整配置示例</h2>
+<p><code>starrocks.jdbc.url</code> 指向 FE 的 <strong>MySQL 协议端口</strong>（默认为 <code>9030</code>）——这与 sink 连接器的 <code>starrocks.http.url</code> 不同，后者指向的是 HTTP/stream-load 端口。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>键</th><th>类型</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>starrocks.jdbc.url</code></td><td>String</td><td><em>(必填)</em></td><td>StarRocks FE MySQL 协议端点的 JDBC URL。多个 FE host 用逗号分隔（例如 <code>jdbc:mysql://fe1:9030,fe2:9030</code>），以便客户端在执行 bookmark 调用时可以轮转到 leader。</td></tr>
+  <tr><td><code>starrocks.database.name</code></td><td>String</td><td><em>(必填)</em></td><td>源 StarRocks 数据库的名称。</td></tr>
+  <tr><td><code>starrocks.username</code></td><td>String</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的用户名。需要 <code>OPERATE</code> 权限。</td></tr>
+  <tr><td><code>starrocks.password</code></td><td>Password</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的密码。以 Kafka Connect 的 <code>Password</code> 类型存储，因此会在日志和连接器状态 API 中被掩码处理。</td></tr>
+  <tr><td><code>starrocks.table.names</code></td><td>String</td><td><em>(必填)</em></td><td>需要捕获变更的表名列表，逗号分隔，均属于 <code>starrocks.database.name</code> 指定的数据库。</td></tr>
+  <tr><td><code>starrocks.table2topic.map</code></td><td>String</td><td><code>""</code>（空）</td><td>可选的表名到 Kafka topic 名称的映射，格式为 <code>table:topic,table:topic</code>。未在此列出的表会回退使用 <code>source.topic.prefix</code>。</td></tr>
+  <tr><td><code>source.topic.prefix</code></td><td>String</td><td><code>sr</code></td><td>用于为没有在 <code>starrocks.table2topic.map</code> 中显式配置映射的表派生 topic 名称的前缀：topic 名称为 <code>&lt;prefix&gt;.&lt;database&gt;.&lt;table&gt;</code>。</td></tr>
+  <tr><td><code>source.snapshot.mode</code></td><td>String</td><td><code>initial</code></td><td>是否在开始流式传输变更之前先进行一次初始快照。取值为 <code>initial</code>、<code>no_snapshot</code> 之一。<strong><code>no_snapshot</code> 不能与 <code>source.nontrackable.policy=resnapshot</code> 组合使用</strong>——这一组合会在启动时被 <code>ConfigException</code> 直接拒绝，因为 <code>resnapshot</code> 依赖一次全新快照来重建表的位置，而在快照被禁用的情况下它只会静默丢失变更。</td></tr>
+  <tr><td><code>source.poll.intervalms</code></td><td>Long</td><td><code>5000</code></td><td>在一次未产生任何记录的轮询之后，到下一次轮询之间的休眠毫秒数。</td></tr>
+  <tr><td><code>source.bookmark.ttlms</code></td><td>Long</td><td><code>604800000</code>（7 天）</td><td>支撑每张表位置的 bookmark 的存活时间（time-to-live），单位为毫秒。在当前版本中，这只是租约的兜底手段，而不是一个可续期的租约——参见<a href="#limitations">限制</a>。</td></tr>
+  <tr><td><code>source.nontrackable.policy</code></td><td>String</td><td><code>fail</code></td><td>当某张表的 CHANGES 窗口变为不可追踪时应采取的动作。取值为 <code>fail</code>、<code>resnapshot</code> 之一。<strong><code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code></strong>（即默认值）：与 <code>source.snapshot.mode=no_snapshot</code> 组合时会在启动时被 <code>ConfigException</code> 拒绝，因为此时没有任何快照可用于重建该表的位置。</td></tr>
+  <tr><td><code>source.netchanges</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会设置会话变量 <code>enable_cdc_net_change=true</code>，使 StarRocks 折叠中间变更，在一个窗口内针对每个 key 只返回最终的净变更。</td></tr>
+  <tr><td><code>source.tombstones.on.delete</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会在每条删除记录之后立即发出一条额外的 tombstone 记录（value 为 null，key 相同）。</td></tr>
+  <tr><td><code>source.maxretries</code></td><td>Int</td><td><code>3</code></td><td>一次 bookmark 调用在放弃前的尝试次数（对应 sink 连接器的 <code>sink.maxretries</code>）。</td></tr>
+  <tr><td><code>connect.timeoutms</code></td><td>Int</td><td><code>1000</code></td><td>连接 StarRocks 的尝试在超时前等待的毫秒数（与 sink 连接器使用相同的键名）。</td></tr>
+</table>
+</div>
+
+<p>一份完整的 <code>connect-standalone</code> 风格连接器属性文件：</p>
+
+<pre><code>name=starrocks-cdc-orders
+connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
+<span class="c"># 标准 Kafka Connect 属性：按 round-robin 方式把 starrocks.table.names</span>
+<span class="c"># 分片到这么多个 StarRocksCdcSourceTask 实例上。</span>
+tasks.max=1
+
+<span class="c"># 连接配置（为支持 leader 轮转，逗号分隔列出每个 FE host）</span>
+starrocks.jdbc.url=jdbc:mysql://fe1:9030,fe2:9030
+starrocks.database.name=db1
+starrocks.username=cdc_user
+starrocks.password=changeme
+
+<span class="c"># 捕获范围与 topic 映射</span>
+starrocks.table.names=orders,users
+starrocks.table2topic.map=orders:my_orders_topic
+source.topic.prefix=sr
+
+<span class="c"># 行为配置</span>
+source.snapshot.mode=initial
+source.poll.intervalms=5000
+source.bookmark.ttlms=604800000
+source.nontrackable.policy=fail
+source.netchanges=false
+source.tombstones.on.delete=false
+source.maxretries=3
+connect.timeoutms=1000</code></pre>
+
+<p>每条记录的 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>，因此需要配置支持 schema 的 <code>key.converter</code>/<code>value.converter</code>（例如启用了 <code>schemas.enable=true</code> 的 <code>JsonConverter</code>，或依赖 schema registry 的 Avro/Protobuf converter）。</p>
+
+<h2 id="message-format"><span class="no">4</span>消息格式</h2>
+<p>每条记录都是 Debezium 风格的 envelope：<code>op</code> / <code>before</code> / <code>after</code> / <code>source</code> / <code>ts_ms</code>，其中 <code>source</code> 携带 <code>db</code>、<code>table</code>、<code>row_version</code>，以及 <code>bookmark.{base, head}</code>。下面的示例都围绕同一个持续演进的场景：一张 PRIMARY KEY 表 <code>db1.orders(id INT, name VARCHAR, qty INT)</code>，以 <code>id</code> 为 key，被捕获到的 topic 是 <code>sr.db1.orders</code>。</p>
+<p>为便于阅读，下面的 JSON 展示的是每个 envelope 的逻辑字段取值；实际在网络上传输的字节格式取决于上文配置的 converter（例如 <code>JsonConverter</code> 会是一个 schema+payload 形式的 envelope）。</p>
+
+<h3>快照行（<code>op: "r"</code>）</h3>
+<p>初始快照是钉在同一个 bookmark 上的一次时间点读取，因此它发出的每一行都共享相同的 <code>bookmark.base</code>/<code>bookmark.head</code>——两者都等于该快照所钉住的 bookmark id。快照行的 <code>row_version</code> <strong>永远是 <code>0</code></strong>：一次钉住的读取会跨越多个分区，而每个分区各自处于自己的版本上，因此不存在单一版本可供报告。至于为什么这里不能使用 bookmark id，参见<a href="#row_version-across-record-types"><code>row_version</code> 在不同记录类型中的表现</a>。</p>
+<pre><code>{
+  "op": "r",
+  "before": null,
+  "after": { "id": 1, "name": "widget", "qty": 10 },
+  "source": {
+    "db": "db1",
+    "table": "orders",
+    "row_version": 0,
+    "bookmark": { "base": 1000, "head": 1000 }
+  },
+  "ts_ms": 1700000000000
+}</code></pre>
+<p>Key：<code>{ "id": 1 }</code>。（紧接着会有第二条 <code>op: "r"</code> 记录，对应 <code>id: 2</code>，<code>source</code> 取值相同。）</p>
+
+<h3 id="row_version-across-record-types"><code>row_version</code> 在不同记录类型中的表现</h3>
+<p><code>source.row_version</code> 和 <code>source.bookmark.{base,head}</code> 是<strong>两个完全不同的编号空间</strong>，这个区别在编写消费者逻辑时至关重要：</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>字段</th><th>编号空间</th><th>典型量级</th></tr>
+  <tr><td><code>op: "c"</code> / <code>op: "d"</code> 上的 <code>row_version</code></td><td>该分区的可见版本（visible version）——从 1 开始，每次 publish 加 1</td><td>较小，例如 <code>3</code>、<code>4</code>、<code>5</code></td></tr>
+  <tr><td><code>op: "r"</code> 上的 <code>row_version</code></td><td>无意义；恒为 <code>0</code></td><td><code>0</code></td></tr>
+  <tr><td><code>bookmark.base</code> / <code>bookmark.head</code></td><td>FE 全局 ID 生成器，与表 ID、tablet ID 共用同一套编号</td><td>较大，例如 <code>11952</code></td></tr>
+</table>
+</div>
+
+<p>不要把 bookmark id 与 <code>row_version</code> 相比较，也不要把 <code>row_version</code> 当作跨记录的排序依据。在同一个 Kafka partition 内，broker 自身的 offset 顺序已经给出了正确的先后关系——快照行在前，随后是按提交顺序排列的变更——因此按 offset 排序既足够又更安全。<code>row_version</code> 最好被当作诊断性的元数据来看待：它告诉你某个变更来自 StarRocks 的哪一次 publish，也正是它让一次 <code>UPDATE</code> 的两半（删除和插入）可以被识别为同一个事件（因为它们共享同一个值）。</p>
+
+<h3>插入（<code>op: "c"</code>）</h3>
+<p>一次 <code>INSERT</code> 写入 <code>(3, 'thingamajig', 30)</code>，会被下一次轮询捕获到（<code>base</code> 是上一次已提交的 bookmark，<code>head</code> 是本次轮询刚创建的 bookmark）：</p>
+<pre><code>{
+  "op": "c",
+  "before": null,
+  "after": { "id": 3, "name": "thingamajig", "qty": 30 },
+  "source": {
+    "db": "db1",
+    "table": "orders",
+    "row_version": 4,
+    "bookmark": { "base": 1000, "head": 1010 }
+  },
+  "ts_ms": 1700000005000
+}</code></pre>
+<p>Key：<code>{ "id": 3 }</code>。</p>
+
+<h3>更新（<code>op: "d"</code> + <code>op: "c"</code>，相同 key）</h3>
+<p>这里没有专门的 <code>op: "u"</code>。StarRocks 的 CHANGES 窗口把一次 SQL <code>UPDATE</code> 表示为一对操作——删除旧值、插入新值，且<strong>两者的 <code>row_version</code> 相同</strong>；连接器原样保留这种配对：对同一个 key，总是先发出删除记录，再发出插入记录。一条 <code>UPDATE ... SET qty = 300 WHERE id = 3</code> 会产生：</p>
+<pre><code>{
+  "op": "d",
+  "before": { "id": 3, "name": "thingamajig", "qty": 30 },
+  "after": null,
+  "source": {
+    "db": "db1",
+    "table": "orders",
+    "row_version": 5,
+    "bookmark": { "base": 1010, "head": 1020 }
+  },
+  "ts_ms": 1700000010000
+}</code></pre>
+<pre><code>{
+  "op": "c",
+  "before": null,
+  "after": { "id": 3, "name": "thingamajig", "qty": 300 },
+  "source": {
+    "db": "db1",
+    "table": "orders",
+    "row_version": 5,
+    "bookmark": { "base": 1010, "head": 1020 }
+  },
+  "ts_ms": 1700000010001
+}</code></pre>
+<p>两条记录共享 key <code>{ "id": 3 }</code> 和 <code>source.row_version: 5</code>，并且在同一个窗口内，对同一个 key，删除记录总是产生在插入记录之前。</p>
+
+<h3>删除（<code>op: "d"</code>）</h3>
+<p>一次 <code>DELETE FROM db1.orders WHERE id = 2</code>：</p>
+<pre><code>{
+  "op": "d",
+  "before": { "id": 2, "name": "gadget", "qty": 20 },
+  "after": null,
+  "source": {
+    "db": "db1",
+    "table": "orders",
+    "row_version": 6,
+    "bookmark": { "base": 1020, "head": 1030 }
+  },
+  "ts_ms": 1700000015000
+}</code></pre>
+<p>Key：<code>{ "id": 2 }</code>。如果 <code>source.tombstones.on.delete=true</code>，这条记录之后会立即跟着一条<strong>独立</strong>的 tombstone（墓碑）记录：它与删除记录共享相同的 key（及 key schema）、目标 topic，以及 Kafka Connect 内部的 <code>sourcePartition</code>/<code>sourceOffset</code> 记录（这是连接器自身用于恢复的 checkpoint，并非 Kafka broker 分配的 partition/offset），但它本身是一条独立的 Kafka 消息，value 为 <code>null</code>、value schema 也为 <code>null</code>——这是 Kafka Connect 中用于触发下游日志压缩（log compaction）的常规信号。</p>
+
+<h3>Key 与无 key 的表</h3>
+<p>Kafka 记录的 key 是一个仅由该表主键列构成的 <code>Struct</code>，同一张表的所有记录使用相同的 key schema。DUPLICATE KEY 和 AGGREGATE KEY 表没有主键，因此它们的记录携带的 key 为 <code>null</code>——这对顺序性意味着什么，参见<a href="#limitations">限制</a>。</p>
+
+<h2 id="semantics"><span class="no">5</span>语义</h2>
+<ul>
+  <li><strong>至少一次（at-least-once）投递。</strong> 一张表旧的 bookmark 只会在 task 的 <code>commit()</code> 回调中被释放，而 Kafka Connect 只在此前已返回记录所携带的 offset 被持久化 flush 之后才会调用这个回调——绝不会在 <code>poll()</code> 过程中提前释放。如果 task 在该 flush 完成之前崩溃并重启，同一个 CHANGES 窗口（或同一次快照）会在重启后被重放，产生重复记录。下游消费者应当基于记录的 key 做幂等处理，并按 Kafka partition 的顺序依次处理这些记录——重放会以相同的顺序重新投递相同的记录，因此按 key 的"后写覆盖前写"（last-write-wins）处理方式最终会收敛到一致结果——或者改为从经过压缩（compacted）的 topic 读取。<strong>不要</strong>通过要求 <code>source.row_version</code> 单调递增来做去重：它在不同记录类型之间不可比较（参见<a href="#row_version-across-record-types"><code>row_version</code> 在不同记录类型中的表现</a>），而且一次 <code>UPDATE</code> 的两条记录本来就会合法地共享同一个值。</li>
+  <li><strong>快照到增量的切换。</strong> 当 <code>source.snapshot.mode=initial</code> 时，某张表的第一次轮询会创建一个 bookmark，并通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 流式读取整张表，发出 <code>op: "r"</code> 行——其中每一行，包括最后一行，其 Kafka Connect offset 中都携带 <code>snapshot_done=false</code>；不存在被特别标记的"最后一条"快照行。内存中的"快照完成"标志会在那次轮询返回后立即翻转，因此紧接着的下一次轮询就会以同一个 bookmark id 作为 base 开始流式读取增量变更——快照与增量流之间不会跳过、也不会重复计数任何版本——它产生的第一条变更记录，正是第一条 offset 中携带 <code>snapshot_done=true</code> 的记录。这个标志只有在 Kafka Connect 自身的 offset flush 周期（按它自己的计时、独立于本连接器）把它持久化之后，才会成为该表已提交（durably-committed）的 offset。如果在那次 flush 之前发生崩溃，持久化的 offset 会停留在 <code>snapshot_done=false</code>（或者根本没有 offset），因此重启后会从头重做整个快照，而不是从中途继续。</li>
+  <li><strong><code>source.nontrackable.policy</code></strong> 控制当一个 CHANGES 窗口不再可读时应采取的动作（具体成因参见<a href="#limitations">限制</a>）：
+    <ul>
+      <li><code>fail</code>（默认）：task 抛出异常并停止。需要人工介入——例如调大 <code>source.bookmark.ttlms</code>、修复根本原因，或者把该表切换为 <code>resnapshot</code>。</li>
+      <li><code>resnapshot</code>：该表在内存中的位置会被丢弃，并在紧接着的下一次轮询中完全自动地基于一次全新快照重建。这并非没有代价：表越大，重新读取的代价也越大，表中目前仍存在的每一个 key 都会作为一条全新的 <code>op: "r"</code> 记录被重新投递，即便它之前已经被流式传输过一次——这在 at-least-once 语义下是可以接受的，但在大表或频繁触发 resnapshot 的表上，这一代价值得纳入考量。</li>
+    </ul>
+  </li>
+</ul>
+
+<h2 id="limitations"><span class="no">6</span>限制</h2>
+<ol>
+  <li><strong>空闲表可能会丢失其位置。</strong> 当前版本没有 bookmark 租约续期机制：如果一张表在超过 <code>source.bookmark.ttlms</code>（默认 7 天）的时间里都没有产生新版本，它的 bookmark 就会在 StarRocks 侧过期失效。下一次轮询针对该失效范围执行的 CHANGES 读取会因此失败并判定为不可追踪，从而触发 <code>fail</code>/<code>resnapshot</code>。对于负载突发或存在长时间空闲期的表，应调大 <code>source.bookmark.ttlms</code>，或把 <code>source.nontrackable.policy</code> 设置为 <code>resnapshot</code> 以自动自愈。请注意，<code>resnapshot</code> 这一缓解手段只在 <code>source.snapshot.mode=initial</code>（默认值）下可用：<code>source.nontrackable.policy=resnapshot</code> 与 <code>source.snapshot.mode=no_snapshot</code> 的组合会在启动时被 <code>ConfigException</code> 拒绝，因为这一组合恰恰无法自愈——没有快照可供重建，该表会静默跳过从已过期的 base bookmark 到新 bookmark 之间的全部变更。在采用 <code>no_snapshot</code> 的部署中，调大 <code>source.bookmark.ttlms</code> 是针对本条限制的唯一缓解手段。（租约续期已列入后续 roadmap，本版本尚未实现。）</li>
+  <li><strong><code>ts_ms</code> 是处理时间，而不是提交时间。</strong> 它是连接器构建该记录时的墙钟时间（wall-clock time），并不是该变更在 StarRocks 中被提交的时间。</li>
+  <li><strong>DUPLICATE KEY / AGGREGATE KEY 表没有 key，且只支持插入工作负载。</strong> 它们的记录携带的 Kafka key 为 <code>null</code>，因此 Kafka 默认的分区器（partitioner）在为它们分配分区时不提供任何跨分区的顺序保证。这类表也只有在纯插入（insert-only）工作负载下才是可追踪的：举例来说，对一张 DUPLICATE KEY 表执行 <code>DELETE</code>，会使对应的 CHANGES 窗口变为不可追踪（StarRocks 会报告 <code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE): CDC for DUP_KEYS does not support delete</code>）。AGGREGATE KEY 表报告的是（依据该表自身聚合函数计算出的）预聚合值，而不是原始插入的行。</li>
+  <li><strong>空表的快照在重启后会被无害地重复执行。</strong> 依据上文所述的快照崩溃不变式，只要重启发生在 <code>snapshot_done</code> 被持久化为 <code>true</code> 之前，就会重做整个快照；对于一张目前还没有任何行的表，这只是一次没有实际效果的空查询，唯一代价是一次多余的往返请求。</li>
+  <li><strong><code>resnapshot</code> 可能会重新投递已经发出过的变更。</strong> 在某个窗口被判定为不可追踪之前，该窗口已经产生的变更记录并不会被撤回；随后的全量 resnapshot 可能会再次重新投递相同的 key。这仍然在 at-least-once 的约定范围之内，但下游消费者应当对此有所准备。</li>
+  <li><strong>"不可追踪"的成因，以及该策略实际覆盖的范围。</strong> 除了空闲导致的 TTL 过期（第 1 条）之外，当自 base bookmark 以来底层数据的"形状"发生变化时，CHANGES 窗口也会变为不可追踪，例如：分区/表被 drop 或 truncate、schema 重写型的 <code>ALTER TABLE</code>（例如需要慢速 schema change 的类型变更）、bucket 数量变化或 reshard、不再能解析的 partition/tablet hint，或者窗口跨越了 <code>enable_change_data_capture</code> 被关闭又重新打开的一段时期。StarRocks 会以两种不同的形式报告这些情况——一种是 BE 执行期的 <code>CDC-ERROR-&lt;n&gt; (CODE)</code> 错误，另一种是 FE 规划期的拒绝，其错误信息中包含短语 "not trackable"——<code>NonTrackableException.classify</code> 能够识别这两种形式，以及过期/失效的 bookmark 引用，并把它们全部路由到已配置的 <code>source.nontrackable.policy</code>。任何<em>其他</em> SQL 错误——即 <code>classify</code> 无法识别的错误——完全不受该策略覆盖：无论 <code>source.nontrackable.policy</code> 配置的是 <code>fail</code> 还是 <code>resnapshot</code>，它都会直接让 task 失败。</li>
+  <li><strong>一次完整的快照、或一个完整的 CHANGES 窗口，都会被整体物化在 worker 的堆内存中。</strong> 每一次 <code>poll()</code> 只构建一个内存批次——没有分批（batching），也没有分页（pagination）——因此一次完整快照的全部记录，或者在一段长时间中断（outage）期间累积出来的窗口的全部记录，都会被同时持有，可能耗尽 Kafka Connect worker 的堆内存。控制手段是：把 <code>source.poll.intervalms</code> 调小，让每个窗口都保持较小的规模；以及在业务空闲时段再对大表做快照。</li>
+  <li><strong>每一次 task 重启，都会让上一个已提交的 bookmark 一直不被释放，直到它的 TTL 过期。</strong> 一个 bookmark 只有在 Kafka Connect 确认了取代它的那个 offset 之后才会被释放，因此如果 task 在此之前就停止了——例如 rebalance、worker 重启、修改配置——它最后持有的那个 bookmark 就会一直被持有。这个 bookmark 会继续把它对应的版本钉住、使其不被 vacuum 回收，最长可达 <code>source.bookmark.ttlms</code>（默认 7 天）。删除 connector 同样会以这种方式泄漏它当前持有的 bookmark：并不存在一个注销（unregister）步骤。因此，对一张大而繁忙的表频繁重启，会导致实际保留的版本数比该表自身的 vacuum 配置所暗示的更多。</li>
+  <li><strong>在 task 启动之后才给基表新增的列，要等到 task 重启才会被捕获。</strong> 每张表的 schema 只在 task 启动时解析一次，因此新增的列根本不会出现在发出的记录里。<em>删除</em>列的情况更糟：由于 connector 是显式投影列的，此后每一次轮询都会以 <code>Unknown column</code> 错误失败。对被捕获的表做过任何 DDL 之后，都应重启该 connector 的 task。</li>
+  <li><strong>Avro 要求 topic 名称本身是一个合法的 Avro schema 名称。</strong> 记录的 schema 名称是从 topic 名称派生出来的，因此带连字符（hyphen）的 topic——最容易通过 <code>starrocks.table2topic.map</code> 引入——会导致 <code>AvroConverter</code> 失败。只要 worker 使用的 converter 是 Avro，就应在 <code>starrocks.table2topic.map</code> 的取值以及 <code>source.topic.prefix</code> 中使用下划线而不是连字符。</li>
+</ol>
+
+<h2 id="quick-start"><span class="no">7</span>Quick Start</h2>
+<p>本节完整走一遍在<a href="#message-format">消息格式</a>中用到的同一个 <code>db1.orders</code> 场景。</p>
+
+<h3>1. 一次性集群配置</h3>
+<pre><code>ADMIN SET FRONTEND CONFIG ("enable_bookmark_meta_functions" = "true");
+GRANT OPERATE ON SYSTEM TO USER 'root'@'%';</code></pre>
+
+<h3>2. 创建一张开启 CDC 的 PRIMARY KEY 表，并写入一些数据</h3>
+<pre><code>CREATE TABLE db1.orders (
+    id INT NOT NULL,
+    name VARCHAR(64),
+    qty INT
+) PRIMARY KEY (id)
+DISTRIBUTED BY HASH(id)
+PROPERTIES ("enable_change_data_capture" = "true");
+
+INSERT INTO db1.orders VALUES (1, 'widget', 10), (2, 'gadget', 20);</code></pre>
+
+<h3>3. 构建插件并启动 <code>connect-standalone</code></h3>
+<pre><code>mvn clean package -DskipTests
+cp target/starrocks-connector-for-kafka-*-with-dependencies.jar /path/to/kafka-connect/plugins/</code></pre>
+<p>使用上文<a href="#full-configuration-example">完整配置示例</a>中的 <code>source.properties</code> 文件（把 <code>starrocks.jdbc.url</code>/凭据改成你自己集群的值），然后执行：</p>
+<pre><code>connect-standalone.sh worker.properties source.properties</code></pre>
+
+<h3>4. 观察快照数据到达</h3>
+<pre><code>kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+  --topic sr.db1.orders --from-beginning</code></pre>
+<p>会出现两条 <code>op: "r"</code> 记录，对应表中已有的两行数据，一行一条。</p>
+
+<h3>5. 产生变更并观察它们流式到达</h3>
+<pre><code>INSERT INTO db1.orders VALUES (3, 'thingamajig', 30);
+UPDATE db1.orders SET qty = 300 WHERE id = 3;
+DELETE FROM db1.orders WHERE id = 2;</code></pre>
+<p>在 <code>source.poll.intervalms</code>（默认 5 秒）之内，同一个 consumer 会依次打印：一条 <code>op: "c"</code>（对应插入）、紧接着一条 <code>op: "d"</code> 后跟一条针对 <code>id: 3</code> 的 <code>op: "c"</code>（对应更新），以及一条 <code>op: "d"</code>（对应删除）——从 StarRocks 表变更到 Kafka 消息的闭环就此完成。</p>
+</main>
