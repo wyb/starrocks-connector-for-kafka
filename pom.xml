@@ -31,6 +31,14 @@
                                 <includes>
                                     <include>com.starrocks:starrocks-stream-load-sdk</include>
                                     <include>org.mariadb.jdbc:mariadb-java-client</include>
+                                    <!-- ChangeRecordMapper builds its value with io.debezium.data.Envelope,
+                                         which pulls in io.debezium.pipeline.txmetadata.TransactionMonitor and
+                                         io.debezium.util.SchemaNameAdjuster at class-init time. Unit tests run
+                                         against the full compile classpath and cannot catch a missing entry
+                                         here: omitting it only shows up as a NoClassDefFoundError inside a
+                                         Connect worker. Verify with
+                                         "jar tf target/*-1.0.5.jar | grep io/debezium/data/Envelope". -->
+                                    <include>io.debezium:debezium-core</include>
                                 </includes>
                             </artifactSet>
                             <transformers>

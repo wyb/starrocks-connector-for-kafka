@@ -22,6 +22,7 @@ package com.starrocks.connector.kafka.source;
 
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
+import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
@@ -30,6 +31,7 @@ import org.junit.Test;
 
 import java.math.BigDecimal;
 import java.sql.Types;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -113,6 +115,41 @@ public class ChangeRecordMapperTest {
         long changeVersion = ((Struct) ((Struct) change.value()).get("source")).getInt64("row_version");
         assertTrue("snapshot row_version " + snapshotVersion + " must not outrank change row_version "
                 + changeVersion, snapshotVersion < changeVersion);
+    }
+
+    /**
+     * The envelope is Debezium's, so its field order is Debezium's canonical order -- not the
+     * op-first order this connector once hand-rolled. Downstream Avro/Protobuf schema identity is
+     * computed from that order, so a reordering is a compatibility break, not a cosmetic change.
+     */
+    @Test
+    public void testEnvelopeFieldOrderMatchesDebezium() {
+        SourceRecord r = mapper().toChangeRecord(new Object[]{1, 100L}, 0, 11955L, 11952L, 11955L, true);
+        List<String> names = new ArrayList<>();
+        for (Field f : ((Struct) r.value()).schema().fields()) {
+            names.add(f.name());
+        }
+        assertEquals(Arrays.asList("before", "after", "source", "op", "ts_ms", "transaction"), names);
+        assertEquals("sr.db1.orders.Envelope", ((Struct) r.value()).schema().name());
+    }
+
+    /**
+     * StarRocks' CHANGES stream carries no transaction metadata, so the field Debezium's builder
+     * always appends stays present in the schema (consumers can rely on it) and null in the value.
+     */
+    @Test
+    public void testTransactionFieldPresentAndNull() {
+        ChangeRecordMapper m = mapper();
+        for (SourceRecord r : Arrays.asList(
+                m.toChangeRecord(new Object[]{1, 100L}, 0, 11955L, 11952L, 11955L, true),
+                m.toChangeRecord(new Object[]{2, 200L}, 1, 11960L, 11958L, 11960L, false),
+                m.toSnapshotRecord(new Object[]{3, 300L}, 7L))) {
+            Struct value = (Struct) r.value();
+            Field transaction = value.schema().field("transaction");
+            assertNotNull("envelope schema must carry a transaction field", transaction);
+            assertTrue("transaction must be optional so it can stay unset", transaction.schema().isOptional());
+            assertNull(value.get("transaction"));
+        }
     }
 
     @Test

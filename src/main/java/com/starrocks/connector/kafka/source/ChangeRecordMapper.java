@@ -20,6 +20,7 @@
 
 package com.starrocks.connector.kafka.source;
 
+import io.debezium.data.Envelope;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
@@ -30,17 +31,30 @@ import org.apache.kafka.connect.source.SourceRecord;
 
 import java.math.BigDecimal;
 import java.sql.Types;
+import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Pure function mapper that turns a raw row (as {@code Object[]} + column metadata) into a
- * Debezium-style envelope {@link SourceRecord}: {@code {op, before, after, source, ts_ms}}.
+ * Debezium envelope {@link SourceRecord}.
+ *
+ * <p>The envelope is built by Debezium's own {@link Envelope} rather than by hand. That library
+ * owns the envelope's field set and field order -- {@code before, after, source, op, ts_ms,
+ * transaction} -- and the {@code op} code each factory method stamps ({@code r}/{@code c}/{@code
+ * d}). Do not go back to assembling it with {@link SchemaBuilder}/{@link Struct}: the canonical
+ * order is part of the Avro schema identity that downstream consumers and schema registries
+ * compare against, and a hand-rolled envelope drifts from it silently. The only pieces this class
+ * still defines are the two schemas Debezium cannot know about: the row schema (which must stay
+ * optional, since {@code before}/{@code after} are null on {@code c}/{@code d} respectively) and
+ * the StarRocks-specific {@code source} block.
+ *
+ * <p>{@code transaction} is left null: StarRocks' CHANGES stream carries no transaction metadata.
  *
  * <p>Never touches JDBC/ResultSet directly so it stays trivially testable. All schemas
- * (row/key/envelope) are built once in the constructor and reused for every record produced
- * by this instance.
+ * (row/key/source) and the envelope itself are built once in the constructor and reused for every
+ * record produced by this instance.
  */
 public final class ChangeRecordMapper {
 
@@ -48,21 +62,11 @@ public final class ChangeRecordMapper {
     // constants since the method signature (not this encoding detail) is what Task 5 depends on.
     private static final int CHANGE_TYPE_DELETE = 1;
 
-    private static final String OP_CREATE = "c";
-    private static final String OP_DELETE = "d";
-    private static final String OP_READ = "r";
-
     /**
      * {@code source.row_version} reported for a snapshot ({@code op="r"}) record. Snapshot rows
      * carry no version: see {@link #toSnapshotRecord} for why a bookmark id must not be used here.
      */
     private static final long SNAPSHOT_ROW_VERSION = 0L;
-
-    private static final String FIELD_OP = "op";
-    private static final String FIELD_BEFORE = "before";
-    private static final String FIELD_AFTER = "after";
-    private static final String FIELD_SOURCE = "source";
-    private static final String FIELD_TS_MS = "ts_ms";
 
     private static final String FIELD_DB = "db";
     private static final String FIELD_TABLE = "table";
@@ -82,7 +86,7 @@ public final class ChangeRecordMapper {
     private final Schema keySchema; // null when pkCols is empty
     private final Schema bookmarkSchema;
     private final Schema sourceSchema;
-    private final Schema envelopeSchema;
+    private final Envelope envelope;
 
     public ChangeRecordMapper(String db, String table, String topic,
                                List<ColumnMeta> cols, List<String> pkCols) {
@@ -111,13 +115,12 @@ public final class ChangeRecordMapper {
                 .field(FIELD_ROW_VERSION, Schema.INT64_SCHEMA)
                 .field(FIELD_BOOKMARK, bookmarkSchema)
                 .build();
-        this.envelopeSchema = SchemaBuilder.struct()
-                .name(topic + ".Envelope")
-                .field(FIELD_OP, Schema.STRING_SCHEMA)
-                .field(FIELD_BEFORE, rowSchema)
-                .field(FIELD_AFTER, rowSchema)
-                .field(FIELD_SOURCE, sourceSchema)
-                .field(FIELD_TS_MS, Schema.INT64_SCHEMA)
+        // withRecord() defines before and after from the one row schema; build() appends op, ts_ms
+        // and transaction, giving the canonical order before, after, source, op, ts_ms, transaction.
+        this.envelope = Envelope.defineSchema()
+                .withName(Envelope.schemaName(topic))
+                .withRecord(rowSchema)
+                .withSource(sourceSchema)
                 .build();
     }
 
@@ -128,18 +131,19 @@ public final class ChangeRecordMapper {
     public SourceRecord toChangeRecord(Object[] row, int changeType, long rowVersion,
                                         long baseBookmark, long headBookmark, boolean snapshotDoneFlag) {
         Struct rowStruct = toRowStruct(row);
-        boolean isDelete = changeType == CHANGE_TYPE_DELETE;
-        String op = isDelete ? OP_DELETE : OP_CREATE;
-        Struct before = isDelete ? rowStruct : null;
-        Struct after = isDelete ? null : rowStruct;
+        Struct source = buildSource(rowVersion, baseBookmark, headBookmark);
+        Instant ts = Instant.ofEpochMilli(System.currentTimeMillis());
 
-        Struct envelope = buildEnvelope(op, before, after, rowVersion, baseBookmark, headBookmark);
+        // delete() puts its record argument in before; create() puts it in after.
+        Struct value = changeType == CHANGE_TYPE_DELETE
+                ? envelope.delete(rowStruct, source, ts)
+                : envelope.create(rowStruct, source, ts);
 
         Map<String, String> sourcePartition = OffsetState.sourcePartition(db, table);
         Map<String, Object> sourceOffset = OffsetState.sourceOffset(headBookmark, snapshotDoneFlag);
         Struct key = toKeyStruct(row);
 
-        return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelopeSchema, envelope);
+        return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelope.schema(), value);
     }
 
     /**
@@ -158,13 +162,14 @@ public final class ChangeRecordMapper {
      */
     public SourceRecord toSnapshotRecord(Object[] row, long bookmarkId) {
         Struct after = toRowStruct(row);
-        Struct envelope = buildEnvelope(OP_READ, null, after, SNAPSHOT_ROW_VERSION, bookmarkId, bookmarkId);
+        Struct source = buildSource(SNAPSHOT_ROW_VERSION, bookmarkId, bookmarkId);
+        Struct value = envelope.read(after, source, Instant.ofEpochMilli(System.currentTimeMillis()));
 
         Map<String, String> sourcePartition = OffsetState.sourcePartition(db, table);
         Map<String, Object> sourceOffset = OffsetState.sourceOffset(bookmarkId, false);
         Struct key = toKeyStruct(row);
 
-        return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelopeSchema, envelope);
+        return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelope.schema(), value);
     }
 
     /**
@@ -181,28 +186,15 @@ public final class ChangeRecordMapper {
                 null);
     }
 
-    private Struct buildEnvelope(String op, Struct before, Struct after,
-                                  long rowVersion, long baseBookmark, long headBookmark) {
+    private Struct buildSource(long rowVersion, long baseBookmark, long headBookmark) {
         Struct bookmark = new Struct(bookmarkSchema)
                 .put(FIELD_BASE, baseBookmark)
                 .put(FIELD_HEAD, headBookmark);
-        Struct source = new Struct(sourceSchema)
+        return new Struct(sourceSchema)
                 .put(FIELD_DB, db)
                 .put(FIELD_TABLE, table)
                 .put(FIELD_ROW_VERSION, rowVersion)
                 .put(FIELD_BOOKMARK, bookmark);
-
-        Struct envelope = new Struct(envelopeSchema)
-                .put(FIELD_OP, op)
-                .put(FIELD_SOURCE, source)
-                .put(FIELD_TS_MS, System.currentTimeMillis());
-        if (before != null) {
-            envelope.put(FIELD_BEFORE, before);
-        }
-        if (after != null) {
-            envelope.put(FIELD_AFTER, after);
-        }
-        return envelope;
     }
 
     private Struct toRowStruct(Object[] row) {
