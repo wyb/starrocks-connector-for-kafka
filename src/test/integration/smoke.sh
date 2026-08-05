@@ -108,7 +108,7 @@ docker compose cp ./source.properties kafka:/tmp/source.properties
 # script name, so `pkill -f connect-standalone` silently matches nothing.
 start_worker() {
   docker compose exec -d kafka bash -c \
-    'nohup /opt/kafka/bin/connect-standalone.sh /tmp/worker.properties /tmp/source.properties > /tmp/connect.log 2>&1 & echo $! > /tmp/connect.pid'
+    'nohup /opt/kafka/bin/connect-standalone.sh /tmp/worker.properties /tmp/source.properties >> /tmp/connect.log 2>&1 & echo $! > /tmp/connect.pid'
   sleep 2
   worker_pid=$(docker compose exec -T kafka cat /tmp/connect.pid 2>/dev/null | tr -d '\r\n' || true)
   [ -n "$worker_pid" ] || fail "worker PID was not recorded — connect-standalone did not start"

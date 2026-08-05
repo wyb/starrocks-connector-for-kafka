@@ -41,8 +41,18 @@ TOPIC_RF="${TOPIC_RF:-1}"
 SUFFIX="$(date +%Y%m%d%H%M%S)_$$"
 DB="cdc_smoke_${SUFFIX}"
 TABLE=orders
+TZ_TABLE=tz_check
 CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
 TOPIC="sr.${DB}.${TABLE}"
+TZ_TOPIC="sr.${DB}.${TZ_TABLE}"
+
+# Fixed literals so the expected wire values below are constants, not derived at run time.
+# 2026-08-05T00:00:00Z is 20670 days after the epoch; 2026-08-05T12:34:56Z is 1785933296000 ms.
+# Both are what a UTC-Calendar read must produce regardless of the worker's own timezone.
+TZ_DATE="2026-08-05"
+TZ_DATETIME="2026-08-05 12:34:56"
+TZ_EXPECT_DAYS=20670
+TZ_EXPECT_MILLIS=1785933296000
 
 step() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf '\nFAIL: %s\n' "$1" >&2; exit 1; }
@@ -82,9 +92,11 @@ cleanup() {
     sr_sql "DROP DATABASE IF EXISTS $DB;" 2>/dev/null || note "could not drop $DB — drop it manually"
   fi
   if [ -n "${KAFKA_BIN:-}" ] && [ -n "${KAFKA_BOOTSTRAP:-}" ]; then
-    "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-      --delete --topic "$TOPIC" >/dev/null 2>&1 \
-      || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
+    for t in "$TOPIC" "$TZ_TOPIC"; do
+      "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+        --delete --topic "$t" >/dev/null 2>&1 \
+        || note "could not delete topic $t (delete.topic.enable=false?) — delete it manually"
+    done
   fi
   rm -rf "$OUT_DIR" "$PLUGIN_DIR"
 }
@@ -173,6 +185,17 @@ sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT)
 sr_sql "INSERT INTO $DB.$TABLE VALUES (1,10),(2,20),(3,30);"
 note "created $DB.$TABLE with 3 rows"
 
+# Temporal columns are read with an explicit UTC Calendar. Without it a non-UTC worker builds a
+# java.sql.Date at LOCAL midnight, which Kafka Connect's Date logical type rejects outright
+# (DataException in the converter -- the record never reaches Kafka), and DATETIME lands
+# silently shifted by the worker's offset. Neither failure is reachable from a unit test, nor
+# from an INT/BIGINT table -- hence this second table.
+sr_sql "CREATE TABLE $DB.$TZ_TABLE (id INT NOT NULL, d DATE, ts DATETIME)
+        PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
+sr_sql "INSERT INTO $DB.$TZ_TABLE VALUES (1, '$TZ_DATE', '$TZ_DATETIME');"
+note "created $DB.$TZ_TABLE with DATE/DATETIME (this worker's TZ: $(date +%Z))"
+
 step "2. stage plugin and configs"
 rm -rf "$PLUGIN_DIR"; mkdir -p "$PLUGIN_DIR"; cp "$JAR" "$PLUGIN_DIR/"
 note "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
@@ -201,20 +224,24 @@ starrocks.jdbc.url=jdbc:mysql://$SR_HOST:$SR_PORT
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
-starrocks.table.names=$TABLE
+starrocks.table.names=$TABLE,$TZ_TABLE
 source.topic.prefix=sr
 source.poll.intervalms=2000
 EOF
 
 # One partition: the delete-before-insert assertion reads consumer line order as
 # message order, which only holds within a partition.
-"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
-note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
+for t in "$TOPIC" "$TZ_TOPIC"; do
+  "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+    --create --if-not-exists --topic "$t" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
+  note "created topic $t (1 partition, RF=$TOPIC_RF)"
+done
 
+# Appends, never truncates: the restart in step 6 would otherwise throw away the
+# pre-restart half of the log, which is where the first bookmark releases land.
 start_worker() {
   "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker.properties" "$OUT_DIR/source.properties" \
-    > "$OUT_DIR/connect.log" 2>&1 &
+    >> "$OUT_DIR/connect.log" 2>&1 &
   worker_pid=$!
   sleep 5
   kill -0 "$worker_pid" 2>/dev/null \
@@ -231,6 +258,10 @@ stop_worker() {
 consume() {
   "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
     --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
+}
+consume_topic() {
+  "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+    --topic "$1" --from-beginning --timeout-ms "${2:-15000}" 2>/dev/null || true
 }
 
 step "3. start worker and wait for the snapshot"
@@ -291,12 +322,49 @@ reads_after=$(grep -c '"op":"r"' "$CONSUMED.2" || true)
 grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v=40) never surfaced"
 note "resumed from committed offset, no snapshot replay OK"
 
-step "7. bookmarks released"
-# The task keeps the newest two bookmarks per table by design; what must NOT
-# happen is unbounded growth. Surfaced for the operator rather than asserted,
-# since the exact count depends on how many commit cycles elapsed.
+step "7. temporal columns survive a non-UTC worker"
+consume_topic "$TZ_TOPIC" 15000 > "$OUT_DIR/tz.json"
+tz_rows=$(wc -l < "$OUT_DIR/tz.json" | tr -d ' ')
+# Arriving at all is the first assertion: a local-midnight java.sql.Date makes the converter
+# throw, so the record never reaches the topic and this count stays 0.
+[ "${tz_rows:-0}" -ge 1 ] \
+  || { grep -iE "DataException|Date type" "$OUT_DIR/connect.log" | tail -5 || true
+       fail "no records on $TZ_TOPIC — a DATE read in the worker's local zone makes Connect's Date logical type reject the record"; }
+
+grep -q "\"d\":$TZ_EXPECT_DAYS" "$OUT_DIR/tz.json" \
+  || { note "actual: $(head -1 "$OUT_DIR/tz.json")"
+       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); a different value means the read used a non-UTC calendar"; }
+grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$OUT_DIR/tz.json" \
+  || { note "actual: $(head -1 "$OUT_DIR/tz.json")"
+       fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset multiple of 3600000 means the worker's timezone leaked into the read"; }
+note "DATE -> $TZ_EXPECT_DAYS and DATETIME -> $TZ_EXPECT_MILLIS, independent of the worker's timezone"
+
+step "8. bookmark reclamation actually happens"
+# Releases lag one commit cycle behind acknowledged offsets by design, so a short run can
+# finish having released nothing -- which would make "no failures" pass vacuously. Drive a few
+# more windows, each separated by more than offset.flush.interval.ms, so the fence advances
+# with acked records and reclamation is forced.
+for i in 5 6 7; do
+  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)));"
+  sleep 8
+done
+released=0
+for _ in $(seq 1 10); do
+  released=$(grep -c "Released bookmark" "$OUT_DIR/connect.log" || true)
+  [ "${released:-0}" -ge 1 ] && break
+  sleep 3
+done
+[ "${released:-0}" -ge 1 ] \
+  || { grep -E "Emitted CDC window|Released bookmark|Failed to release" "$OUT_DIR/connect.log" | tail -20 || true
+       fail "no bookmark was ever released — the two-phase fence is not advancing, so every window's bookmark stays pinned against vacuum until its TTL"; }
+note "reclamation confirmed ($released release(s))"
+
+step "9. no release failures"
+# Step 8 proved releases happen; this one proves none of them errored. A failed release is
+# not fatal to the stream -- the bookmark just stays pinned against vacuum until its TTL --
+# so it would otherwise pass unnoticed for days.
 note "worker log bookmark activity:"
-grep -E "Emitted CDC window|Failed to release bookmark" "$OUT_DIR/connect.log" | tail -10 || true
+grep -E "Emitted CDC window|Released bookmark|Failed to release bookmark" "$OUT_DIR/connect.log" | tail -10 || true
 if grep -q "Failed to release bookmark" "$OUT_DIR/connect.log"; then
   fail "worker reported bookmark release failures — bookmarks stay pinned until TTL; check FE privileges and $OUT_DIR/connect.log"
 fi

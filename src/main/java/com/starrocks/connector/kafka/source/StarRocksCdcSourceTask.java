@@ -297,6 +297,11 @@ public class StarRocksCdcSourceTask extends SourceTask {
         while ((id = t.pendingReleases.poll()) != null) {
             try {
                 client.bookmarkRelease(db, t.table, id, holder);
+                // INFO, not DEBUG: this is the only externally visible sign that reclamation is
+                // keeping up. Without it, "no release failures" cannot be told apart from "no
+                // releases attempted", and a stalled fence looks healthy right until vacuum
+                // stops reclaiming storage.
+                LOG.info("Released bookmark {} for {}.{}", id, db, t.table);
             } catch (Exception e) {
                 LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
                         + "expires", id, db, t.table, holder, e);
