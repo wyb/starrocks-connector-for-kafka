@@ -14,7 +14,7 @@
 #
 # Every knob:
 #   SR_HOST            StarRocks FE host                        (required)
-#   SR_PORT            FE MySQL port                            (default 9030)
+#   SR_PORT            FE MySQL port, always needed             (default 9030)
 #   SR_USER            user with OPERATE ON SYSTEM              (default root)
 #   SR_PASSWORD        password                                 (default empty)
 #   KAFKA_BOOTSTRAP    bootstrap servers                        (required)
@@ -24,6 +24,11 @@
 #   KEEP_ON_FAILURE    set to 1 to keep the test db for triage  (default unset)
 #   SR_TRANSPORT       mysql | arrow-flight                     (default mysql)
 #   SR_ARROW_PORT      FE arrow_flight_port, arrow-flight only  (default 9408)
+#
+# The two ports are not alternatives. SR_PORT is what this script's own mysql client uses for
+# DDL/DML, the config probes and cleanup -- always, on both transports. SR_ARROW_PORT is only
+# ever put in the connector's JDBC URL. Override SR_PORT only if your FE's query_port is not
+# 9030, which is unrelated to which transport you picked.
 #
 # The whole point of SR_TRANSPORT is that both settings run the SAME nine assertions. The
 # ordering invariant and the temporal reads are the two things most likely to regress when the
