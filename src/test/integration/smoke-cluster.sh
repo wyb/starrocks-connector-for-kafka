@@ -1,0 +1,288 @@
+#!/usr/bin/env bash
+#
+# Smoke test for the StarRocks CDC source connector against EXISTING StarRocks
+# and Kafka clusters (no Docker). Use smoke.sh instead if you want the
+# containerised environment.
+#
+# It creates a throwaway database on your StarRocks cluster, runs a local
+# connect-standalone worker against your Kafka bootstrap servers, asserts the
+# CDC stream, and cleans everything up on exit.
+#
+#   SR_HOST=fe1 SR_USER=root SR_PASSWORD=secret \
+#   KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
+#   ./smoke-cluster.sh
+#
+# Every knob:
+#   SR_HOST            StarRocks FE host                        (required)
+#   SR_PORT            FE MySQL port                            (default 9030)
+#   SR_USER            user with OPERATE ON SYSTEM              (default root)
+#   SR_PASSWORD        password                                 (default empty)
+#   KAFKA_BOOTSTRAP    bootstrap servers                        (required)
+#   KAFKA_BIN          dir holding kafka-topics.sh etc.         (required)
+#   KAFKA_EXTRA_PROPS  file of extra worker props (SASL/SSL)    (optional)
+#   TOPIC_RF           replication factor for the test topic    (default 1)
+#   KEEP_ON_FAILURE    set to 1 to keep the test db for triage  (default unset)
+#
+set -euo pipefail
+
+cd "$(dirname "$0")"
+REPO_ROOT="$(cd ../../.. && pwd)"
+JAR="$REPO_ROOT/target/starrocks-connector-for-kafka-1.0.5.jar"
+PLUGIN_DIR="$REPO_ROOT/target/smoke-plugin"
+OUT_DIR="$(mktemp -d)"
+CONSUMED="$OUT_DIR/consumed.json"
+
+SR_PORT="${SR_PORT:-9030}"
+SR_USER="${SR_USER:-root}"
+SR_PASSWORD="${SR_PASSWORD:-}"
+TOPIC_RF="${TOPIC_RF:-1}"
+
+# Unique per run so a rerun (or a parallel run) can never touch another's data.
+SUFFIX="$(date +%Y%m%d%H%M%S)_$$"
+DB="cdc_smoke_${SUFFIX}"
+TABLE=orders
+CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
+TOPIC="sr.${DB}.${TABLE}"
+
+step() { printf '\n=== %s ===\n' "$1"; }
+fail() { printf '\nFAIL: %s\n' "$1" >&2; exit 1; }
+note() { printf '  %s\n' "$1"; }
+
+# ${VAR:-} throughout: the required-arg checks below must be able to print a
+# useful message instead of dying on `set -u` while building this array.
+mysql_args=(-h "${SR_HOST:-}" -P "$SR_PORT" -u "$SR_USER")
+[ -n "$SR_PASSWORD" ] && mysql_args+=(-p"$SR_PASSWORD")
+sr_sql()  { mysql "${mysql_args[@]}" -e "$1"; }
+sr_val()  { mysql "${mysql_args[@]}" -N -B -e "$1"; }   # no header, tab separated
+
+# ADMIN SHOW FRONTEND CONFIG returns Key, AliasNames, Value, Type, IsMutable,
+# Comment -- Value is the THIRD column, and AliasNames is usually empty, so the
+# split must be on tabs. Default awk splitting collapses the empty field and
+# silently yields Value as $2, which breaks the moment a config does have an
+# alias.
+sr_config() { sr_val "ADMIN SHOW FRONTEND CONFIG LIKE '$1';" | awk -F'\t' 'NR==1{print $3}'; }
+
+worker_pid=""
+cleanup() {
+  local rc=$?
+  printf '\n=== cleanup ===\n'
+  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+    kill "$worker_pid" 2>/dev/null || true
+    for _ in $(seq 1 15); do kill -0 "$worker_pid" 2>/dev/null || break; sleep 1; done
+    kill -9 "$worker_pid" 2>/dev/null || true
+  fi
+  if [ "$rc" -ne 0 ] && [ "${KEEP_ON_FAILURE:-}" = "1" ]; then
+    note "KEEP_ON_FAILURE=1 -> leaving database $DB and topic $TOPIC in place"
+    note "worker log: $OUT_DIR/connect.log   consumed: $CONSUMED"
+    note "drop them with: DROP DATABASE $DB;"
+    return
+  fi
+  # Dropping the database releases every bookmark held on its tables.
+  if [ -n "${SR_HOST:-}" ]; then
+    sr_sql "DROP DATABASE IF EXISTS $DB;" 2>/dev/null || note "could not drop $DB — drop it manually"
+  fi
+  if [ -n "${KAFKA_BIN:-}" ] && [ -n "${KAFKA_BOOTSTRAP:-}" ]; then
+    "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+      --delete --topic "$TOPIC" >/dev/null 2>&1 \
+      || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
+  fi
+  rm -rf "$OUT_DIR" "$PLUGIN_DIR"
+}
+trap cleanup EXIT
+
+# ---------------------------------------------------------------- preflight --
+step "0. preflight"
+
+[ -n "${SR_HOST:-}" ]         || fail "SR_HOST is required"
+[ -n "${KAFKA_BOOTSTRAP:-}" ] || fail "KAFKA_BOOTSTRAP is required"
+[ -n "${KAFKA_BIN:-}" ]       || fail "KAFKA_BIN is required (the dir holding kafka-topics.sh)"
+command -v mysql >/dev/null   || fail "mysql client not found on PATH"
+command -v java  >/dev/null   || fail "java not found on PATH"
+[ -x "$KAFKA_BIN/kafka-topics.sh" ]           || fail "$KAFKA_BIN/kafka-topics.sh not executable"
+[ -x "$KAFKA_BIN/connect-standalone.sh" ]     || fail "$KAFKA_BIN/connect-standalone.sh not executable"
+[ -x "$KAFKA_BIN/kafka-console-consumer.sh" ] || fail "$KAFKA_BIN/kafka-console-consumer.sh not executable"
+
+[ -f "$JAR" ] || fail "plugin jar missing at $JAR — run: (cd $REPO_ROOT && mvn -DskipTests package)"
+jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSourceConnector.class' \
+  || fail "connector class missing from $JAR"
+jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
+  || fail "mariadb JDBC driver missing from $JAR — the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
+note "plugin jar OK (connector + JDBC driver)"
+
+sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
+note "StarRocks reachable"
+
+# Shared-data is mandatory: bookmarks and the CHANGES/BOOKMARK hints do not
+# exist on a shared-nothing cluster.
+run_mode=$(sr_config run_mode)
+[ "$run_mode" = "shared_data" ] \
+  || fail "cluster run_mode is '${run_mode:-unknown}', this connector requires shared_data"
+note "run_mode=shared_data"
+
+bm=$(sr_config enable_bookmark_meta_functions)
+if [ "$bm" != "true" ]; then
+  fail "enable_bookmark_meta_functions is '${bm:-unset}' on this FE. Enable it on the LEADER FE:
+    ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\");
+  and add the same line to fe.conf so it survives a restart."
+fi
+note "enable_bookmark_meta_functions=true"
+
+# Bookmark functions are OPERATE-gated and leader-only. Probing on a throwaway
+# table separates "wrong FE" from "missing privilege" before anything is staged.
+sr_sql "CREATE DATABASE $DB;" || fail "cannot create database $DB (need CREATE DATABASE privilege)"
+sr_sql "CREATE TABLE $DB.probe (k INT NOT NULL, v INT)
+        PRIMARY KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 1
+        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
+probe_err="$OUT_DIR/probe.err"
+if ! probe_id=$(sr_val "SELECT bookmark_create('$DB','probe','smoke:probe','60000');" 2>"$probe_err"); then
+  msg=$(cat "$probe_err")
+  case "$msg" in
+    *"must run on the FE leader"*)
+      fail "SR_HOST=$SR_HOST is not the FE leader. Bookmark functions are leader-only.
+    Find it with: SHOW FRONTENDS;   (look for the leader/master row)
+    then rerun with SR_HOST set to that host." ;;
+    *"Access denied"*|*"OPERATE"*|*privilege*)
+      fail "user '$SR_USER' lacks the OPERATE privilege:
+    GRANT OPERATE ON SYSTEM TO USER '$SR_USER'@'%';" ;;
+    *) fail "bookmark_create failed unexpectedly: $msg" ;;
+  esac
+fi
+sr_sql "SELECT bookmark_release('$DB','probe','$probe_id','smoke:probe');" >/dev/null
+sr_sql "DROP TABLE $DB.probe;"
+note "FE leader + OPERATE privilege confirmed"
+
+"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" --list >/dev/null 2>&1 \
+  || fail "cannot reach Kafka at $KAFKA_BOOTSTRAP (auth needed? see KAFKA_EXTRA_PROPS)"
+note "Kafka reachable"
+
+# ------------------------------------------------------------------- set up --
+step "1. seed StarRocks"
+sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT)
+        PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
+sr_sql "INSERT INTO $DB.$TABLE VALUES (1,10),(2,20),(3,30);"
+note "created $DB.$TABLE with 3 rows"
+
+step "2. stage plugin and configs"
+rm -rf "$PLUGIN_DIR"; mkdir -p "$PLUGIN_DIR"; cp "$JAR" "$PLUGIN_DIR/"
+note "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
+
+cat > "$OUT_DIR/worker.properties" <<EOF
+bootstrap.servers=$KAFKA_BOOTSTRAP
+key.converter=org.apache.kafka.connect.json.JsonConverter
+value.converter=org.apache.kafka.connect.json.JsonConverter
+key.converter.schemas.enable=false
+value.converter.schemas.enable=false
+offset.storage.file.filename=$OUT_DIR/offsets
+offset.flush.interval.ms=5000
+plugin.path=$PLUGIN_DIR
+EOF
+if [ -n "${KAFKA_EXTRA_PROPS:-}" ]; then
+  [ -f "$KAFKA_EXTRA_PROPS" ] || fail "KAFKA_EXTRA_PROPS file not found: $KAFKA_EXTRA_PROPS"
+  cat "$KAFKA_EXTRA_PROPS" >> "$OUT_DIR/worker.properties"
+  note "appended $KAFKA_EXTRA_PROPS to worker properties"
+fi
+
+cat > "$OUT_DIR/source.properties" <<EOF
+name=$CONNECTOR_NAME
+connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
+tasks.max=1
+starrocks.jdbc.url=jdbc:mysql://$SR_HOST:$SR_PORT
+starrocks.database.name=$DB
+starrocks.username=$SR_USER
+starrocks.password=$SR_PASSWORD
+starrocks.table.names=$TABLE
+source.topic.prefix=sr
+source.poll.intervalms=2000
+EOF
+
+# One partition: the delete-before-insert assertion reads consumer line order as
+# message order, which only holds within a partition.
+"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
+note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
+
+start_worker() {
+  "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker.properties" "$OUT_DIR/source.properties" \
+    > "$OUT_DIR/connect.log" 2>&1 &
+  worker_pid=$!
+  sleep 5
+  kill -0 "$worker_pid" 2>/dev/null \
+    || { tail -40 "$OUT_DIR/connect.log"; fail "worker died immediately — see $OUT_DIR/connect.log"; }
+  note "worker started, pid=$worker_pid"
+}
+stop_worker() {
+  local pid="$1"
+  kill "$pid" || fail "kill of worker pid $pid failed"
+  for _ in $(seq 1 20); do kill -0 "$pid" 2>/dev/null || { note "worker $pid stopped"; return 0; }; sleep 1; done
+  fail "worker $pid still alive after SIGTERM — restart assertion would be meaningless"
+}
+
+consume() {
+  "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+    --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
+}
+
+step "3. start worker and wait for the snapshot"
+start_worker
+snapshot_count=0
+for _ in $(seq 1 20); do
+  snapshot_count=$(consume 5000 | wc -l | tr -d ' ')
+  [ "${snapshot_count:-0}" -ge 3 ] && break
+  sleep 3
+done
+[ "${snapshot_count:-0}" -ge 3 ] \
+  || { tail -60 "$OUT_DIR/connect.log"; fail "snapshot records never arrived (saw ${snapshot_count:-0}, expected >= 3) — see $OUT_DIR/connect.log"; }
+note "snapshot records present ($snapshot_count)"
+
+# ----------------------------------------------------------------- asserts --
+step "4. apply UPDATE and DELETE"
+sr_sql "UPDATE $DB.$TABLE SET v=200 WHERE id=2;"
+sr_sql "DELETE FROM $DB.$TABLE WHERE id=3;"
+sleep 15
+
+step "5. consume and assert"
+consume 15000 > "$CONSUMED"
+note "consumed $(wc -l < "$CONSUMED") records"
+
+reads=$(grep -c '"op":"r"' "$CONSUMED" || true)
+[ "$reads" -eq 3 ] || fail "expected 3 snapshot (op=r) records, got $reads"
+note "snapshot: 3 op=r records OK"
+
+grep '"op":"d"' "$CONSUMED" | grep -q '"v":20'  || fail "UPDATE: missing op=d carrying before image v=20"
+grep '"op":"c"' "$CONSUMED" | grep -q '"v":200' || fail "UPDATE: missing op=c carrying after image v=200"
+d_line=$(grep -n '"v":20[,}]' "$CONSUMED" | grep '"op":"d"' | head -1 | cut -d: -f1)
+c_line=$(grep -n '"v":200'    "$CONSUMED" | grep '"op":"c"' | head -1 | cut -d: -f1)
+[ -n "$d_line" ] && [ -n "$c_line" ] && [ "$d_line" -lt "$c_line" ] \
+  || fail "UPDATE: delete-before-insert ordering violated (d line ${d_line:-?}, c line ${c_line:-?}) — this is the ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC invariant"
+note "UPDATE: op=d(v=20) precedes op=c(v=200) OK"
+
+grep '"op":"d"' "$CONSUMED" | grep -q '"v":30' || fail "DELETE: missing op=d for id=3 (v=30)"
+note "DELETE: op=d OK"
+
+step "6. restart: resume from committed offset, no snapshot replay"
+old_pid="$worker_pid"
+stop_worker "$old_pid"
+sr_sql "INSERT INTO $DB.$TABLE VALUES (4,40);"
+start_worker
+[ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart"
+sleep 25
+
+consume 15000 > "$CONSUMED.2"
+reads_after=$(grep -c '"op":"r"' "$CONSUMED.2" || true)
+[ "$reads_after" -eq 3 ] || fail "snapshot replayed after restart: op=r count went 3 -> $reads_after"
+grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v=40) never surfaced"
+note "resumed from committed offset, no snapshot replay OK"
+
+step "7. bookmarks released"
+# The task keeps the newest two bookmarks per table by design; what must NOT
+# happen is unbounded growth. Surfaced for the operator rather than asserted,
+# since the exact count depends on how many commit cycles elapsed.
+note "worker log bookmark activity:"
+grep -E "Emitted CDC window|Failed to release bookmark" "$OUT_DIR/connect.log" | tail -10 || true
+if grep -q "Failed to release bookmark" "$OUT_DIR/connect.log"; then
+  fail "worker reported bookmark release failures — bookmarks stay pinned until TTL; check FE privileges and $OUT_DIR/connect.log"
+fi
+note "no bookmark release failures"
+
+printf '\n=== PASS ===\n'

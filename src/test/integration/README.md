@@ -1,9 +1,35 @@
 # CDC Source Connector Integration Smoke Test
 
 End-to-end check of the StarRocks CDC source connector against live StarRocks
-and Kafka containers. Unit tests cover the state machine with a fake client;
-this harness is what exercises real JDBC, real CHANGES windows, real bookmarks,
-and the packaged plugin jar.
+and Kafka. Unit tests cover the state machine with a fake client; this harness
+is what exercises real JDBC, real CHANGES windows, real bookmarks, and the
+packaged plugin jar.
+
+Two entry points, same assertions:
+
+| Script | Use when |
+| --- | --- |
+| `smoke.sh` | You have Docker and want the whole environment created for you |
+| `smoke-cluster.sh` | You already have StarRocks and Kafka clusters (no Docker) |
+
+`smoke-cluster.sh` additionally runs preflight checks that only matter against
+a real cluster — `run_mode=shared_data`, `enable_bookmark_meta_functions`, the
+`OPERATE` privilege, and whether the FE you pointed at is the leader — each with
+the exact remediation statement in the failure message. It creates a uniquely
+named throwaway database (`cdc_smoke_<timestamp>_<pid>`) and drops it, plus its
+topic, on every exit path. Pass `KEEP_ON_FAILURE=1` to keep them for triage.
+
+```bash
+SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
+KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
+./smoke-cluster.sh
+```
+
+Knobs: `SR_PORT` (9030), `SR_USER` (root), `SR_PASSWORD` (empty), `TOPIC_RF` (1),
+`KAFKA_EXTRA_PROPS` (a file of extra worker properties, appended verbatim — this
+is where SASL/SSL settings go), `KEEP_ON_FAILURE`.
+
+The rest of this page covers the Docker variant.
 
 ## Prerequisites
 
