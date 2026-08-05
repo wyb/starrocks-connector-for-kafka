@@ -89,10 +89,30 @@ public class ChangeRecordMapperTest {
         assertEquals(7L, r.sourceOffset().get("bookmark_id"));
         assertEquals(Boolean.FALSE, r.sourceOffset().get("snapshot_done"));
         Struct src = (Struct) value.get("source");
-        assertEquals(7L, src.getInt64("row_version").longValue());
+        // Not the bookmark id: row_version lives in the partition-version space while bookmark
+        // ids come from the FE global id generator and are far larger, so reusing one here would
+        // make every snapshot row outrank the changes that follow it.
+        assertEquals(0L, src.getInt64("row_version").longValue());
         Struct bookmark = (Struct) src.get("bookmark");
         assertEquals(7L, bookmark.getInt64("base").longValue());
         assertEquals(7L, bookmark.getInt64("head").longValue());
+    }
+
+    /**
+     * Pins the defect directly: a snapshot row must never report a row_version that can outrank a
+     * later change record's. Change versions start at 1 and climb one publish at a time; bookmark
+     * ids come from the FE global id generator -- a real report had bookmarks 11952/11955 against
+     * partition version 3.
+     */
+    @Test
+    public void testSnapshotRowVersionCannotOutrankLaterChanges() {
+        ChangeRecordMapper m = mapper();
+        SourceRecord snapshot = m.toSnapshotRecord(new Object[]{1, 10L}, 11952L);
+        SourceRecord change = m.toChangeRecord(new Object[]{1, 20L}, 0, 4L, 11952L, 11955L, true);
+        long snapshotVersion = ((Struct) ((Struct) snapshot.value()).get("source")).getInt64("row_version");
+        long changeVersion = ((Struct) ((Struct) change.value()).get("source")).getInt64("row_version");
+        assertTrue("snapshot row_version " + snapshotVersion + " must not outrank change row_version "
+                + changeVersion, snapshotVersion < changeVersion);
     }
 
     @Test

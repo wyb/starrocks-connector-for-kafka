@@ -52,6 +52,12 @@ public final class ChangeRecordMapper {
     private static final String OP_DELETE = "d";
     private static final String OP_READ = "r";
 
+    /**
+     * {@code source.row_version} reported for a snapshot ({@code op="r"}) record. Snapshot rows
+     * carry no version: see {@link #toSnapshotRecord} for why a bookmark id must not be used here.
+     */
+    private static final long SNAPSHOT_ROW_VERSION = 0L;
+
     private static final String FIELD_OP = "op";
     private static final String FIELD_BEFORE = "before";
     private static final String FIELD_AFTER = "after";
@@ -138,10 +144,21 @@ public final class ChangeRecordMapper {
 
     /**
      * op "r", after populated; sourceOffset = OffsetState.sourceOffset(bookmarkId, false).
+     *
+     * <p>{@code source.row_version} is {@link #SNAPSHOT_ROW_VERSION}, not the bookmark id. A
+     * change record's {@code row_version} is the partition's visible version, which starts at 1
+     * and increments per publish; a bookmark id comes from the FE's global id generator and is
+     * typically orders of magnitude larger. Putting a bookmark id in that field would make every
+     * snapshot row look newer than every change that follows it, so a consumer deduplicating on
+     * "apply only if row_version increased" would discard all of them. A snapshot row genuinely
+     * has no single version to report -- the pinned read spans partitions that each sit at their
+     * own version -- so it reports none. {@code source.bookmark.base}/{@code head} still carry
+     * the pinning bookmark id: those fields are in the bookmark id space and are the right place
+     * to identify which snapshot a row came from.
      */
     public SourceRecord toSnapshotRecord(Object[] row, long bookmarkId) {
         Struct after = toRowStruct(row);
-        Struct envelope = buildEnvelope(OP_READ, null, after, bookmarkId, bookmarkId, bookmarkId);
+        Struct envelope = buildEnvelope(OP_READ, null, after, SNAPSHOT_ROW_VERSION, bookmarkId, bookmarkId);
 
         Map<String, String> sourcePartition = OffsetState.sourcePartition(db, table);
         Map<String, Object> sourceOffset = OffsetState.sourceOffset(bookmarkId, false);

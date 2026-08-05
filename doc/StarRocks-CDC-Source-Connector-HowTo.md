@@ -97,7 +97,7 @@ For readability, the JSON below shows each envelope's logical field values; the 
 
 ### Snapshot rows (`op: "r"`)
 
-The initial snapshot is a point-in-time read pinned to one bookmark, so every row it emits shares the same `row_version` and `bookmark.base`/`bookmark.head` — all three equal the snapshot's pinning bookmark id (a snapshot read has no independent per-row version the way a CHANGES window does):
+The initial snapshot is a point-in-time read pinned to one bookmark, so every row it emits shares the same `bookmark.base`/`bookmark.head` — both equal the snapshot's pinning bookmark id. `row_version` is **always `0`** for snapshot rows: a pinned read spans partitions that each sit at their own version, so there is no single version to report. See [`row_version` across record types](#row_version-across-record-types) for why the bookmark id must not be used here.
 
 ```json
 {
@@ -107,13 +107,25 @@ The initial snapshot is a point-in-time read pinned to one bookmark, so every ro
   "source": {
     "db": "db1",
     "table": "orders",
-    "row_version": 1000,
+    "row_version": 0,
     "bookmark": { "base": 1000, "head": 1000 }
   },
   "ts_ms": 1700000000000
 }
 ```
 Key: `{ "id": 1 }`. (A second `op: "r"` record follows for `id: 2`, same `source` values.)
+
+### `row_version` across record types
+
+`source.row_version` and `source.bookmark.{base,head}` are **two different numbering spaces**, and the difference matters when you write a consumer:
+
+| Field | Space | Typical magnitude |
+| --- | --- | --- |
+| `row_version` on `op: "c"` / `op: "d"` | the partition's visible version — starts at 1, +1 per publish | small, e.g. `3`, `4`, `5` |
+| `row_version` on `op: "r"` | none; always `0` | `0` |
+| `bookmark.base` / `bookmark.head` | FE global id generator, shared with table and tablet ids | large, e.g. `11952` |
+
+Do not compare a bookmark id against a `row_version`, and do not use `row_version` as a cross-record ordering key. Within one Kafka partition the broker's own offset order already gives you the correct sequence — snapshot rows first, then changes in commit order — so ordering by offset is both sufficient and safer. `row_version` is best treated as diagnostic metadata: it tells you which StarRocks publish a change came from, and it is what makes the two halves of an `UPDATE` recognizable as one event (they share it).
 
 ### Insert (`op: "c"`)
 
@@ -127,7 +139,7 @@ An `INSERT` of `(3, 'thingamajig', 30)`, picked up by the next poll (`base` is t
   "source": {
     "db": "db1",
     "table": "orders",
-    "row_version": 1010,
+    "row_version": 4,
     "bookmark": { "base": 1000, "head": 1010 }
   },
   "ts_ms": 1700000005000
@@ -147,7 +159,7 @@ There is no dedicated `op: "u"`. StarRocks' CHANGES window represents a SQL `UPD
   "source": {
     "db": "db1",
     "table": "orders",
-    "row_version": 1020,
+    "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
   "ts_ms": 1700000010000
@@ -161,13 +173,13 @@ There is no dedicated `op: "u"`. StarRocks' CHANGES window represents a SQL `UPD
   "source": {
     "db": "db1",
     "table": "orders",
-    "row_version": 1020,
+    "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
   "ts_ms": 1700000010001
 }
 ```
-Both records share key `{ "id": 3 }` and `source.row_version: 1020`, and the delete is always produced before the insert for the same key within a window.
+Both records share key `{ "id": 3 }` and `source.row_version: 5`, and the delete is always produced before the insert for the same key within a window.
 
 ### Delete (`op: "d"`)
 
@@ -181,7 +193,7 @@ A `DELETE FROM db1.orders WHERE id = 2`:
   "source": {
     "db": "db1",
     "table": "orders",
-    "row_version": 1030,
+    "row_version": 6,
     "bookmark": { "base": 1020, "head": 1030 }
   },
   "ts_ms": 1700000015000
@@ -197,7 +209,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 
 ## Semantics
 
-- **At-least-once delivery.** A table's older bookmarks are only ever released from the task's `commit()` callback, which Kafka Connect invokes after the offsets carried by previously-returned records have been durably flushed — never eagerly during `poll()`. If the task crashes and restarts before that flush completes, the same CHANGES window (or the same snapshot) is replayed on restart, producing duplicate records. Downstream consumers should either apply changes idempotently keyed on the record key (e.g. treating `source.row_version` as monotonic per key) or read from a compacted topic.
+- **At-least-once delivery.** A table's older bookmarks are only ever released from the task's `commit()` callback, which Kafka Connect invokes after the offsets carried by previously-returned records have been durably flushed — never eagerly during `poll()`. If the task crashes and restarts before that flush completes, the same CHANGES window (or the same snapshot) is replayed on restart, producing duplicate records. Downstream consumers should apply changes idempotently keyed on the record key, taking the records in Kafka partition order — a replay re-delivers the same records in the same order, so last-write-wins per key converges — or read from a compacted topic. Do **not** deduplicate by requiring `source.row_version` to increase: it is not comparable across record types (see [`row_version` across record types](#row_version-across-record-types)), and both halves of an `UPDATE` legitimately share one value.
 - **Snapshot-to-incremental handoff.** With `source.snapshot.mode=initial`, the first poll for a table creates a bookmark and streams the table through `[_BOOKMARK_<id>_]`, emitting `op: "r"` rows — every one of them, including the last, carries `snapshot_done=false` in its Kafka Connect offset; there is no distinguished "final" snapshot row. The in-memory "snapshot done" flag flips as soon as that poll returns, so the very next poll streams incremental changes with that same bookmark id as its base — no version is skipped or double-counted between snapshot and streaming — and the first change record it produces is the first record whose offset carries `snapshot_done=true`. That flag only becomes the table's durably-committed offset once Kafka Connect's own offset-flush cycle persists it, on its own timer, independently of this connector. A crash before that flush leaves the durable offset at `snapshot_done=false` (or no offset at all), so restart redoes the entire snapshot from scratch rather than resuming halfway.
 - **`source.nontrackable.policy`** controls what happens when a CHANGES window can no longer be read (see [Limitations](#limitations) for causes):
   - `fail` (default): the task throws and stops. An operator must intervene — for example by raising `source.bookmark.ttlms`, fixing the underlying cause, or switching this table to `resnapshot`.
