@@ -33,8 +33,10 @@ import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Calendar;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Properties;
+import java.util.Set;
 import java.util.TimeZone;
 
 /**
@@ -46,11 +48,17 @@ import java.util.TimeZone;
  *   <li>{@code jdbc:mysql://host:9030} (rewritten to {@code jdbc:mariadb://}) -- the MySQL wire
  *       protocol. Results funnel back through the FE.</li>
  *   <li>{@code jdbc:arrow-flight-sql://host:<arrow_flight_port>?useEncryption=false} -- Arrow
- *       Flight SQL. The FE still plans and authorizes, but result batches stream from the BEs
- *       columnar, so the FE stops being the data funnel. Requires a non-negative
- *       {@code arrow_flight_port} on both FE and BE (default {@code -1}, needs a restart), and a
- *       Java 9+ worker needs
- *       {@code --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED}.</li>
+ *       Flight SQL. Results travel as Arrow record batches, so the row/column conversion the MySQL
+ *       protocol pays for disappears. Note that the FE does <em>not</em> stop being the data path
+ *       by default: {@code arrow_flight_proxy_enabled} is {@code true}, which has the FE pull each
+ *       BE stream and re-serve it. {@code SET GLOBAL arrow_flight_proxy_enabled = false} hands BE
+ *       endpoints to the client instead, which does remove the funnel but requires the worker to
+ *       reach every BE's {@code arrow_flight_port} directly.
+ *       <p>Cluster-side prerequisites: a non-negative {@code arrow_flight_port} in both
+ *       {@code fe.conf} and {@code be.conf} (default {@code -1}, not mutable, needs a restart),
+ *       and {@code --add-opens=java.base/java.nio=ALL-UNNAMED} in the FE's {@code JAVA_OPTS} as
+ *       well as the Connect worker's -- Arrow's {@code MemoryUtil} fails to initialize without it
+ *       on Java 9+, on whichever side is missing it.</li>
  * </ul>
  *
  * <p>Connections are lazily created and reused across calls. {@code bookmarkCreate}/
@@ -177,15 +185,40 @@ public class StarRocksJdbcClient implements CdcClient {
                  ResultSet rs = stmt.executeQuery(sql)) {
                 ResultSetMetaData meta = rs.getMetaData();
                 List<ColumnMeta> result = new ArrayList<>();
+                Set<String> seen = new LinkedHashSet<>();
                 int columnCount = meta.getColumnCount();
+                StringBuilder described = new StringBuilder();
                 for (int i = 1; i <= columnCount; i++) {
-                    result.add(new ColumnMeta(
-                            meta.getColumnName(i),
-                            meta.getColumnType(i),
-                            meta.getPrecision(i),
-                            meta.getScale(i),
-                            meta.isNullable(i) != ResultSetMetaData.columnNoNulls));
+                    String name = meta.getColumnName(i);
+                    int type = meta.getColumnType(i);
+                    int precision = meta.getPrecision(i);
+                    int scale = meta.getScale(i);
+                    boolean nullable = meta.isNullable(i) != ResultSetMetaData.columnNoNulls;
+                    if (described.length() > 0) {
+                        described.append(", ");
+                    }
+                    described.append(i).append(':').append(name)
+                            .append("(type=").append(type)
+                            .append(",p=").append(precision)
+                            .append(",s=").append(scale)
+                            .append(",null=").append(nullable).append(')');
+                    // A duplicate name would otherwise surface much later and far away, as a bare
+                    // SchemaBuilderException("Cannot create field because of field name
+                    // duplication") from inside ChangeRecordMapper, with no hint that the column
+                    // metadata this driver reported was the problem. Fail here, quoting all of it.
+                    if (!seen.add(name)) {
+                        throw new SQLException("Column metadata for " + db + "." + table
+                                + " reports the name '" + name + "' more than once, so no record schema can be"
+                                + " built from it. This is the JDBC driver's view of `" + sql + "`, not the"
+                                + " table's real definition -- the two transports do not derive it the same"
+                                + " way. Reported " + columnCount + " column(s): " + described);
+                    }
+                    result.add(new ColumnMeta(name, type, precision, scale, nullable));
                 }
+                // One line per table at task start, and the only record of what the driver actually
+                // reported. Column discovery differs enough between the two transports that this is
+                // worth having before anything downstream can go wrong.
+                LOG.info("Resolved {} column(s) for {}.{}: {}", columnCount, db, table, described);
                 return result;
             }
         } catch (SQLException e) {
