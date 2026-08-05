@@ -363,8 +363,8 @@ grep -q "\"d\":$TZ_EXPECT_DAYS" "$CONSUMED" \
        fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); another value means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
 grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$CONSUMED" \
   || { note "actual: $(head -1 "$CONSUMED")"
-       fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means the worker's timezone leaked into the read"; }
-note "DATE -> $TZ_EXPECT_DAYS and DATETIME -> $TZ_EXPECT_MILLIS, independent of the worker's timezone"
+       fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means a timezone leaked in -- either the worker's (the read used a non-UTC calendar) or the cluster's (the session time_zone was not pinned to UTC, which is what the server converts with on Arrow Flight)"; }
+note "DATE -> $TZ_EXPECT_DAYS and DATETIME -> $TZ_EXPECT_MILLIS, independent of both the worker's and the cluster's timezone"
 
 step "8. bookmark reclamation actually happens"
 # Releases lag one commit cycle behind acknowledged offsets by design, so a short run can

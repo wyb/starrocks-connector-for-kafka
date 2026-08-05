@@ -157,6 +157,27 @@ The initial snapshot is a point-in-time read pinned to one bookmark, so every ro
 ```
 Key: `{ "id": 1 }`. (A second `op: "r"` record follows for `id: 2`, same `source` values.)
 
+### DATETIME and DATE values
+
+StarRocks `DATETIME` is a wall clock with no timezone, so turning it into a Kafka Connect
+`Timestamp` (an instant) requires picking one. The connector pins `time_zone = 'UTC'` on every
+connection it opens and reads temporal columns with a UTC calendar, so a stored
+`2026-08-05 12:34:56` always becomes `1785933296000` — the wall clock read as UTC. The emitted
+instant is a property of the stored value, not of where the cluster or the worker happens to sit.
+
+That is not the default behaviour, and both halves are load-bearing:
+
+- **Session timezone.** `time_zone` defaults to the cluster's system timezone. On Arrow Flight the
+  server converts `DATETIME` to an epoch value itself, using that setting, so on a UTC+8 cluster
+  the same row would arrive eight hours off — and no client-side calendar could correct it, because
+  the value is already an instant by the time the driver sees it.
+- **UTC calendar on the read.** On the MySQL protocol the wall clock arrives as text and the driver
+  interprets it in the JVM's default zone unless told otherwise. Left alone, a non-UTC worker
+  produces a shifted `DATETIME` and — worse — a `DATE` at local midnight, which Kafka Connect's
+  `Date` logical type rejects outright, so the record never reaches Kafka at all.
+
+`DATE` needs no timezone either way: it is a day count, and arrives as one.
+
 ### `row_version` across record types
 
 `source.row_version` and `source.bookmark.{base,head}` are **two different numbering spaces**, and the difference matters when you write a consumer:

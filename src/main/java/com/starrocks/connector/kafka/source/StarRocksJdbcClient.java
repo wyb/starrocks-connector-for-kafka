@@ -648,6 +648,28 @@ public class StarRocksJdbcClient implements CdcClient {
         props.setProperty("password", config.password());
         props.setProperty("connectTimeout", String.valueOf(config.connectTimeoutMs()));
         Connection connection = DriverManager.getConnection(url, props);
+        // Pin the session timezone before anything is read. StarRocks DATETIME is a wall clock with
+        // no zone, and each transport turns it into an instant somewhere different: the MySQL
+        // protocol sends the wall clock as text and the driver interprets it with the Calendar
+        // passed to getTimestamp, while Arrow Flight sends an epoch value the server already
+        // converted using session time_zone -- which defaults to the cluster's system zone, so the
+        // Calendar has nothing left to interpret. Without this the same row yields timestamps eight
+        // hours apart on a UTC+8 cluster depending only on which transport was configured.
+        //
+        // UTC is the choice that makes the emitted instant a property of the stored value rather
+        // than of wherever the cluster happens to sit, which is what a change stream should carry.
+        try (Statement stmt = connection.createStatement()) {
+            stmt.execute("SET time_zone = 'UTC'");
+        } catch (SQLException e) {
+            try {
+                connection.close();
+            } catch (SQLException ignored) {
+                // best-effort cleanup of the half-open connection
+            }
+            throw new SQLException("Failed to pin the session timezone to UTC; DATETIME values would"
+                    + " otherwise depend on the cluster's system timezone and differ between"
+                    + " transports", e);
+        }
         if (config.netChanges()) {
             try (Statement stmt = connection.createStatement()) {
                 stmt.execute("SET enable_cdc_net_change=true");
