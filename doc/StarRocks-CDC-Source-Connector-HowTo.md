@@ -34,11 +34,11 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
 
 ## Full Configuration Example
 
-`starrocks.jdbc.url` points at the FE's **MySQL protocol port** (`9030` by default) — this is different from the sink connector's `starrocks.http.url`, which points at the HTTP/stream-load port.
+`starrocks.jdbc.url` points at an FE query endpoint — different from the sink connector's `starrocks.http.url`, which points at the HTTP/stream-load port. Its URL scheme also selects the transport; see [Choosing a transport](#choosing-a-transport).
 
 | Key | Type | Default | Description |
 |---|---|---|---|
-| `starrocks.jdbc.url` | String | *(required)* | JDBC URL of the StarRocks FE MySQL protocol endpoint(s). Comma-separate multiple FE hosts (e.g. `jdbc:mysql://fe1:9030,fe2:9030`) so the client can rotate to the leader for bookmark calls. |
+| `starrocks.jdbc.url` | String | *(required)* | JDBC URL of the StarRocks FE endpoint(s). Comma-separate multiple FE hosts (e.g. `jdbc:mysql://fe1:9030,fe2:9030`) so the client can rotate to the leader for bookmark calls. The scheme selects the transport: `jdbc:mysql://` for the MySQL protocol, `jdbc:arrow-flight-sql://` for Arrow Flight SQL — see [Choosing a transport](#choosing-a-transport). |
 | `starrocks.database.name` | String | *(required)* | The name of the source StarRocks database. |
 | `starrocks.username` | String | *(required)* | The username used to connect to StarRocks. Needs the `OPERATE` privilege. |
 | `starrocks.password` | Password | *(required)* | The password used to connect to StarRocks. Stored as a Kafka Connect `Password`, so it is masked in logs and the connector status API. |
@@ -84,6 +84,32 @@ source.tombstones.on.delete=false
 source.maxretries=3
 connect.timeoutms=1000
 ```
+
+### Choosing a transport
+
+The URL scheme is the entire switch — there is no separate transport setting, because a JDBC URL already names the driver it wants. Both drivers ship inside the plugin jar; the one you do not name stays inert.
+
+| | MySQL protocol | Arrow Flight SQL |
+| --- | --- | --- |
+| URL | `jdbc:mysql://fe1:9030,fe2:9030` | `jdbc:arrow-flight-sql://fe1:9408?useEncryption=false` |
+| Port | FE `query_port` (9030) | FE `arrow_flight_port` |
+| Result path | Rows funnel back **through the FE** | FE plans and authorizes; result batches stream **from the BEs**, columnar |
+| Setup | None | Requires cluster config and a worker JVM flag (below) |
+
+Start with the MySQL protocol. It needs no setup and, for incremental windows, the volume is usually small enough that the FE is not the constraint. Reach for Arrow Flight when the FE is measurably the bottleneck — most often during a large initial snapshot, which is also the one-off part of the workload.
+
+To use Arrow Flight SQL:
+
+1. **Set a non-negative `arrow_flight_port` in both `fe.conf` and `be.conf`, then restart.** It defaults to `-1` (disabled) and is not a mutable config, so `ADMIN SET FRONTEND CONFIG` will not turn it on.
+2. **Point the URL at that port**, not 9030, and keep `?useEncryption=false` unless you have configured TLS — the Arrow driver negotiates TLS by default and will fail against a plaintext server without it.
+3. **Add the JDK flag to the Connect worker** (Java 9+), or Arrow cannot allocate its off-heap buffers:
+   ```bash
+   export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+   ```
+
+Everything else is identical: the same CHANGES windows, the same bookmarks, the same envelope. The connector skips the MySQL-only streaming fetch-size call on this transport, since Arrow streams RecordBatches natively.
+
+To verify a Flight deployment before trusting it, run the integration smoke test against your cluster with `SR_TRANSPORT=arrow-flight` — it runs the identical assertions over the new transport, including the delete-before-insert ordering invariant and the timezone-independent temporal reads, which are the two things most likely to regress when the driver underneath changes.
 
 Every record's key and value are schema-carrying Kafka Connect `Struct`s, so configure a schema-aware `key.converter`/`value.converter` (e.g. `JsonConverter` with `schemas.enable=true`, or an Avro/Protobuf converter backed by a schema registry).
 

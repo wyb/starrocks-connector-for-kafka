@@ -208,12 +208,12 @@
 </ul>
 
 <h2 id="full-configuration-example"><span class="no">3</span>完整配置示例</h2>
-<p><code>starrocks.jdbc.url</code> 指向 FE 的 <strong>MySQL 协议端口</strong>（默认为 <code>9030</code>）——这与 sink 连接器的 <code>starrocks.http.url</code> 不同，后者指向的是 HTTP/stream-load 端口。</p>
+<p><code>starrocks.jdbc.url</code> 指向一个 FE 查询端点——这与 sink 连接器的 <code>starrocks.http.url</code> 不同，后者指向的是 HTTP/stream-load 端口。它的 URL scheme 同时也决定了所使用的传输方式；参见<a href="#choosing-a-transport">选择传输方式</a>。</p>
 
 <div class="tablewrap">
 <table>
   <tr><th>键</th><th>类型</th><th>默认值</th><th>说明</th></tr>
-  <tr><td><code>starrocks.jdbc.url</code></td><td>String</td><td><em>(必填)</em></td><td>StarRocks FE MySQL 协议端点的 JDBC URL。多个 FE host 用逗号分隔（例如 <code>jdbc:mysql://fe1:9030,fe2:9030</code>），以便客户端在执行 bookmark 调用时可以轮转到 leader。</td></tr>
+  <tr><td><code>starrocks.jdbc.url</code></td><td>String</td><td><em>(必填)</em></td><td>StarRocks FE 端点的 JDBC URL。多个 FE host 用逗号分隔（例如 <code>jdbc:mysql://fe1:9030,fe2:9030</code>），以便客户端在执行 bookmark 调用时可以轮转到 leader。URL scheme 决定了所使用的传输方式：<code>jdbc:mysql://</code> 对应 MySQL 协议，<code>jdbc:arrow-flight-sql://</code> 对应 Arrow Flight SQL——参见<a href="#choosing-a-transport">选择传输方式</a>。</td></tr>
   <tr><td><code>starrocks.database.name</code></td><td>String</td><td><em>(必填)</em></td><td>源 StarRocks 数据库的名称。</td></tr>
   <tr><td><code>starrocks.username</code></td><td>String</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的用户名。需要 <code>OPERATE</code> 权限。</td></tr>
   <tr><td><code>starrocks.password</code></td><td>Password</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的密码。以 Kafka Connect 的 <code>Password</code> 类型存储，因此会在日志和连接器状态 API 中被掩码处理。</td></tr>
@@ -259,6 +259,35 @@ source.netchanges=false
 source.tombstones.on.delete=false
 source.maxretries=3
 connect.timeoutms=1000</code></pre>
+
+<h3 id="choosing-a-transport">选择传输方式</h3>
+<p>URL scheme 就是唯一的开关——并不存在单独的传输方式配置项，因为一个 JDBC URL 本身就已经指明了它要使用的驱动（driver）。两种驱动都内置在插件 jar 包中；未被指定使用的那一个则始终保持不活跃（inert）。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th></th><th>MySQL 协议</th><th>Arrow Flight SQL</th></tr>
+  <tr><td>URL</td><td><code>jdbc:mysql://fe1:9030,fe2:9030</code></td><td><code>jdbc:arrow-flight-sql://fe1:9408?useEncryption=false</code></td></tr>
+  <tr><td>端口</td><td>FE 的 <code>query_port</code>（9030）</td><td>FE 的 <code>arrow_flight_port</code></td></tr>
+  <tr><td>结果路径</td><td>数据行<strong>经由 FE 中转</strong>返回</td><td>FE 负责规划与鉴权；结果批次以列式（columnar）格式直接<strong>从 BE</strong>流式返回</td></tr>
+  <tr><td>配置</td><td>无</td><td>需要进行集群配置，并为 worker 添加一个 JVM 参数（见下文）</td></tr>
+</table>
+</div>
+
+<p>优先使用 MySQL 协议。它不需要任何额外配置，并且对增量窗口而言，数据量通常足够小，FE 一般不会成为瓶颈。当 FE 明显成为瓶颈时，再考虑使用 Arrow Flight——这种情况最常出现在大型初始快照期间，而这部分工作负载本来也只是一次性的。</p>
+
+<p>要使用 Arrow Flight SQL：</p>
+
+<ol>
+  <li><strong>在 <code>fe.conf</code> 和 <code>be.conf</code> 中都设置一个非负的 <code>arrow_flight_port</code>，然后重启。</strong> 它默认值为 <code>-1</code>（表示禁用），并且不是一个可变配置（mutable config），因此无法通过 <code>ADMIN SET FRONTEND CONFIG</code> 开启它。</li>
+  <li><strong>把 URL 指向该端口</strong>，而不是 9030，并保留 <code>?useEncryption=false</code>，除非你已经配置了 TLS——Arrow 驱动默认会协商使用 TLS，如果不带这个参数，在连接明文（plaintext）服务端时会失败。</li>
+  <li><strong>为 Connect worker 添加如下 JDK 参数</strong>（Java 9+），否则 Arrow 无法分配它的堆外（off-heap）缓冲区：
+    <pre><code>export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"</code></pre>
+  </li>
+</ol>
+
+<p>除此之外，其余部分完全相同：相同的 CHANGES 窗口、相同的 bookmark、相同的 envelope。在这种传输方式下，连接器会跳过仅适用于 MySQL 的流式 fetch-size 调用，因为 Arrow 原生就以 RecordBatch 的形式进行流式传输。</p>
+
+<p>在信任一次 Flight 部署之前，先针对你的集群以 <code>SR_TRANSPORT=arrow-flight</code> 运行集成冒烟测试（integration smoke test）来验证它——该测试会在新的传输方式上运行完全相同的断言，包括"删除先于插入"的顺序不变式，以及与时区无关的时间类型读取，这两点是底层驱动发生变化时最容易出现回归的地方。</p>
 
 <p>每条记录的 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>，因此需要配置支持 schema 的 <code>key.converter</code>/<code>value.converter</code>（例如启用了 <code>schemas.enable=true</code> 的 <code>JsonConverter</code>，或依赖 schema registry 的 Avro/Protobuf converter）。</p>
 

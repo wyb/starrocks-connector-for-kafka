@@ -29,6 +29,12 @@ Knobs: `SR_PORT` (9030), `SR_USER` (root), `SR_PASSWORD` (empty), `TOPIC_RF` (1)
 `KAFKA_EXTRA_PROPS` (a file of extra worker properties, appended verbatim — this
 is where SASL/SSL settings go), `KEEP_ON_FAILURE`.
 
+`SR_TRANSPORT=arrow-flight` (with `SR_ARROW_PORT`, default 9408) runs the identical nine
+assertions over the Arrow Flight SQL transport instead of the MySQL protocol. It checks the FE's
+`arrow_flight_port` first and fails with the remedy if the cluster has it disabled, and it injects
+the `--add-opens` flag Arrow needs into the worker JVM. Running both settings is the only way to
+know a transport change has not moved the delete-before-insert ordering or the temporal reads.
+
 The rest of this page covers the Docker variant.
 
 ## Prerequisites

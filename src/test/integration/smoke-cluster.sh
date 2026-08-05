@@ -22,6 +22,12 @@
 #   KAFKA_EXTRA_PROPS  file of extra worker props (SASL/SSL)    (optional)
 #   TOPIC_RF           replication factor for the test topic    (default 1)
 #   KEEP_ON_FAILURE    set to 1 to keep the test db for triage  (default unset)
+#   SR_TRANSPORT       mysql | arrow-flight                     (default mysql)
+#   SR_ARROW_PORT      FE arrow_flight_port, arrow-flight only  (default 9408)
+#
+# The whole point of SR_TRANSPORT is that both settings run the SAME nine assertions. The
+# ordering invariant and the temporal reads are the two things most likely to regress when the
+# driver underneath changes, and they are asserted identically either way.
 #
 set -euo pipefail
 
@@ -36,6 +42,8 @@ SR_PORT="${SR_PORT:-9030}"
 SR_USER="${SR_USER:-root}"
 SR_PASSWORD="${SR_PASSWORD:-}"
 TOPIC_RF="${TOPIC_RF:-1}"
+SR_TRANSPORT="${SR_TRANSPORT:-mysql}"
+SR_ARROW_PORT="${SR_ARROW_PORT:-9408}"
 
 # Unique per run so a rerun (or a parallel run) can never touch another's data.
 SUFFIX="$(date +%Y%m%d%H%M%S)_$$"
@@ -188,6 +196,31 @@ sr_sql "INSERT INTO $DB.$TABLE VALUES
         (3,30,'$TZ_DATE','$TZ_DATETIME');"
 note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME (this worker's TZ: $(date +%Z))"
 
+case "$SR_TRANSPORT" in
+  mysql)
+    CONNECTOR_JDBC_URL="jdbc:mysql://$SR_HOST:$SR_PORT"
+    ;;
+  arrow-flight)
+    # Plaintext by default: the Arrow driver negotiates TLS unless told otherwise, and the FE's
+    # Flight service is plaintext in a default deployment.
+    CONNECTOR_JDBC_URL="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
+    afp=$(sr_config arrow_flight_port)
+    [ -n "$afp" ] && [ "$afp" != "-1" ] \
+      || fail "SR_TRANSPORT=arrow-flight but the FE reports arrow_flight_port='${afp:--1}'.
+    Set a non-negative arrow_flight_port in fe.conf AND be.conf and restart -- it is not a
+    mutable config, so ADMIN SET FRONTEND CONFIG will not do."
+    note "FE arrow_flight_port=$afp"
+    # Arrow's off-heap buffers need this on Java 9+, in the worker JVM that smoke.sh forks below.
+    export KAFKA_OPTS="${KAFKA_OPTS:-} --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+    jar tf "$JAR" | grep -q 'org/apache/arrow/driver/jdbc/ArrowFlightJdbcDriver.class' \
+      || fail "Arrow Flight JDBC driver missing from $JAR — the primary maven-shade execution must include org.apache.arrow:flight-sql-jdbc-driver"
+    ;;
+  *)
+    fail "SR_TRANSPORT must be mysql or arrow-flight, got '$SR_TRANSPORT'"
+    ;;
+esac
+note "transport=$SR_TRANSPORT, connector URL=$CONNECTOR_JDBC_URL"
+
 step "2. stage plugin and configs"
 rm -rf "$PLUGIN_DIR"; mkdir -p "$PLUGIN_DIR"; cp "$JAR" "$PLUGIN_DIR/"
 note "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
@@ -212,7 +245,7 @@ cat > "$OUT_DIR/source.properties" <<EOF
 name=$CONNECTOR_NAME
 connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
 tasks.max=1
-starrocks.jdbc.url=jdbc:mysql://$SR_HOST:$SR_PORT
+starrocks.jdbc.url=$CONNECTOR_JDBC_URL
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD

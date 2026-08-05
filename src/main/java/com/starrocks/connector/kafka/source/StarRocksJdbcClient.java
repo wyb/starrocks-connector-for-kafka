@@ -38,8 +38,20 @@ import java.util.Properties;
 import java.util.TimeZone;
 
 /**
- * {@link CdcClient} implementation backed by the MariaDB JDBC driver, talking to a StarRocks FE
- * over the MySQL wire protocol.
+ * {@link CdcClient} implementation talking to a StarRocks FE over JDBC.
+ *
+ * <p>Two transports, chosen entirely by the URL prefix in {@code starrocks.jdbc.url} -- there is
+ * no separate config key, because a JDBC URL already names the driver it wants:
+ * <ul>
+ *   <li>{@code jdbc:mysql://host:9030} (rewritten to {@code jdbc:mariadb://}) -- the MySQL wire
+ *       protocol. Results funnel back through the FE.</li>
+ *   <li>{@code jdbc:arrow-flight-sql://host:<arrow_flight_port>?useEncryption=false} -- Arrow
+ *       Flight SQL. The FE still plans and authorizes, but result batches stream from the BEs
+ *       columnar, so the FE stops being the data funnel. Requires a non-negative
+ *       {@code arrow_flight_port} on both FE and BE (default {@code -1}, needs a restart), and a
+ *       Java 9+ worker needs
+ *       {@code --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED}.</li>
+ * </ul>
  *
  * <p>Connections are lazily created and reused across calls. {@code bookmarkCreate}/
  * {@code bookmarkRelease} additionally tolerate FE-leader failover: a "must run on the FE
@@ -62,24 +74,43 @@ public class StarRocksJdbcClient implements CdcClient {
 
     private static final String MYSQL_SCHEME_PREFIX = "jdbc:mysql://";
     private static final String MARIADB_SCHEME_PREFIX = "jdbc:mariadb://";
+    /**
+     * Arrow Flight SQL transport. The URL prefix is the whole transport switch -- there is no
+     * separate config key, because a JDBC URL already declares which driver it wants. It must
+     * point at the FE's {@code arrow_flight_port} rather than 9030, and a plaintext server needs
+     * {@code ?useEncryption=false} since the driver defaults to TLS.
+     */
+    private static final String ARROW_FLIGHT_SCHEME_PREFIX = "jdbc:arrow-flight-sql://";
     private static final long RETRY_PAUSE_MS = 500L;
 
     /**
-     * Fetch size used for the two streaming reads. MariaDB streams a result set row-by-row for
-     * <em>any</em> positive fetch size, so a plain batch size is all that is needed here.
+     * Fetch size for the two streaming reads, applied on the MySQL/MariaDB transport only.
+     * MariaDB streams a result set row-by-row for <em>any</em> positive fetch size, so a plain
+     * batch size is all that is needed there.
      *
      * <p>It must not be {@code Integer.MIN_VALUE}: that is the MySQL Connector/J streaming idiom
      * and is MySQL-driver-specific. {@code org.mariadb.jdbc.Statement#setFetchSize} rejects every
      * negative value with {@code SQLException("invalid fetch size")}, so passing it here would
      * throw before the query was ever sent -- i.e. no row could ever be read.
+     *
+     * <p>Arrow Flight streams RecordBatches natively and has no equivalent knob, so the call is
+     * skipped there rather than guessed at: driver-specific contracts on this exact method are
+     * what produced that MariaDB defect in the first place.
      */
     private static final int STREAM_FETCH_SIZE = 1024;
 
     static {
+        // Both drivers are shaded into the plugin jar. Registering explicitly guards against
+        // Connect's per-plugin classloader isolation defeating ServiceLoader discovery.
+        registerDriver("org.mariadb.jdbc.Driver", "mariadb-java-client");
+        registerDriver("org.apache.arrow.driver.jdbc.ArrowFlightJdbcDriver", "flight-sql-jdbc-driver");
+    }
+
+    private static void registerDriver(String className, String artifact) {
         try {
-            Class.forName("org.mariadb.jdbc.Driver");
+            Class.forName(className);
         } catch (ClassNotFoundException e) {
-            throw new IllegalStateException("mariadb-java-client driver not found on classpath", e);
+            throw new IllegalStateException(artifact + " driver not found on classpath", e);
         }
     }
 
@@ -96,6 +127,21 @@ public class StarRocksJdbcClient implements CdcClient {
                     "No usable host found in " + StarRocksCdcSourceConfig.JDBC_URL + ": " + config.jdbcUrl());
         }
         this.urlIndex = 0;
+    }
+
+    /** True when this client talks Arrow Flight SQL rather than the MySQL protocol. */
+    private boolean isArrowFlight() {
+        return !urls.isEmpty() && urls.get(0).startsWith(ARROW_FLIGHT_SCHEME_PREFIX);
+    }
+
+    /**
+     * Row-by-row streaming is a MySQL-protocol concern. Arrow Flight already streams
+     * RecordBatches, and its driver's contract for this method is not ours to assume.
+     */
+    private void applyStreamingFetchSize(Statement stmt) throws SQLException {
+        if (!isArrowFlight()) {
+            stmt.setFetchSize(STREAM_FETCH_SIZE);
+        }
     }
 
     @Override
@@ -195,7 +241,7 @@ public class StarRocksJdbcClient implements CdcClient {
         try {
             Connection c = getConnection();
             try (Statement stmt = c.createStatement()) {
-                stmt.setFetchSize(STREAM_FETCH_SIZE);
+                applyStreamingFetchSize(stmt);
                 Calendar utc = newUtcCalendar();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
@@ -216,7 +262,7 @@ public class StarRocksJdbcClient implements CdcClient {
         try {
             Connection c = getConnection();
             try (Statement stmt = c.createStatement()) {
-                stmt.setFetchSize(STREAM_FETCH_SIZE);
+                applyStreamingFetchSize(stmt);
                 Calendar utc = newUtcCalendar();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     // The last two projected columns are always __CHANGE_TYPE__ (int) and

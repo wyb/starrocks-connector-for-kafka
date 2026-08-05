@@ -39,6 +39,13 @@
                                          Connect worker. Verify with
                                          "jar tf target/*-1.0.5.jar | grep io/debezium/data/Envelope". -->
                                     <include>io.debezium:debezium-core</include>
+                                    <!-- The Arrow Flight SQL transport, selected by a
+                                         jdbc:arrow-flight-sql:// URL. This is a ~42MB uber-jar and
+                                         it is bundled deliberately: a connector that needs a
+                                         second manual jar drop to switch transports is a
+                                         deployment trap, and the driver is inert unless a URL
+                                         asks for it. -->
+                                    <include>org.apache.arrow:flight-sql-jdbc-driver</include>
                                 </includes>
                             </artifactSet>
                             <transformers>
@@ -167,6 +174,14 @@
             <groupId>org.mariadb.jdbc</groupId>
             <artifactId>mariadb-java-client</artifactId>
             <version>3.3.3</version>
+        </dependency>
+
+        <!-- Version matches the StarRocks repo's own arrow.version, so the client speaks the
+             same Arrow wire format as the FE/BE Flight SQL service it connects to. -->
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>flight-sql-jdbc-driver</artifactId>
+            <version>18.0.0</version>
         </dependency>
 
         <dependency>
