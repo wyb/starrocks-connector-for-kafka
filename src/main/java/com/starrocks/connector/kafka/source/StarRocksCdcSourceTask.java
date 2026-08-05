@@ -202,6 +202,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;
             t.snapshotDone = true;
+            // The restored bookmark must re-enter the retention deque, or nothing will ever
+            // release it: a restart would otherwise leave one bookmark per table pinned against
+            // vacuum for the whole source.bookmark.ttlms, once per rebalance/restart/config edit.
+            // Re-adding it is safe -- commit() only releases bookmarks strictly older than the
+            // previous cycle's ack watermark, so this one survives until a newer window's records
+            // are acknowledged, which is exactly the fence that protects a crash-replay base.
+            synchronized (t.liveBookmarks) {
+                t.liveBookmarks.addLast(state.bookmarkId);
+            }
         }
     }
 

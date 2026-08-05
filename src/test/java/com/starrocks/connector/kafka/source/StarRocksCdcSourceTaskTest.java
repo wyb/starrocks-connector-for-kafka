@@ -405,6 +405,38 @@ public class StarRocksCdcSourceTaskTest {
         assertTrue(fake.released.isEmpty());
     }
 
+    /**
+     * A restart used to orphan the bookmark it resumed from: restoreOffset set committedBookmark
+     * but never put the id back in the retention deque, so no commit cycle could reach it and it
+     * stayed pinned against vacuum for the whole TTL -- once per rebalance, restart or config
+     * edit, per table. Seen live in a cluster smoke run: bookmark 21275 survived untouched while
+     * its neighbours 21253, 21314 and 21389 were all released.
+     */
+    @Test
+    public void testRestartedBookmarkIsEventuallyReleased() throws Exception {
+        task.start(baseProps());
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
+        task.restoreOffset(t, OffsetState.sourceOffset(11952L, true));
+
+        // Retained rather than dropped on the floor.
+        assertEquals(Collections.singletonList(11952L), liveBookmarksOf(task));
+
+        fake.enqueueHead("orders", 11955L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 9001L));
+        ack(task.poll());
+
+        // Still fenced: it survives until a newer window's records are acknowledged AND a full
+        // commit cycle has elapsed -- the same protection every crash-replay base gets.
+        task.commit();
+        pollToFlushReleases();
+        assertTrue("released too early: " + fake.released, fake.released.isEmpty());
+
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Collections.singletonList("db1.orders:11952:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList(11955L), liveBookmarksOf(task));
+    }
+
     // ------------------------------------------------------------------
     // Non-trackable CHANGES window: policy-driven fail vs. resnapshot.
     // ------------------------------------------------------------------

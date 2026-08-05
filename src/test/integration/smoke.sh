@@ -26,6 +26,14 @@ DB=smoke
 TABLE=orders
 TOPIC=sr.smoke.orders
 
+# Fixed literals so the expected wire values are constants, not derived at run time.
+# 2026-08-05T00:00:00Z is 20670 days after the epoch; 2026-08-05T12:34:56Z is 1785933296000 ms.
+# Both are what a UTC-Calendar read must produce regardless of the worker's own timezone.
+TZ_DATE="2026-08-05"
+TZ_DATETIME="2026-08-05 12:34:56"
+TZ_EXPECT_DAYS=20670
+TZ_EXPECT_MILLIS=1785933296000
+
 step()  { printf '\n=== %s ===\n' "$1"; }
 fail()  { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 sr_sql() { docker compose exec -T starrocks mysql -h127.0.0.1 -P9030 -uroot -e "$1"; }
@@ -81,11 +89,17 @@ done
 step "2. seed StarRocks"
 sr_sql "ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\");"
 sr_sql "CREATE DATABASE IF NOT EXISTS $DB;"
-sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT)
+# One table carries every case. The temporal columns ride the same records the other assertions
+# inspect: a DATE read in the worker's local zone makes Connect's Date logical type reject the
+# whole record, so those assertions would fail too -- which is the coupling worth testing.
+sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TABLE VALUES (1,10),(2,20),(3,30);"
-echo "seeded 3 rows"
+sr_sql "INSERT INTO $DB.$TABLE VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME'),
+        (2,20,'$TZ_DATE','$TZ_DATETIME'),
+        (3,30,'$TZ_DATE','$TZ_DATETIME');"
+echo "seeded 3 rows incl. DATE/DATETIME (container TZ applies to the worker, not this shell)"
 
 step "3. generate worker config and start connect-standalone"
 cat > "$OUT_DIR/worker.properties" <<EOF
@@ -185,6 +199,15 @@ grep -q '"transaction"' "$CONSUMED" \
   || fail "records carry no transaction field — the envelope is not the Debezium one"
 echo "Debezium envelope shape confirmed on the wire"
 
+# A DATE read in the worker's local zone is not a wrong value but a rejected record: Connect's
+# Date logical type demands UTC midnight and the converter throws, so the row never arrives.
+grep -q "\"d\":$TZ_EXPECT_DAYS" "$CONSUMED" \
+  || { docker compose exec -T kafka grep -iE "DataException|Date type" /tmp/connect.log | tail -5 || true
+       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); another value means a non-UTC calendar, no value means the converter rejected the record"; }
+grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$CONSUMED" \
+  || fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means the worker's timezone leaked into the read"
+echo "temporal columns OK: DATE -> $TZ_EXPECT_DAYS, DATETIME -> $TZ_EXPECT_MILLIS"
+
 step "6. crash recovery: no snapshot replay"
 old_pid="$worker_pid"
 stop_worker "$old_pid"
@@ -200,5 +223,29 @@ reads_after=$(grep -c '"op":"r"' "$CONSUMED.2" || true)
 [ "$reads_after" -eq 3 ] || fail "snapshot replayed after restart: op=r count went from 3 to $reads_after"
 grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v=40) never surfaced"
 echo "restart: resumed from committed offset, no snapshot replay OK"
+
+step "7. bookmark reclamation actually happens"
+# Releases lag one commit cycle behind acknowledged offsets by design, so a short run can finish
+# having released nothing -- which would make a "no failures" check pass vacuously.
+for i in 5 6 7; do
+  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)), '$TZ_DATE', '$TZ_DATETIME');"
+  sleep 8
+done
+released=0
+for _ in $(seq 1 10); do
+  released=$(docker compose exec -T kafka grep -c "Released bookmark" /tmp/connect.log 2>/dev/null | tr -d '\r' || true)
+  [ "${released:-0}" -ge 1 ] && break
+  sleep 3
+done
+[ "${released:-0}" -ge 1 ] \
+  || { docker compose exec -T kafka grep -E "Emitted CDC window|Released bookmark|Failed to release" /tmp/connect.log | tail -20 || true
+       fail "no bookmark was ever released — the two-phase fence is not advancing"; }
+echo "reclamation confirmed ($released release(s))"
+
+step "8. no release failures"
+if docker compose exec -T kafka grep -q "Failed to release bookmark" /tmp/connect.log; then
+  fail "worker reported bookmark release failures — bookmarks stay pinned until TTL"
+fi
+echo "no bookmark release failures"
 
 printf '\n=== PASS ===\n'

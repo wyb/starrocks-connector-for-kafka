@@ -41,10 +41,8 @@ TOPIC_RF="${TOPIC_RF:-1}"
 SUFFIX="$(date +%Y%m%d%H%M%S)_$$"
 DB="cdc_smoke_${SUFFIX}"
 TABLE=orders
-TZ_TABLE=tz_check
 CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
 TOPIC="sr.${DB}.${TABLE}"
-TZ_TOPIC="sr.${DB}.${TZ_TABLE}"
 
 # Fixed literals so the expected wire values below are constants, not derived at run time.
 # 2026-08-05T00:00:00Z is 20670 days after the epoch; 2026-08-05T12:34:56Z is 1785933296000 ms.
@@ -92,11 +90,9 @@ cleanup() {
     sr_sql "DROP DATABASE IF EXISTS $DB;" 2>/dev/null || note "could not drop $DB — drop it manually"
   fi
   if [ -n "${KAFKA_BIN:-}" ] && [ -n "${KAFKA_BOOTSTRAP:-}" ]; then
-    for t in "$TOPIC" "$TZ_TOPIC"; do
-      "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-        --delete --topic "$t" >/dev/null 2>&1 \
-        || note "could not delete topic $t (delete.topic.enable=false?) — delete it manually"
-    done
+    "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+      --delete --topic "$TOPIC" >/dev/null 2>&1 \
+      || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
   fi
   rm -rf "$OUT_DIR" "$PLUGIN_DIR"
 }
@@ -179,22 +175,18 @@ note "Kafka reachable"
 
 # ------------------------------------------------------------------- set up --
 step "1. seed StarRocks"
-sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT)
+# One table carries every case. The temporal columns are here rather than in a table of their
+# own because they must ride the same records the other assertions inspect: a DATE read in the
+# worker's local zone makes Kafka Connect's Date logical type reject the whole record, so the
+# ordering and delete assertions below would fail too -- which is the coupling worth testing.
+sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TABLE VALUES (1,10),(2,20),(3,30);"
-note "created $DB.$TABLE with 3 rows"
-
-# Temporal columns are read with an explicit UTC Calendar. Without it a non-UTC worker builds a
-# java.sql.Date at LOCAL midnight, which Kafka Connect's Date logical type rejects outright
-# (DataException in the converter -- the record never reaches Kafka), and DATETIME lands
-# silently shifted by the worker's offset. Neither failure is reachable from a unit test, nor
-# from an INT/BIGINT table -- hence this second table.
-sr_sql "CREATE TABLE $DB.$TZ_TABLE (id INT NOT NULL, d DATE, ts DATETIME)
-        PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
-        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TZ_TABLE VALUES (1, '$TZ_DATE', '$TZ_DATETIME');"
-note "created $DB.$TZ_TABLE with DATE/DATETIME (this worker's TZ: $(date +%Z))"
+sr_sql "INSERT INTO $DB.$TABLE VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME'),
+        (2,20,'$TZ_DATE','$TZ_DATETIME'),
+        (3,30,'$TZ_DATE','$TZ_DATETIME');"
+note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME (this worker's TZ: $(date +%Z))"
 
 step "2. stage plugin and configs"
 rm -rf "$PLUGIN_DIR"; mkdir -p "$PLUGIN_DIR"; cp "$JAR" "$PLUGIN_DIR/"
@@ -224,18 +216,16 @@ starrocks.jdbc.url=jdbc:mysql://$SR_HOST:$SR_PORT
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
-starrocks.table.names=$TABLE,$TZ_TABLE
+starrocks.table.names=$TABLE
 source.topic.prefix=sr
 source.poll.intervalms=2000
 EOF
 
 # One partition: the delete-before-insert assertion reads consumer line order as
 # message order, which only holds within a partition.
-for t in "$TOPIC" "$TZ_TOPIC"; do
-  "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --create --if-not-exists --topic "$t" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
-  note "created topic $t (1 partition, RF=$TOPIC_RF)"
-done
+"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
+note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
 
 # Appends, never truncates: the restart in step 6 would otherwise throw away the
 # pre-restart half of the log, which is where the first bookmark releases land.
@@ -258,10 +248,6 @@ stop_worker() {
 consume() {
   "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
     --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
-}
-consume_topic() {
-  "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --topic "$1" --from-beginning --timeout-ms "${2:-15000}" 2>/dev/null || true
 }
 
 step "3. start worker and wait for the snapshot"
@@ -323,20 +309,16 @@ grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v
 note "resumed from committed offset, no snapshot replay OK"
 
 step "7. temporal columns survive a non-UTC worker"
-consume_topic "$TZ_TOPIC" 15000 > "$OUT_DIR/tz.json"
-tz_rows=$(wc -l < "$OUT_DIR/tz.json" | tr -d ' ')
-# Arriving at all is the first assertion: a local-midnight java.sql.Date makes the converter
-# throw, so the record never reaches the topic and this count stays 0.
-[ "${tz_rows:-0}" -ge 1 ] \
-  || { grep -iE "DataException|Date type" "$OUT_DIR/connect.log" | tail -5 || true
-       fail "no records on $TZ_TOPIC — a DATE read in the worker's local zone makes Connect's Date logical type reject the record"; }
-
-grep -q "\"d\":$TZ_EXPECT_DAYS" "$OUT_DIR/tz.json" \
-  || { note "actual: $(head -1 "$OUT_DIR/tz.json")"
-       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); a different value means the read used a non-UTC calendar"; }
-grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$OUT_DIR/tz.json" \
-  || { note "actual: $(head -1 "$OUT_DIR/tz.json")"
-       fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset multiple of 3600000 means the worker's timezone leaked into the read"; }
+# These ride the same records step 5 already consumed. A DATE read in the worker's local zone
+# is not a wrong value but a rejected record: Connect's Date logical type demands UTC midnight
+# and the converter throws, so the row never reaches Kafka at all.
+grep -q "\"d\":$TZ_EXPECT_DAYS" "$CONSUMED" \
+  || { note "actual: $(head -1 "$CONSUMED")"
+       grep -iE "DataException|Date type" "$OUT_DIR/connect.log" | tail -5 || true
+       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); another value means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
+grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$CONSUMED" \
+  || { note "actual: $(head -1 "$CONSUMED")"
+       fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means the worker's timezone leaked into the read"; }
 note "DATE -> $TZ_EXPECT_DAYS and DATETIME -> $TZ_EXPECT_MILLIS, independent of the worker's timezone"
 
 step "8. bookmark reclamation actually happens"
@@ -345,7 +327,7 @@ step "8. bookmark reclamation actually happens"
 # more windows, each separated by more than offset.flush.interval.ms, so the fence advances
 # with acked records and reclamation is forced.
 for i in 5 6 7; do
-  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)));"
+  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)), '$TZ_DATE', '$TZ_DATETIME');"
   sleep 8
 done
 released=0
