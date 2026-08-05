@@ -107,7 +107,17 @@ jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSource
   || fail "connector class missing from $JAR"
 jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
   || fail "mariadb JDBC driver missing from $JAR — the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
-note "plugin jar OK (connector + JDBC driver)"
+# ChangeRecordMapper builds every record with io.debezium.data.Envelope, whose class-init also
+# pulls TransactionMonitor and SchemaNameAdjuster. Unit tests run on the full compile classpath
+# and cannot see a missing shade include; it surfaces only here or as a NoClassDefFoundError in
+# a real worker.
+for cls in io/debezium/data/Envelope.class \
+           io/debezium/pipeline/txmetadata/TransactionMonitor.class \
+           io/debezium/util/SchemaNameAdjuster.class; do
+  jar tf "$JAR" | grep -q "^$cls$" \
+    || fail "$cls missing from $JAR — the primary maven-shade execution must include io.debezium:debezium-core"
+done
+note "plugin jar OK (connector + JDBC driver + Debezium envelope classes)"
 
 sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
 note "StarRocks reachable"
@@ -257,8 +267,15 @@ c_line=$(grep -n '"v":200'    "$CONSUMED" | grep '"op":"c"' | head -1 | cut -d: 
   || fail "UPDATE: delete-before-insert ordering violated (d line ${d_line:-?}, c line ${c_line:-?}) — this is the ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC invariant"
 note "UPDATE: op=d(v=20) precedes op=c(v=200) OK"
 
-grep '"op":"d"' "$CONSUMED" | grep -q '"v":30' || fail "DELETE: missing op=d for id=3 (v=30)"
+grep '"op":"d"' "$CONSUMED" | grep -q '"v":30[,}]' || fail "DELETE: missing op=d for id=3 (v=30)"
 note "DELETE: op=d OK"
+
+# Only visible once a real converter has serialized the Struct: the envelope comes from
+# io.debezium.data.Envelope, so it must carry Debezium's transaction field even though
+# StarRocks has no transaction metadata to put in it.
+grep -q '"transaction"' "$CONSUMED" \
+  || fail "records carry no transaction field — the envelope is not the Debezium one"
+note "Debezium envelope shape confirmed on the wire"
 
 step "6. restart: resume from committed offset, no snapshot replay"
 old_pid="$worker_pid"
