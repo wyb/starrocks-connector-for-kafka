@@ -102,10 +102,17 @@ To use Arrow Flight SQL:
 
 1. **Set a non-negative `arrow_flight_port` in both `fe.conf` and `be.conf`, then restart.** It defaults to `-1` (disabled) and is not a mutable config, so `ADMIN SET FRONTEND CONFIG` will not turn it on.
 2. **Point the URL at that port**, not 9030, and keep `?useEncryption=false` unless you have configured TLS — the Arrow driver negotiates TLS by default and will fail against a plaintext server without it.
-3. **Add the JDK flag to the Connect worker** (Java 9+), or Arrow cannot allocate its off-heap buffers:
+3. **Open `java.nio` to the Connect worker** (Java 9+), or Arrow cannot allocate its off-heap buffers:
    ```bash
-   export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+   export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=ALL-UNNAMED"
    ```
+   StarRocks' own Arrow Flight documentation writes this flag as
+   `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`. Naming the module is
+   correct when Arrow sits on the JVM's *module path*, but here the driver is shaded into the
+   plugin jar and loaded from the classpath by Connect's plugin classloader, so there is no named
+   `org.apache.arrow.memory.core` module to open to. Only the `ALL-UNNAMED` half takes effect, and
+   the module half earns a `WARNING: Unknown module` line on every JVM start — harmless, but not
+   worth carrying.
 
 Everything else is identical: the same CHANGES windows, the same bookmarks, the same envelope. The connector skips the MySQL-only streaming fetch-size call on this transport, since Arrow streams RecordBatches natively.
 

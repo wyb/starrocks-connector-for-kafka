@@ -204,6 +204,7 @@ note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME (this worker's TZ: $(da
 case "$SR_TRANSPORT" in
   mysql)
     CONNECTOR_JDBC_URL="jdbc:mysql://$SR_HOST:$SR_PORT"
+    WORKER_JAVA_OPTS=""
     ;;
   arrow-flight)
     # Plaintext by default: the Arrow driver negotiates TLS unless told otherwise, and the FE's
@@ -215,8 +216,13 @@ case "$SR_TRANSPORT" in
     Set a non-negative arrow_flight_port in fe.conf AND be.conf and restart -- it is not a
     mutable config, so ADMIN SET FRONTEND CONFIG will not do."
     note "FE arrow_flight_port=$afp"
-    # Arrow's off-heap buffers need this on Java 9+, in the worker JVM that smoke.sh forks below.
-    export KAFKA_OPTS="${KAFKA_OPTS:-} --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"
+    # Arrow's off-heap buffers need java.nio opened on Java 9+. Only ALL-UNNAMED applies here:
+    # the driver is shaded into the plugin jar and loaded from the classpath by Connect's plugin
+    # classloader, so there is no named org.apache.arrow.memory.core module to open to -- naming it
+    # only earns a "WARNING: Unknown module" on every JVM start. Scoped to the worker below rather
+    # than exported, so the kafka-topics/console-consumer calls do not inherit a flag they have no
+    # use for.
+    WORKER_JAVA_OPTS="--add-opens=java.base/java.nio=ALL-UNNAMED"
     jar tf "$JAR" | grep -q 'org/apache/arrow/driver/jdbc/ArrowFlightJdbcDriver.class' \
       || fail "Arrow Flight JDBC driver missing from $JAR — the primary maven-shade execution must include org.apache.arrow:flight-sql-jdbc-driver"
     ;;
@@ -268,7 +274,8 @@ note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
 # Appends, never truncates: the restart in step 6 would otherwise throw away the
 # pre-restart half of the log, which is where the first bookmark releases land.
 start_worker() {
-  "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker.properties" "$OUT_DIR/source.properties" \
+  KAFKA_OPTS="${KAFKA_OPTS:-} $WORKER_JAVA_OPTS" \
+    "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker.properties" "$OUT_DIR/source.properties" \
     >> "$OUT_DIR/connect.log" 2>&1 &
   worker_pid=$!
   sleep 5

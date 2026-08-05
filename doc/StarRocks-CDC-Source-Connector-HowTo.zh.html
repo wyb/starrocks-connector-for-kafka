@@ -280,8 +280,9 @@ connect.timeoutms=1000</code></pre>
 <ol>
   <li><strong>在 <code>fe.conf</code> 和 <code>be.conf</code> 中都设置一个非负的 <code>arrow_flight_port</code>，然后重启。</strong> 它默认值为 <code>-1</code>（表示禁用），并且不是一个可变配置（mutable config），因此无法通过 <code>ADMIN SET FRONTEND CONFIG</code> 开启它。</li>
   <li><strong>把 URL 指向该端口</strong>，而不是 9030，并保留 <code>?useEncryption=false</code>，除非你已经配置了 TLS——Arrow 驱动默认会协商使用 TLS，如果不带这个参数，在连接明文（plaintext）服务端时会失败。</li>
-  <li><strong>为 Connect worker 添加如下 JDK 参数</strong>（Java 9+），否则 Arrow 无法分配它的堆外（off-heap）缓冲区：
-    <pre><code>export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED"</code></pre>
+  <li><strong>为 Connect worker 打开 <code>java.nio</code></strong>（Java 9+），否则 Arrow 无法分配它的堆外（off-heap）缓冲区：
+    <pre><code>export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=ALL-UNNAMED"</code></pre>
+    StarRocks 自己的 Arrow Flight 文档把这个参数写成 <code>--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</code>。当 Arrow 位于 JVM 的 <em>module path</em> 上时，指定模块名是正确的；但在我们这里，驱动被 shade 进 plugin jar、由 Connect 的 plugin classloader 从 classpath 加载，因此并不存在一个名为 <code>org.apache.arrow.memory.core</code> 的具名模块可供 open。实际生效的只有 <code>ALL-UNNAMED</code> 那一半，而模块名那一半只会让每次 JVM 启动都打印一行 <code>WARNING: Unknown module</code>——无害，但没有必要带着。
   </li>
 </ol>
 
