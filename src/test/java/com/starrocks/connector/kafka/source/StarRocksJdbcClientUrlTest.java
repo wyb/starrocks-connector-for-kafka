@@ -23,6 +23,7 @@ package com.starrocks.connector.kafka.source;
 import org.junit.Test;
 
 import java.lang.reflect.Method;
+import java.sql.Types;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.List;
@@ -69,5 +70,54 @@ public class StarRocksJdbcClientUrlTest {
                         "jdbc:arrow-flight-sql://fe1:9408?useEncryption=false&useSSL=false",
                         "jdbc:arrow-flight-sql://fe2:9408?useEncryption=false&useSSL=false"),
                 parseUrls("jdbc:arrow-flight-sql://fe1:9408,fe2:9408?useEncryption=false&useSSL=false"));
+    }
+
+    /**
+     * Every spelling the BE's {@code SchemaColumnsScanner::to_mysql_data_type_string} can put in
+     * {@code information_schema.columns.DATA_TYPE}. That switch is the closed set this mapping
+     * answers to, so the cases here are a transcription of it -- if StarRocks adds a type there,
+     * one of these will be the thing that notices.
+     */
+    @Test
+    public void testEveryStarRocksDataTypeMapsToAJdbcType() {
+        assertEquals(Types.TINYINT, StarRocksJdbcClient.toJdbcType("tinyint"));
+        assertEquals(Types.SMALLINT, StarRocksJdbcClient.toJdbcType("smallint"));
+        assertEquals(Types.INTEGER, StarRocksJdbcClient.toJdbcType("int"));
+        assertEquals(Types.BIGINT, StarRocksJdbcClient.toJdbcType("bigint"));
+        assertEquals(Types.REAL, StarRocksJdbcClient.toJdbcType("float"));
+        assertEquals(Types.DOUBLE, StarRocksJdbcClient.toJdbcType("double"));
+        assertEquals(Types.DECIMAL, StarRocksJdbcClient.toJdbcType("decimal"));
+        assertEquals(Types.CHAR, StarRocksJdbcClient.toJdbcType("char"));
+        assertEquals(Types.VARCHAR, StarRocksJdbcClient.toJdbcType("varchar"));
+        assertEquals(Types.DATE, StarRocksJdbcClient.toJdbcType("date"));
+        assertEquals(Types.TIMESTAMP, StarRocksJdbcClient.toJdbcType("datetime"));
+        assertEquals(Types.BINARY, StarRocksJdbcClient.toJdbcType("binary"));
+        assertEquals(Types.VARBINARY, StarRocksJdbcClient.toJdbcType("varbinary"));
+    }
+
+    /**
+     * LARGEINT is 128-bit and arrives spelled "bigint unsigned". Mapping it to BIGINT would
+     * silently truncate every value that does not fit a long, so it goes to OTHER and is carried
+     * as text instead.
+     */
+    @Test
+    public void testLargeIntIsNotMappedToBigint() {
+        assertEquals(Types.OTHER, StarRocksJdbcClient.toJdbcType("bigint unsigned"));
+    }
+
+    /** Opaque and unknown types are read as text rather than guessed at. */
+    @Test
+    public void testOpaqueAndUnknownTypesFallBackToOther() {
+        for (String t : new String[] {"hll", "bitmap", "percentile", "json", "unknown", "", null}) {
+            assertEquals("expected OTHER for " + t, Types.OTHER, StarRocksJdbcClient.toJdbcType(t));
+        }
+    }
+
+    /** DATA_TYPE casing is the server's choice, not a contract. */
+    @Test
+    public void testDataTypeMatchingIgnoresCaseAndPadding() {
+        assertEquals(Types.INTEGER, StarRocksJdbcClient.toJdbcType("  INT "));
+        assertEquals(Types.TIMESTAMP, StarRocksJdbcClient.toJdbcType("DateTime"));
+        assertEquals(Types.OTHER, StarRocksJdbcClient.toJdbcType("BIGINT UNSIGNED"));
     }
 }

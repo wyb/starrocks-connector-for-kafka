@@ -88,6 +88,24 @@ public final class SqlBuilder {
         return "SELECT * FROM " + qualifiedTable(db, table) + " LIMIT 0";
     }
 
+    /**
+     * The column list read as ordinary rows instead of as result-set metadata.
+     *
+     * <p>{@link #columnsProbeSql} asks the driver to describe a query; this asks the server to
+     * describe a table. The difference matters on Arrow Flight, where the driver's description is
+     * unusable -- it repeats the schema, calls every column NOT NULL, and zeroes precision and
+     * scale. These rows are data, so both transports return the same thing.
+     *
+     * <p>{@code COLUMN_SIZE} and {@code DECIMAL_DIGITS} are StarRocks' JDBC-shaped spellings of
+     * precision and scale (the names {@code DatabaseMetaData.getColumns} uses), so they land in
+     * {@link ColumnMeta} without reinterpretation.
+     */
+    public static String columnsMetadataSql(String db, String table) {
+        return "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
+                + " FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
+                + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
+    }
+
     /** SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config WHERE TABLE_SCHEMA = 'db' AND TABLE_NAME = 't' */
     public static String tableConfigSql(String db, String table) {
         return "SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config WHERE TABLE_SCHEMA = " +

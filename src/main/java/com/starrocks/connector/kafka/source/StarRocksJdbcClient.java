@@ -178,6 +178,21 @@ public class StarRocksJdbcClient implements CdcClient {
 
     @Override
     public List<ColumnMeta> fetchColumns(String db, String table) throws SQLException {
+        // Arrow Flight's driver cannot describe a result set usably: it repeats the schema, reports
+        // every column NOT NULL, and zeroes precision and scale. Nullability alone is fatal -- a
+        // column described as NOT NULL becomes a required Connect field, and the first NULL value
+        // then fails Struct validation. Ask the server for the table definition instead.
+        //
+        // The MySQL path deliberately stays on result-set metadata: it is correct there and has
+        // been verified end to end, and there is no reason to put it behind newer, less-exercised
+        // code. Both paths log what they resolved, so the two can be compared directly before this
+        // divergence is ever collapsed back into one.
+        return isArrowFlight()
+                ? fetchColumnsFromInformationSchema(db, table)
+                : fetchColumnsFromResultSetMetadata(db, table);
+    }
+
+    private List<ColumnMeta> fetchColumnsFromResultSetMetadata(String db, String table) throws SQLException {
         String sql = SqlBuilder.columnsProbeSql(db, table);
         try {
             Connection c = getConnection();
@@ -224,6 +239,112 @@ public class StarRocksJdbcClient implements CdcClient {
         } catch (SQLException e) {
             closeIfBroken(e);
             throw e;
+        }
+    }
+
+    /**
+     * The column list as the server reports it, from {@code information_schema.columns}.
+     *
+     * <p>Used for the Arrow Flight transport, whose driver-supplied result-set metadata cannot be
+     * trusted. These are ordinary result rows, so the answer does not depend on how a driver
+     * chooses to describe a query.
+     */
+    private List<ColumnMeta> fetchColumnsFromInformationSchema(String db, String table) throws SQLException {
+        String sql = SqlBuilder.columnsMetadataSql(db, table);
+        try {
+            Connection c = getConnection();
+            try (Statement stmt = c.createStatement();
+                 ResultSet rs = stmt.executeQuery(sql)) {
+                List<ColumnMeta> result = new ArrayList<>();
+                Set<String> seen = new LinkedHashSet<>();
+                StringBuilder described = new StringBuilder();
+                while (rs.next()) {
+                    String name = rs.getString("COLUMN_NAME");
+                    String dataType = rs.getString("DATA_TYPE");
+                    boolean nullable = !"NO".equalsIgnoreCase(rs.getString("IS_NULLABLE"));
+                    int precision = rs.getInt("COLUMN_SIZE");
+                    int scale = rs.getInt("DECIMAL_DIGITS");
+                    int jdbcType = toJdbcType(dataType);
+                    if (described.length() > 0) {
+                        described.append(", ");
+                    }
+                    described.append(result.size() + 1).append(':').append(name)
+                            .append('(').append(dataType).append("->").append(jdbcType)
+                            .append(",p=").append(precision)
+                            .append(",s=").append(scale)
+                            .append(",null=").append(nullable).append(')');
+                    if (!seen.add(name)) {
+                        throw new SQLException("information_schema.columns lists the column '" + name
+                                + "' more than once for " + db + "." + table + ": " + described);
+                    }
+                    result.add(new ColumnMeta(name, jdbcType, precision, scale, nullable));
+                }
+                if (result.isEmpty()) {
+                    throw new SQLException("table not found: " + db + "." + table
+                            + " (information_schema.columns returned no rows)");
+                }
+                LOG.info("Resolved {} column(s) for {}.{} from information_schema: {}",
+                        result.size(), db, table, described);
+                return result;
+            }
+        } catch (SQLException e) {
+            closeIfBroken(e);
+            throw e;
+        }
+    }
+
+    /**
+     * StarRocks' {@code information_schema.columns.DATA_TYPE} spelling to a {@link Types} constant.
+     *
+     * <p>The accepted set is closed: it is exactly what the BE's
+     * {@code SchemaColumnsScanner::to_mysql_data_type_string} can emit, so an unrecognized value
+     * means StarRocks grew a type and this needs revisiting -- not that the caller passed
+     * something odd. Unrecognized and opaque types both land on {@link Types#OTHER}, which
+     * {@code ChangeRecordMapper} renders as a string, preserving the value rather than guessing at
+     * a structured representation.
+     */
+    static int toJdbcType(String dataType) {
+        if (dataType == null) {
+            return Types.OTHER;
+        }
+        switch (dataType.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "tinyint":
+                return Types.TINYINT;
+            case "smallint":
+                return Types.SMALLINT;
+            case "int":
+                return Types.INTEGER;
+            case "bigint":
+                return Types.BIGINT;
+            // LARGEINT. 128-bit, so it does not fit a long; carried as text to stay lossless.
+            case "bigint unsigned":
+                return Types.OTHER;
+            case "float":
+                return Types.REAL;
+            case "double":
+                return Types.DOUBLE;
+            case "decimal":
+                return Types.DECIMAL;
+            case "char":
+                return Types.CHAR;
+            case "varchar":
+                return Types.VARCHAR;
+            case "date":
+                return Types.DATE;
+            case "datetime":
+                return Types.TIMESTAMP;
+            case "binary":
+                return Types.BINARY;
+            case "varbinary":
+                return Types.VARBINARY;
+            // Opaque metric and semi-structured types: no faithful JDBC type, read as text.
+            case "hll":
+            case "bitmap":
+            case "percentile":
+            case "json":
+                return Types.OTHER;
+            default:
+                return Types.OTHER;
         }
     }
 
