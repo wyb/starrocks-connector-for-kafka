@@ -4,7 +4,7 @@
 
 The StarRocks CDC source connector is a Kafka Connect **source** connector — the reverse direction of the existing StarRocks sink connector in this repository. It streams change data capture (CDC) events out of StarRocks **shared-data (cloud-native)** tables into Kafka topics, one topic per captured table.
 
-Internally it drives StarRocks' existing bookmark and CHANGES infrastructure over the FE's MySQL protocol (JDBC): it pins a position with the `bookmark_create`/`bookmark_release` meta functions, takes a point-in-time initial snapshot via the `[_BOOKMARK_<id>_]` query hint, and streams incremental changes via the `[_CHANGES_<base>_<head>_]` query hint. Every record is emitted as a Debezium-style envelope (`op`/`before`/`after`/`source`/`ts_ms`) with a schema-carrying Kafka Connect `Struct` key and value. Delivery is **at-least-once**.
+Internally it drives StarRocks' existing bookmark and CHANGES infrastructure over the FE's MySQL protocol (JDBC): it pins a position with the `bookmark_create`/`bookmark_release` meta functions, takes a point-in-time initial snapshot via the `[_BOOKMARK_<id>_]` query hint, and streams incremental changes via the `[_CHANGES_<base>_<head>_]` query hint. Every record is emitted as a Debezium envelope (`before`/`after`/`source`/`op`/`ts_ms`/`transaction`, built by Debezium's own `io.debezium.data.Envelope`) with a schema-carrying Kafka Connect `Struct` key and value. Delivery is **at-least-once**.
 
 ---
 
@@ -91,9 +91,17 @@ Every record's key and value are schema-carrying Kafka Connect `Struct`s, so con
 
 ## Message Format
 
-Every record is a Debezium-style envelope: `op` / `before` / `after` / `source` / `ts_ms`, where `source` carries `db`, `table`, `row_version`, and `bookmark.{base, head}`. The examples below track one running scenario against a PRIMARY KEY table `db1.orders(id INT, name VARCHAR, qty INT)` with `id` as its key, captured as topic `sr.db1.orders`.
+Every record is a Debezium envelope, built by Debezium's own `io.debezium.data.Envelope` rather than assembled by this connector, so its fields appear in the canonical order that library defines:
 
-For readability, the JSON below shows each envelope's logical field values; the actual bytes on the wire depend on the converter configured above (e.g. a schema+payload envelope for `JsonConverter`).
+```
+before, after, source, op, ts_ms, transaction
+```
+
+`source` carries `db`, `table`, `row_version`, and `bookmark.{base, head}`. `transaction` is always `null` — StarRocks' CHANGES stream carries no transaction metadata — but the field is present in every record's schema, so consumers and schema registries see the same envelope shape any other Debezium connector produces. Field order is part of the schema identity a registry compares against, so treat the order above as the contract, not as formatting.
+
+The examples below track one running scenario against a PRIMARY KEY table `db1.orders(id INT, name VARCHAR, qty INT)` with `id` as its key, captured as topic `sr.db1.orders`.
+
+For readability, the JSON below shows each envelope's logical field values in that canonical order; the actual bytes on the wire depend on the converter configured above (e.g. a schema+payload envelope for `JsonConverter`).
 
 ### Snapshot rows (`op: "r"`)
 
@@ -101,7 +109,6 @@ The initial snapshot is a point-in-time read pinned to one bookmark, so every ro
 
 ```json
 {
-  "op": "r",
   "before": null,
   "after": { "id": 1, "name": "widget", "qty": 10 },
   "source": {
@@ -110,7 +117,9 @@ The initial snapshot is a point-in-time read pinned to one bookmark, so every ro
     "row_version": 0,
     "bookmark": { "base": 1000, "head": 1000 }
   },
-  "ts_ms": 1700000000000
+  "op": "r",
+  "ts_ms": 1700000000000,
+  "transaction": null
 }
 ```
 Key: `{ "id": 1 }`. (A second `op: "r"` record follows for `id: 2`, same `source` values.)
@@ -133,7 +142,6 @@ An `INSERT` of `(3, 'thingamajig', 30)`, picked up by the next poll (`base` is t
 
 ```json
 {
-  "op": "c",
   "before": null,
   "after": { "id": 3, "name": "thingamajig", "qty": 30 },
   "source": {
@@ -142,7 +150,9 @@ An `INSERT` of `(3, 'thingamajig', 30)`, picked up by the next poll (`base` is t
     "row_version": 4,
     "bookmark": { "base": 1000, "head": 1010 }
   },
-  "ts_ms": 1700000005000
+  "op": "c",
+  "ts_ms": 1700000005000,
+  "transaction": null
 }
 ```
 Key: `{ "id": 3 }`.
@@ -153,7 +163,6 @@ There is no dedicated `op: "u"`. StarRocks' CHANGES window represents a SQL `UPD
 
 ```json
 {
-  "op": "d",
   "before": { "id": 3, "name": "thingamajig", "qty": 30 },
   "after": null,
   "source": {
@@ -162,12 +171,13 @@ There is no dedicated `op: "u"`. StarRocks' CHANGES window represents a SQL `UPD
     "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
-  "ts_ms": 1700000010000
+  "op": "d",
+  "ts_ms": 1700000010000,
+  "transaction": null
 }
 ```
 ```json
 {
-  "op": "c",
   "before": null,
   "after": { "id": 3, "name": "thingamajig", "qty": 300 },
   "source": {
@@ -176,7 +186,9 @@ There is no dedicated `op: "u"`. StarRocks' CHANGES window represents a SQL `UPD
     "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
-  "ts_ms": 1700000010001
+  "op": "c",
+  "ts_ms": 1700000010001,
+  "transaction": null
 }
 ```
 Both records share key `{ "id": 3 }` and `source.row_version: 5`, and the delete is always produced before the insert for the same key within a window.
@@ -187,7 +199,6 @@ A `DELETE FROM db1.orders WHERE id = 2`:
 
 ```json
 {
-  "op": "d",
   "before": { "id": 2, "name": "gadget", "qty": 20 },
   "after": null,
   "source": {
@@ -196,7 +207,9 @@ A `DELETE FROM db1.orders WHERE id = 2`:
     "row_version": 6,
     "bookmark": { "base": 1020, "head": 1030 }
   },
-  "ts_ms": 1700000015000
+  "op": "d",
+  "ts_ms": 1700000015000,
+  "transaction": null
 }
 ```
 Key: `{ "id": 2 }`. If `source.tombstones.on.delete=true`, this record is immediately followed by a **separate** tombstone record: it shares the delete record's key (and key schema), destination topic, and Kafka Connect's internal `sourcePartition`/`sourceOffset` bookkeeping (the connector's own resume checkpoint, not the Kafka broker-assigned partition/offset), but it is its own Kafka message with a `null` value and `null` value schema — the usual Kafka Connect signal for downstream log compaction.

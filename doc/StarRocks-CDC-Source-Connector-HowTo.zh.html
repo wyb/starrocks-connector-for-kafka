@@ -185,7 +185,7 @@
 
 <h2 id="what-it-does"><span class="no">1</span>What It Does</h2>
 <p>StarRocks CDC source connector 是一个 Kafka Connect <strong>source</strong>（源）连接器——方向与本仓库中已有的 StarRocks sink connector 相反。它会把变更数据捕获（CDC）事件从 StarRocks 的<strong>存算分离（云原生）</strong>表持续流出到 Kafka topic，每个被捕获的表对应一个 topic。</p>
-<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium 风格的 envelope（<code>op</code>/<code>before</code>/<code>after</code>/<code>source</code>/<code>ts_ms</code>）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
+<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium envelope（<code>before</code>/<code>after</code>/<code>source</code>/<code>op</code>/<code>ts_ms</code>/<code>transaction</code>，由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
 
 <h2 id="prerequisites"><span class="no">2</span>前置条件</h2>
 <ul>
@@ -263,13 +263,15 @@ connect.timeoutms=1000</code></pre>
 <p>每条记录的 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>，因此需要配置支持 schema 的 <code>key.converter</code>/<code>value.converter</code>（例如启用了 <code>schemas.enable=true</code> 的 <code>JsonConverter</code>，或依赖 schema registry 的 Avro/Protobuf converter）。</p>
 
 <h2 id="message-format"><span class="no">4</span>消息格式</h2>
-<p>每条记录都是 Debezium 风格的 envelope：<code>op</code> / <code>before</code> / <code>after</code> / <code>source</code> / <code>ts_ms</code>，其中 <code>source</code> 携带 <code>db</code>、<code>table</code>、<code>row_version</code>，以及 <code>bookmark.{base, head}</code>。下面的示例都围绕同一个持续演进的场景：一张 PRIMARY KEY 表 <code>db1.orders(id INT, name VARCHAR, qty INT)</code>，以 <code>id</code> 为 key，被捕获到的 topic 是 <code>sr.db1.orders</code>。</p>
-<p>为便于阅读，下面的 JSON 展示的是每个 envelope 的逻辑字段取值；实际在网络上传输的字节格式取决于上文配置的 converter（例如 <code>JsonConverter</code> 会是一个 schema+payload 形式的 envelope）。</p>
+<p>每条记录都是 Debezium envelope，且由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建，而非由本连接器自行拼装，因此其字段顺序就是该库定义的规范顺序：</p>
+<pre><code>before, after, source, op, ts_ms, transaction</code></pre>
+<p><code>source</code> 携带 <code>db</code>、<code>table</code>、<code>row_version</code>，以及 <code>bookmark.{base, head}</code>。<code>transaction</code> 恒为 <code>null</code>——StarRocks 的 CHANGES 流不携带事务元数据——但该字段在每条记录的 schema 中都存在，因此消费者和 schema registry 看到的 envelope 形态，与任何其他 Debezium 连接器产生的完全一致。字段顺序是 schema registry 用来比对的 schema 标识的一部分，所以上面这个顺序应当被当作契约，而不是排版格式。</p>
+<p>下面的示例都围绕同一个持续演进的场景：一张 PRIMARY KEY 表 <code>db1.orders(id INT, name VARCHAR, qty INT)</code>，以 <code>id</code> 为 key，被捕获到的 topic 是 <code>sr.db1.orders</code>。</p>
+<p>为便于阅读，下面的 JSON 按上述规范顺序展示每个 envelope 的逻辑字段取值；实际在网络上传输的字节格式取决于上文配置的 converter（例如 <code>JsonConverter</code> 会是一个 schema+payload 形式的 envelope）。</p>
 
 <h3>快照行（<code>op: "r"</code>）</h3>
 <p>初始快照是钉在同一个 bookmark 上的一次时间点读取，因此它发出的每一行都共享相同的 <code>bookmark.base</code>/<code>bookmark.head</code>——两者都等于该快照所钉住的 bookmark id。快照行的 <code>row_version</code> <strong>永远是 <code>0</code></strong>：一次钉住的读取会跨越多个分区，而每个分区各自处于自己的版本上，因此不存在单一版本可供报告。至于为什么这里不能使用 bookmark id，参见<a href="#row_version-across-record-types"><code>row_version</code> 在不同记录类型中的表现</a>。</p>
 <pre><code>{
-  "op": "r",
   "before": null,
   "after": { "id": 1, "name": "widget", "qty": 10 },
   "source": {
@@ -278,7 +280,9 @@ connect.timeoutms=1000</code></pre>
     "row_version": 0,
     "bookmark": { "base": 1000, "head": 1000 }
   },
-  "ts_ms": 1700000000000
+  "op": "r",
+  "ts_ms": 1700000000000,
+  "transaction": null
 }</code></pre>
 <p>Key：<code>{ "id": 1 }</code>。（紧接着会有第二条 <code>op: "r"</code> 记录，对应 <code>id: 2</code>，<code>source</code> 取值相同。）</p>
 
@@ -299,7 +303,6 @@ connect.timeoutms=1000</code></pre>
 <h3>插入（<code>op: "c"</code>）</h3>
 <p>一次 <code>INSERT</code> 写入 <code>(3, 'thingamajig', 30)</code>，会被下一次轮询捕获到（<code>base</code> 是上一次已提交的 bookmark，<code>head</code> 是本次轮询刚创建的 bookmark）：</p>
 <pre><code>{
-  "op": "c",
   "before": null,
   "after": { "id": 3, "name": "thingamajig", "qty": 30 },
   "source": {
@@ -308,14 +311,15 @@ connect.timeoutms=1000</code></pre>
     "row_version": 4,
     "bookmark": { "base": 1000, "head": 1010 }
   },
-  "ts_ms": 1700000005000
+  "op": "c",
+  "ts_ms": 1700000005000,
+  "transaction": null
 }</code></pre>
 <p>Key：<code>{ "id": 3 }</code>。</p>
 
 <h3>更新（<code>op: "d"</code> + <code>op: "c"</code>，相同 key）</h3>
 <p>这里没有专门的 <code>op: "u"</code>。StarRocks 的 CHANGES 窗口把一次 SQL <code>UPDATE</code> 表示为一对操作——删除旧值、插入新值，且<strong>两者的 <code>row_version</code> 相同</strong>；连接器原样保留这种配对：对同一个 key，总是先发出删除记录，再发出插入记录。一条 <code>UPDATE ... SET qty = 300 WHERE id = 3</code> 会产生：</p>
 <pre><code>{
-  "op": "d",
   "before": { "id": 3, "name": "thingamajig", "qty": 30 },
   "after": null,
   "source": {
@@ -324,10 +328,11 @@ connect.timeoutms=1000</code></pre>
     "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
-  "ts_ms": 1700000010000
+  "op": "d",
+  "ts_ms": 1700000010000,
+  "transaction": null
 }</code></pre>
 <pre><code>{
-  "op": "c",
   "before": null,
   "after": { "id": 3, "name": "thingamajig", "qty": 300 },
   "source": {
@@ -336,14 +341,15 @@ connect.timeoutms=1000</code></pre>
     "row_version": 5,
     "bookmark": { "base": 1010, "head": 1020 }
   },
-  "ts_ms": 1700000010001
+  "op": "c",
+  "ts_ms": 1700000010001,
+  "transaction": null
 }</code></pre>
 <p>两条记录共享 key <code>{ "id": 3 }</code> 和 <code>source.row_version: 5</code>，并且在同一个窗口内，对同一个 key，删除记录总是产生在插入记录之前。</p>
 
 <h3>删除（<code>op: "d"</code>）</h3>
 <p>一次 <code>DELETE FROM db1.orders WHERE id = 2</code>：</p>
 <pre><code>{
-  "op": "d",
   "before": { "id": 2, "name": "gadget", "qty": 20 },
   "after": null,
   "source": {
@@ -352,7 +358,9 @@ connect.timeoutms=1000</code></pre>
     "row_version": 6,
     "bookmark": { "base": 1020, "head": 1030 }
   },
-  "ts_ms": 1700000015000
+  "op": "d",
+  "ts_ms": 1700000015000,
+  "transaction": null
 }</code></pre>
 <p>Key：<code>{ "id": 2 }</code>。如果 <code>source.tombstones.on.delete=true</code>，这条记录之后会立即跟着一条<strong>独立</strong>的 tombstone（墓碑）记录：它与删除记录共享相同的 key（及 key schema）、目标 topic，以及 Kafka Connect 内部的 <code>sourcePartition</code>/<code>sourceOffset</code> 记录（这是连接器自身用于恢复的 checkpoint，并非 Kafka broker 分配的 partition/offset），但它本身是一条独立的 Kafka 消息，value 为 <code>null</code>、value schema 也为 <code>null</code>——这是 Kafka Connect 中用于触发下游日志压缩（log compaction）的常规信号。</p>
 
