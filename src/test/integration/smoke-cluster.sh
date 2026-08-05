@@ -297,7 +297,7 @@ note "Debezium envelope shape confirmed on the wire"
 step "6. restart: resume from committed offset, no snapshot replay"
 old_pid="$worker_pid"
 stop_worker "$old_pid"
-sr_sql "INSERT INTO $DB.$TABLE VALUES (4,40);"
+sr_sql "INSERT INTO $DB.$TABLE (id, v) VALUES (4, 40);"
 start_worker
 [ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart"
 sleep 25
@@ -327,7 +327,7 @@ step "8. bookmark reclamation actually happens"
 # more windows, each separated by more than offset.flush.interval.ms, so the fence advances
 # with acked records and reclamation is forced.
 for i in 5 6 7; do
-  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)), '$TZ_DATE', '$TZ_DATETIME');"
+  sr_sql "INSERT INTO $DB.$TABLE (id, v) VALUES ($i, $((i * 10)));"
   sleep 8
 done
 released=0

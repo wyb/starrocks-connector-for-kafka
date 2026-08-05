@@ -211,7 +211,7 @@ echo "temporal columns OK: DATE -> $TZ_EXPECT_DAYS, DATETIME -> $TZ_EXPECT_MILLI
 step "6. crash recovery: no snapshot replay"
 old_pid="$worker_pid"
 stop_worker "$old_pid"
-sr_sql "INSERT INTO $DB.$TABLE VALUES (4,40);"
+sr_sql "INSERT INTO $DB.$TABLE (id, v) VALUES (4, 40);"
 start_worker
 [ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart — the old process was never replaced"
 sleep 25
@@ -228,7 +228,7 @@ step "7. bookmark reclamation actually happens"
 # Releases lag one commit cycle behind acknowledged offsets by design, so a short run can finish
 # having released nothing -- which would make a "no failures" check pass vacuously.
 for i in 5 6 7; do
-  sr_sql "INSERT INTO $DB.$TABLE VALUES ($i, $((i * 10)), '$TZ_DATE', '$TZ_DATETIME');"
+  sr_sql "INSERT INTO $DB.$TABLE (id, v) VALUES ($i, $((i * 10)));"
   sleep 8
 done
 released=0
