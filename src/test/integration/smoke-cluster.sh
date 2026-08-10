@@ -75,14 +75,19 @@ sr_val()  { mysql "${mysql_args[@]}" -N -B -e "$1"; }   # no header, tab separat
 sr_config() { sr_val "ADMIN SHOW FRONTEND CONFIG LIKE '$1';" | awk -F'\t' 'NR==1{print $3}'; }
 
 worker_pid=""
+sketch_pid=""
 cleanup() {
   local rc=$?
   printf '\n=== cleanup ===\n'
-  if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
-    kill "$worker_pid" 2>/dev/null || true
-    for _ in $(seq 1 15); do kill -0 "$worker_pid" 2>/dev/null || break; sleep 1; done
-    kill -9 "$worker_pid" 2>/dev/null || true
-  fi
+  # Both, and by name: step 11 runs a second short-lived worker, and a Connect process
+  # surviving this script would hold the REST port against the next run.
+  for p in "$worker_pid" "$sketch_pid"; do
+    [ -n "$p" ] || continue
+    kill -0 "$p" 2>/dev/null || continue
+    kill "$p" 2>/dev/null || true
+    for _ in $(seq 1 15); do kill -0 "$p" 2>/dev/null || break; sleep 1; done
+    kill -9 "$p" 2>/dev/null || true
+  done
   if [ "$rc" -ne 0 ] && [ "${KEEP_ON_FAILURE:-}" = "1" ]; then
     note "KEEP_ON_FAILURE=1 -> leaving database $DB and topic $TOPIC in place"
     note "worker log: $OUT_DIR/connect.log   consumed: $CONSUMED"
@@ -445,11 +450,20 @@ sed "s|^starrocks.table.names=.*|starrocks.table.names=$SKETCH_TABLE|; s|^name=.
 sed "s|^offset.storage.file.filename=.*|offset.storage.file.filename=$OUT_DIR/offsets-sketch|" \
   "$OUT_DIR/worker.properties" > "$OUT_DIR/worker-sketch.properties"
 
+# Every standalone worker starts Connect's REST server, and it cannot be turned off, so a
+# second one cannot come up while the first still holds port 8083. Steps 8 and 9 have
+# already read this worker's log and step 10 read $CONSUMED, so nothing below needs it.
+if kill -0 "$worker_pid" 2>/dev/null; then
+  stop_worker "$worker_pid"
+  worker_pid=""
+  sleep 3   # let the listening socket be released before the next worker claims it
+fi
+
 KAFKA_OPTS="${KAFKA_OPTS:-} $WORKER_JAVA_OPTS" \
   "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker-sketch.properties" "$OUT_DIR/source-sketch.properties" \
   > "$OUT_DIR/connect-sketch.log" 2>&1 &
 sketch_pid=$!
-for _ in $(seq 1 20); do
+for _ in $(seq 1 30); do
   grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" && break
   kill -0 "$sketch_pid" 2>/dev/null || break
   sleep 1
@@ -458,9 +472,19 @@ kill "$sketch_pid" 2>/dev/null || true
 for _ in $(seq 1 10); do kill -0 "$sketch_pid" 2>/dev/null || break; sleep 1; done
 kill -9 "$sketch_pid" 2>/dev/null || true
 
-grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" \
-  || { tail -40 "$OUT_DIR/connect-sketch.log"
-       fail "preflight did not refuse the HLL column -- either the guard is gone, or the StarRocks type name is not reaching it on the $SR_TRANSPORT transport"; }
+# Distinguish "the worker never got as far as the connector" from "the guard did not
+# fire". Reporting the second when the first happened sends the reader looking for a bug
+# in code that was never reached -- which is precisely what this step did on its first run,
+# when it blamed the guard for a REST port that was still bound.
+if ! grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log"; then
+  if grep -qE "Address already in use|Failed to bind" "$OUT_DIR/connect-sketch.log"; then
+    fail "the probe worker could not start: something else holds Connect's REST port. This says
+    nothing about the guard under test. Free the port, or set a different one via
+    KAFKA_EXTRA_PROPS (listeners=HTTP://localhost:18083), and rerun."
+  fi
+  tail -40 "$OUT_DIR/connect-sketch.log"
+  fail "preflight did not refuse the HLL column -- either the guard is gone, or the StarRocks type name is not reaching it on the $SR_TRANSPORT transport"
+fi
 grep -q "'h'" "$OUT_DIR/connect-sketch.log" \
   || fail "the refusal did not name the offending column, so an operator cannot act on it"
 note "preflight refused $DB.$SKETCH_TABLE, naming column 'h'"
