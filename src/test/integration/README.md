@@ -82,8 +82,16 @@ The script tears the containers down on exit, including on failure.
 | 5 | `UPDATE` emits `op="d"` (before image `v=20`) **before** `op="c"` (after image `v=200`) |
 | 5 | `DELETE` emits `op="d"` |
 | 6 | Killing and restarting the worker resumes from the committed offset: the new row surfaces as `op="c"` and the snapshot is **not** replayed |
-| 10 | *(cluster only)* A second captured table produces records at all — the only check that table-to-task fan-out works — and `VARBINARY` arrives as base64 `AQL/`, i.e. Connect `BYTES`. `0x0102ff` is not valid UTF-8 on purpose: read through `getString()` the `0xff` would come back as U+FFFD, and nothing would throw, because schema and read would agree on `STRING`. `JSON` and `ARRAY` values arrive intact |
+| 10 | *(cluster only)* `VARBINARY` arrives as base64 `AQL/`, i.e. Connect `BYTES`, in both a snapshot record and a before-image. `0x0102ff` is not valid UTF-8 on purpose: read through `getString()` the `0xff` would come back as U+FFFD, and nothing would throw, because schema and read would agree on `STRING`. `JSON` and `ARRAY` values arrive intact |
 | 11 | *(cluster only)* Preflight refuses a table with an `HLL` column, naming it. This also proves the StarRocks type name reaches the connector on the transport under test — the guard reads `information_schema.DATA_TYPE`, which on the MySQL protocol is a second query merged onto the driver's own view |
+
+One table carries every case on purpose. The temporal and complex-type columns
+ride the very records the ordering and delete assertions inspect, so a value that
+only survives a snapshot — but not a before-image — still fails. Putting them in a
+table of their own would have produced `op=r` records and nothing else.
+
+Table-to-task fan-out (more than one captured table) is **not** covered by either
+harness.
 
 Step 5's ordering assertion is the one that matters most: the BE emits the
 version chain newest-first with INSERT before DELETE inside a version, so the

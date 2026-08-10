@@ -56,11 +56,6 @@ DB="cdc_smoke_${SUFFIX}"
 TABLE=orders
 CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
 TOPIC="sr.${DB}.${TABLE}"
-# A second captured table, DUPLICATE KEY so it needs no CDC property and puts no
-# primary-key restriction on the column types under test. Capturing two tables at once
-# also exercises the connector's table-to-task fan-out, which nothing else here does.
-TYPES_TABLE=coltypes
-TYPES_TOPIC="sr.${DB}.${TYPES_TABLE}"
 # Aggregate sketches get their own table: preflight is expected to REFUSE it, so it must
 # never be part of the connector the rest of the run depends on.
 SKETCH_TABLE=sketches
@@ -89,7 +84,7 @@ cleanup() {
     kill -9 "$worker_pid" 2>/dev/null || true
   fi
   if [ "$rc" -ne 0 ] && [ "${KEEP_ON_FAILURE:-}" = "1" ]; then
-    note "KEEP_ON_FAILURE=1 -> leaving database $DB and topics $TOPIC, $TYPES_TOPIC in place"
+    note "KEEP_ON_FAILURE=1 -> leaving database $DB and topic $TOPIC in place"
     note "worker log: $OUT_DIR/connect.log   consumed: $CONSUMED"
     note "drop them with: DROP DATABASE $DB;"
     return
@@ -99,11 +94,9 @@ cleanup() {
     sr_sql "DROP DATABASE IF EXISTS $DB;" 2>/dev/null || note "could not drop $DB — drop it manually"
   fi
   if [ -n "${KAFKA_BIN:-}" ] && [ -n "${KAFKA_BOOTSTRAP:-}" ]; then
-    for t in "$TOPIC" "$TYPES_TOPIC"; do
-      "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-        --delete --topic "$t" >/dev/null 2>&1 \
-        || note "could not delete topic $t (delete.topic.enable=false?) — delete it manually"
-    done
+    "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+      --delete --topic "$TOPIC" >/dev/null 2>&1 \
+      || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
   fi
   rm -rf "$OUT_DIR" "$PLUGIN_DIR"
 }
@@ -175,30 +168,30 @@ step "1. seed StarRocks"
 # own because they must ride the same records the other assertions inspect: a DATE read in the
 # worker's local zone makes Kafka Connect's Date logical type reject the whole record, so the
 # ordering and delete assertions below would fail too -- which is the coupling worth testing.
-sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME)
-        PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
-        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TABLE VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME'),
-        (2,20,'$TZ_DATE','$TZ_DATETIME'),
-        (3,30,'$TZ_DATE','$TZ_DATETIME');"
-note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME (this worker's TZ: $(date +%Z))"
-
-# Column types that unit tests cannot reach, because they turn on what the driver and the
-# server actually return rather than on the mapper's logic:
-#   b   VARBINARY -- must arrive as Connect BYTES, i.e. base64 on the wire. Read through
-#                    getString() instead it would be charset-decoded and 0xff destroyed,
-#                    and nothing would throw, which is exactly why this needs a live check.
+# The type columns live here for the same reason the temporal ones do, and the PK
+# restriction that might have forced them elsewhere applies only to KEY columns
+# (CreateTableAnalyzer loops over keysColumnNames): value columns of a PRIMARY KEY table
+# take any type. Keeping them here means they ride the update and delete records too, so
+# the VARBINARY round trip is checked in a before-image as well as in the snapshot -- a
+# separate table would only ever have produced op=r.
+#
+#   b   VARBINARY -- must arrive as Connect BYTES, i.e. base64 on the wire
 #   j   JSON      -- carried as text, schema named io.debezium.data.Json
 #   arr ARRAY     -- carried as text, schema named com.starrocks.data.Array
+#
 # 0x0102ff is deliberately not valid UTF-8: it is the byte sequence a text round trip
-# mangles. Its base64 is AQL/.
-sr_sql "CREATE TABLE $DB.$TYPES_TABLE (id INT, b VARBINARY, j JSON, arr ARRAY<INT>)
-        DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
-        PROPERTIES ('replication_num'='1');"
-sr_sql "INSERT INTO $DB.$TYPES_TABLE (id, b, j, arr)
-        VALUES (1, to_binary('0102ff','hex'), parse_json('{\"a\":1}'), [10,20,30]);"
-note "created $DB.$TYPES_TABLE with VARBINARY / JSON / ARRAY"
+# mangles, and its base64 is AQL/.
+sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME,
+                                 b VARBINARY, j JSON, arr ARRAY<INT>)
+        PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
+# Named columns, not positional VALUES: adding a column to the DDL above must not silently
+# shift every literal by one, which is exactly what a positional INSERT does.
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, b, j, arr) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30]),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30]),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30]);"
+note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/VARBINARY/JSON/ARRAY (this worker's TZ: $(date +%Z))"
 
 case "$SR_TRANSPORT" in
   mysql)
@@ -258,18 +251,16 @@ starrocks.jdbc.url=$CONNECTOR_JDBC_URL
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
-starrocks.table.names=$TABLE,$TYPES_TABLE
+starrocks.table.names=$TABLE
 source.topic.prefix=sr
 source.poll.intervalms=2000
 EOF
 
 # One partition: the delete-before-insert assertion reads consumer line order as
 # message order, which only holds within a partition.
-for t in "$TOPIC" "$TYPES_TOPIC"; do
-  "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --create --if-not-exists --topic "$t" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
-done
-note "created topics $TOPIC and $TYPES_TOPIC (1 partition each, RF=$TOPIC_RF)"
+"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
+note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
 
 # Appends, never truncates: the restart in step 6 would otherwise throw away the
 # pre-restart half of the log, which is where the first bookmark releases land.
@@ -290,11 +281,10 @@ stop_worker() {
   fail "worker $pid still alive after SIGTERM — restart assertion would be meaningless"
 }
 
-consume_from() {
+consume() {
   "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --topic "$1" --from-beginning --timeout-ms "${2:-15000}" 2>/dev/null || true
+    --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
 }
-consume() { consume_from "$TOPIC" "${1:-15000}"; }
 
 step "3. start worker and wait for the snapshot"
 start_worker
@@ -417,28 +407,28 @@ fi
 note "no bookmark release failures"
 
 step "10. column types that only a live cluster can settle"
-# The connector was configured for two tables; this is also the only assertion that the
-# second one produced anything at all, i.e. that table-to-task fan-out works.
-types_records=$(consume_from "$TYPES_TOPIC" 15000)
-[ -n "$types_records" ] \
-  || { tail -40 "$OUT_DIR/connect.log"; fail "no records on $TYPES_TOPIC -- the second captured table produced nothing"; }
-note "records on $TYPES_TOPIC:"
-printf '%s\n' "$types_records" | head -3
+# $CONSUMED already holds the snapshot, the UPDATE pair and the DELETE from step 5, so
+# these columns are checked on the same records every other assertion inspects.
 
-# VARBINARY must arrive as Connect BYTES, which JsonConverter renders as base64.
-# 0x0102ff -> AQL/. Reading it through getString() would charset-decode the bytes and
-# 0xff would come back as U+FFFD -- silently, since both sides would agree on STRING.
-printf '%s' "$types_records" | grep -q '"b":"AQL/"' \
-  || { printf '%s\n' "$types_records" | head -3
-       fail "VARBINARY did not arrive as base64 AQL/ -- it is being read as text, which destroys any byte that is not valid UTF-8"; }
-note "VARBINARY -> BYTES -> base64 AQL/ OK"
+# VARBINARY must arrive as Connect BYTES, which JsonConverter renders as base64:
+# 0x0102ff -> AQL/. Read through getString() the bytes would be charset-decoded and 0xff
+# would come back as U+FFFD -- silently, because schema and read would both say STRING.
+grep -q '"b":"AQL/"' "$CONSUMED" \
+  || { head -3 "$CONSUMED"
+       fail "VARBINARY did not arrive as base64 AQL/ -- it is being read as text, which destroys every byte that is not valid UTF-8"; }
+# And specifically in a before-image: op=d records are built from the same extraction path
+# but a different envelope field, so a regression could hit one and not the other.
+grep '"op":"d"' "$CONSUMED" | grep -q '"b":"AQL/"' \
+  || fail "VARBINARY survived the snapshot but not a before image (op=d)"
+note "VARBINARY -> BYTES -> base64 AQL/, in both op=r and op=d OK"
 
-# JSON and ARRAY are carried as text for now (their schemas are named, but schemas.enable
-# is off here so only the values are on the wire). Assert the values survive intact.
-printf '%s' "$types_records" | grep -q '"a"' \
-  || { printf '%s\n' "$types_records" | head -3; fail "JSON column did not arrive intact"; }
-printf '%s' "$types_records" | grep -qE '"arr":"?\[?10' \
-  || { printf '%s\n' "$types_records" | head -3; fail "ARRAY column did not arrive intact"; }
+# JSON and ARRAY are carried as text (their schemas are named, but schemas.enable is off
+# here, so only values reach the wire). Assert the values survive intact.
+grep -q '"j":' "$CONSUMED" || { head -3 "$CONSUMED"; fail "JSON column missing from the records"; }
+grep -qE '"j":"?\{?\\?"a' "$CONSUMED" \
+  || { head -3 "$CONSUMED"; fail "JSON column did not arrive intact"; }
+grep -qE '"arr":"?\[?10' "$CONSUMED" \
+  || { head -3 "$CONSUMED"; fail "ARRAY column did not arrive intact"; }
 note "JSON and ARRAY values arrived intact"
 
 step "11. preflight refuses a table whose column cannot be exported"
