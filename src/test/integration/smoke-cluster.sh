@@ -183,20 +183,28 @@ step "1. seed StarRocks"
 #   b   VARBINARY -- must arrive as Connect BYTES, i.e. base64 on the wire
 #   j   JSON      -- carried as text, schema named io.debezium.data.Json
 #   arr ARRAY     -- carried as text, schema named com.starrocks.data.Array
+#   m   MAP       -- ditto, com.starrocks.data.Map
+#   s   STRUCT    -- ditto, com.starrocks.data.Struct
+#
+# All three complex types are here rather than just ARRAY because they take separate
+# branches in toJdbcType and in the logical-name lookup, and because information_schema
+# reports each with its own DATA_TYPE -- a mapping that only holds if the server really
+# spells them "array", "map" and "struct", which only a live cluster can confirm.
 #
 # 0x0102ff is deliberately not valid UTF-8: it is the byte sequence a text round trip
 # mangles, and its base64 is AQL/.
 sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME,
-                                 b VARBINARY, j JSON, arr ARRAY<INT>)
+                                 b VARBINARY, j JSON, arr ARRAY<INT>,
+                                 m MAP<VARCHAR(10),INT>, s STRUCT<x INT, y VARCHAR(10)>)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
 # Named columns, not positional VALUES: adding a column to the DDL above must not silently
 # shift every literal by one, which is exactly what a positional INSERT does.
-sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, b, j, arr) VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30]),
-        (2,20,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30]),
-        (3,30,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30]);"
-note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/VARBINARY/JSON/ARRAY (this worker's TZ: $(date +%Z))"
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, b, j, arr, m, s) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30],map{'mk':11},row(7,'seven')),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30],map{'mk':22},row(7,'seven')),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30],map{'mk':33},row(7,'seven'));"
+note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/VARBINARY/JSON/ARRAY/MAP/STRUCT (this worker's TZ: $(date +%Z))"
 
 case "$SR_TRANSPORT" in
   mysql)
@@ -427,14 +435,23 @@ grep '"op":"d"' "$CONSUMED" | grep -q '"b":"AQL/"' \
   || fail "VARBINARY survived the snapshot but not a before image (op=d)"
 note "VARBINARY -> BYTES -> base64 AQL/, in both op=r and op=d OK"
 
-# JSON and ARRAY are carried as text (their schemas are named, but schemas.enable is off
-# here, so only values reach the wire). Assert the values survive intact.
-grep -q '"j":' "$CONSUMED" || { head -3 "$CONSUMED"; fail "JSON column missing from the records"; }
+# JSON and the three complex types are carried as text (their schemas are named, but
+# schemas.enable is off here, so only values reach the wire). The exact rendering --
+# spacing, quoting, escaping -- is StarRocks' choice and not something to pin, so each
+# assertion looks for a value that could only have come from the right column.
+for probe in '"j":' '"arr":' '"m":' '"s":'; do
+  grep -q "$probe" "$CONSUMED" \
+    || { head -3 "$CONSUMED"; fail "column $probe missing from the records entirely"; }
+done
+grep -q 'seven' "$CONSUMED" || { head -3 "$CONSUMED"; fail "STRUCT column did not arrive intact"; }
+grep -q 'mk'    "$CONSUMED" || { head -3 "$CONSUMED"; fail "MAP column did not arrive intact"; }
 grep -qE '"j":"?\{?\\?"a' "$CONSUMED" \
   || { head -3 "$CONSUMED"; fail "JSON column did not arrive intact"; }
 grep -qE '"arr":"?\[?10' "$CONSUMED" \
   || { head -3 "$CONSUMED"; fail "ARRAY column did not arrive intact"; }
-note "JSON and ARRAY values arrived intact"
+note "JSON, ARRAY, MAP and STRUCT values arrived intact"
+note "one record, for the record:"
+head -1 "$CONSUMED"
 
 step "11. preflight refuses a table whose column cannot be exported"
 # HLL/BITMAP/PERCENTILE hold aggregate sketches, not values. Before this guard existed the
