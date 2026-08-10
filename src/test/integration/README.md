@@ -5,12 +5,18 @@ and Kafka. Unit tests cover the state machine with a fake client; this harness
 is what exercises real JDBC, real CHANGES windows, real bookmarks, and the
 packaged plugin jar.
 
-Two entry points, same assertions:
+Two entry points:
 
 | Script | Use when |
 | --- | --- |
 | `smoke.sh` | You have Docker and want the whole environment created for you |
 | `smoke-cluster.sh` | You already have StarRocks and Kafka clusters (no Docker) |
+
+They share steps 0–9. Steps 10 and 11 — column types and the preflight refusal of
+aggregate-sketch columns — exist only in `smoke-cluster.sh`, which is the harness
+that actually gets run against real clusters. Porting them to the Docker variant
+means rewriting them against `docker compose exec`, and untested shell in a script
+nobody runs is worse than a documented gap.
 
 `smoke-cluster.sh` additionally runs preflight checks that only matter against
 a real cluster — `run_mode=shared_data`, `enable_bookmark_meta_functions`, the
@@ -76,6 +82,8 @@ The script tears the containers down on exit, including on failure.
 | 5 | `UPDATE` emits `op="d"` (before image `v=20`) **before** `op="c"` (after image `v=200`) |
 | 5 | `DELETE` emits `op="d"` |
 | 6 | Killing and restarting the worker resumes from the committed offset: the new row surfaces as `op="c"` and the snapshot is **not** replayed |
+| 10 | *(cluster only)* A second captured table produces records at all — the only check that table-to-task fan-out works — and `VARBINARY` arrives as base64 `AQL/`, i.e. Connect `BYTES`. `0x0102ff` is not valid UTF-8 on purpose: read through `getString()` the `0xff` would come back as U+FFFD, and nothing would throw, because schema and read would agree on `STRING`. `JSON` and `ARRAY` values arrive intact |
+| 11 | *(cluster only)* Preflight refuses a table with an `HLL` column, naming it. This also proves the StarRocks type name reaches the connector on the transport under test — the guard reads `information_schema.DATA_TYPE`, which on the MySQL protocol is a second query merged onto the driver's own view |
 
 Step 5's ordering assertion is the one that matters most: the BE emits the
 version chain newest-first with INSERT before DELETE inside a version, so the

@@ -56,6 +56,14 @@ DB="cdc_smoke_${SUFFIX}"
 TABLE=orders
 CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
 TOPIC="sr.${DB}.${TABLE}"
+# A second captured table, DUPLICATE KEY so it needs no CDC property and puts no
+# primary-key restriction on the column types under test. Capturing two tables at once
+# also exercises the connector's table-to-task fan-out, which nothing else here does.
+TYPES_TABLE=coltypes
+TYPES_TOPIC="sr.${DB}.${TYPES_TABLE}"
+# Aggregate sketches get their own table: preflight is expected to REFUSE it, so it must
+# never be part of the connector the rest of the run depends on.
+SKETCH_TABLE=sketches
 
 # ${VAR:-} throughout: the required-arg checks below must be able to print a
 # useful message instead of dying on `set -u` while building this array.
@@ -81,7 +89,7 @@ cleanup() {
     kill -9 "$worker_pid" 2>/dev/null || true
   fi
   if [ "$rc" -ne 0 ] && [ "${KEEP_ON_FAILURE:-}" = "1" ]; then
-    note "KEEP_ON_FAILURE=1 -> leaving database $DB and topic $TOPIC in place"
+    note "KEEP_ON_FAILURE=1 -> leaving database $DB and topics $TOPIC, $TYPES_TOPIC in place"
     note "worker log: $OUT_DIR/connect.log   consumed: $CONSUMED"
     note "drop them with: DROP DATABASE $DB;"
     return
@@ -91,9 +99,11 @@ cleanup() {
     sr_sql "DROP DATABASE IF EXISTS $DB;" 2>/dev/null || note "could not drop $DB — drop it manually"
   fi
   if [ -n "${KAFKA_BIN:-}" ] && [ -n "${KAFKA_BOOTSTRAP:-}" ]; then
-    "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-      --delete --topic "$TOPIC" >/dev/null 2>&1 \
-      || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
+    for t in "$TOPIC" "$TYPES_TOPIC"; do
+      "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+        --delete --topic "$t" >/dev/null 2>&1 \
+        || note "could not delete topic $t (delete.topic.enable=false?) — delete it manually"
+    done
   fi
   rm -rf "$OUT_DIR" "$PLUGIN_DIR"
 }
@@ -174,6 +184,22 @@ sr_sql "INSERT INTO $DB.$TABLE VALUES
         (3,30,'$TZ_DATE','$TZ_DATETIME');"
 note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME (this worker's TZ: $(date +%Z))"
 
+# Column types that unit tests cannot reach, because they turn on what the driver and the
+# server actually return rather than on the mapper's logic:
+#   b   VARBINARY -- must arrive as Connect BYTES, i.e. base64 on the wire. Read through
+#                    getString() instead it would be charset-decoded and 0xff destroyed,
+#                    and nothing would throw, which is exactly why this needs a live check.
+#   j   JSON      -- carried as text, schema named io.debezium.data.Json
+#   arr ARRAY     -- carried as text, schema named com.starrocks.data.Array
+# 0x0102ff is deliberately not valid UTF-8: it is the byte sequence a text round trip
+# mangles. Its base64 is AQL/.
+sr_sql "CREATE TABLE $DB.$TYPES_TABLE (id INT, b VARBINARY, j JSON, arr ARRAY<INT>)
+        DUPLICATE KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
+        PROPERTIES ('replication_num'='1');"
+sr_sql "INSERT INTO $DB.$TYPES_TABLE (id, b, j, arr)
+        VALUES (1, to_binary('0102ff','hex'), parse_json('{\"a\":1}'), [10,20,30]);"
+note "created $DB.$TYPES_TABLE with VARBINARY / JSON / ARRAY"
+
 case "$SR_TRANSPORT" in
   mysql)
     CONNECTOR_JDBC_URL="jdbc:mysql://$SR_HOST:$SR_PORT"
@@ -232,16 +258,18 @@ starrocks.jdbc.url=$CONNECTOR_JDBC_URL
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
-starrocks.table.names=$TABLE
+starrocks.table.names=$TABLE,$TYPES_TABLE
 source.topic.prefix=sr
 source.poll.intervalms=2000
 EOF
 
 # One partition: the delete-before-insert assertion reads consumer line order as
 # message order, which only holds within a partition.
-"$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-  --create --if-not-exists --topic "$TOPIC" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
-note "created topic $TOPIC (1 partition, RF=$TOPIC_RF)"
+for t in "$TOPIC" "$TYPES_TOPIC"; do
+  "$KAFKA_BIN/kafka-topics.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
+    --create --if-not-exists --topic "$t" --partitions 1 --replication-factor "$TOPIC_RF" >/dev/null
+done
+note "created topics $TOPIC and $TYPES_TOPIC (1 partition each, RF=$TOPIC_RF)"
 
 # Appends, never truncates: the restart in step 6 would otherwise throw away the
 # pre-restart half of the log, which is where the first bookmark releases land.
@@ -262,10 +290,11 @@ stop_worker() {
   fail "worker $pid still alive after SIGTERM — restart assertion would be meaningless"
 }
 
-consume() {
+consume_from() {
   "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
+    --topic "$1" --from-beginning --timeout-ms "${2:-15000}" 2>/dev/null || true
 }
+consume() { consume_from "$TOPIC" "${1:-15000}"; }
 
 step "3. start worker and wait for the snapshot"
 start_worker
@@ -386,5 +415,64 @@ if grep -q "Failed to release bookmark" "$OUT_DIR/connect.log"; then
   fail "worker reported bookmark release failures — bookmarks stay pinned until TTL; check FE privileges and $OUT_DIR/connect.log"
 fi
 note "no bookmark release failures"
+
+step "10. column types that only a live cluster can settle"
+# The connector was configured for two tables; this is also the only assertion that the
+# second one produced anything at all, i.e. that table-to-task fan-out works.
+types_records=$(consume_from "$TYPES_TOPIC" 15000)
+[ -n "$types_records" ] \
+  || { tail -40 "$OUT_DIR/connect.log"; fail "no records on $TYPES_TOPIC -- the second captured table produced nothing"; }
+note "records on $TYPES_TOPIC:"
+printf '%s\n' "$types_records" | head -3
+
+# VARBINARY must arrive as Connect BYTES, which JsonConverter renders as base64.
+# 0x0102ff -> AQL/. Reading it through getString() would charset-decode the bytes and
+# 0xff would come back as U+FFFD -- silently, since both sides would agree on STRING.
+printf '%s' "$types_records" | grep -q '"b":"AQL/"' \
+  || { printf '%s\n' "$types_records" | head -3
+       fail "VARBINARY did not arrive as base64 AQL/ -- it is being read as text, which destroys any byte that is not valid UTF-8"; }
+note "VARBINARY -> BYTES -> base64 AQL/ OK"
+
+# JSON and ARRAY are carried as text for now (their schemas are named, but schemas.enable
+# is off here so only the values are on the wire). Assert the values survive intact.
+printf '%s' "$types_records" | grep -q '"a"' \
+  || { printf '%s\n' "$types_records" | head -3; fail "JSON column did not arrive intact"; }
+printf '%s' "$types_records" | grep -qE '"arr":"?\[?10' \
+  || { printf '%s\n' "$types_records" | head -3; fail "ARRAY column did not arrive intact"; }
+note "JSON and ARRAY values arrived intact"
+
+step "11. preflight refuses a table whose column cannot be exported"
+# HLL/BITMAP/PERCENTILE hold aggregate sketches, not values. Before this guard existed the
+# connector started cleanly on such a table and streamed the non-value forever, which from
+# the outside is indistinguishable from working. This also proves the StarRocks type name
+# reaches the connector on THIS transport -- the guard reads information_schema.DATA_TYPE,
+# and on the MySQL protocol that is a second query merged onto the driver's own view.
+sr_sql "CREATE TABLE $DB.$SKETCH_TABLE (k INT, h HLL HLL_UNION)
+        AGGREGATE KEY(k) DISTRIBUTED BY HASH(k) BUCKETS 1
+        PROPERTIES ('replication_num'='1');"
+sed "s|^starrocks.table.names=.*|starrocks.table.names=$SKETCH_TABLE|; s|^name=.*|name=${CONNECTOR_NAME}-sketch|" \
+  "$OUT_DIR/source.properties" > "$OUT_DIR/source-sketch.properties"
+sed "s|^offset.storage.file.filename=.*|offset.storage.file.filename=$OUT_DIR/offsets-sketch|" \
+  "$OUT_DIR/worker.properties" > "$OUT_DIR/worker-sketch.properties"
+
+KAFKA_OPTS="${KAFKA_OPTS:-} $WORKER_JAVA_OPTS" \
+  "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker-sketch.properties" "$OUT_DIR/source-sketch.properties" \
+  > "$OUT_DIR/connect-sketch.log" 2>&1 &
+sketch_pid=$!
+for _ in $(seq 1 20); do
+  grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" && break
+  kill -0 "$sketch_pid" 2>/dev/null || break
+  sleep 1
+done
+kill "$sketch_pid" 2>/dev/null || true
+for _ in $(seq 1 10); do kill -0 "$sketch_pid" 2>/dev/null || break; sleep 1; done
+kill -9 "$sketch_pid" 2>/dev/null || true
+
+grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" \
+  || { tail -40 "$OUT_DIR/connect-sketch.log"
+       fail "preflight did not refuse the HLL column -- either the guard is gone, or the StarRocks type name is not reaching it on the $SR_TRANSPORT transport"; }
+grep -q "'h'" "$OUT_DIR/connect-sketch.log" \
+  || fail "the refusal did not name the offending column, so an operator cannot act on it"
+note "preflight refused $DB.$SKETCH_TABLE, naming column 'h'"
 
 printf '\n=== PASS ===\n'
