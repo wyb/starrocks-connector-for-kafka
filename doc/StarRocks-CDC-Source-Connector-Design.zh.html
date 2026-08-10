@@ -873,6 +873,19 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <figcaption><b>图 6</b>左侧灰底的是 Debezium 拥有的字段，顺序即 Avro schema 身份的一部分；只有 <code>source</code> 块是 StarRocks 特有的。右侧说明为什么不需要自定义 partitioner——key 已经是主键，默认哈希恰好给出所需的分区内顺序。</figcaption>
 </figure>
 
+<div class="invariant">
+  <span class="tag">复杂类型：先按文本承载，但把服务端的类型名留住</span>
+  <p><code>java.sql.Types</code> 表达不了「这是 StarRocks 的 ARRAY」或「这是 HLL 草图」——它们全都是 <code>OTHER</code>，而在 MySQL 协议上，<code>ResultSetMetaData</code> 更是把它们和 VARCHAR 完全混同。所以 <code>ColumnMeta</code> 同时保留两套视角：JDBC 的，和 <code>information_schema</code> 给出的 <code>DATA_TYPE</code>（<code>array</code>/<code>json</code>/<code>hll</code>）与 <code>COLUMN_TYPE</code>（完整嵌套类型，如 <code>array&lt;int&gt;</code>）。</p>
+  <p>这也是<strong>两条通道都要查 <code>information_schema</code></strong> 的原因：MySQL 通道仍用 <code>ResultSetMetaData</code> 定 jdbcType/精度/可空性，但额外查一次拿类型名。否则同一张表会因为 URL scheme 不同而产出不同的 schema——传输方式本该是实现细节，会改变 schema 的就不是。</p>
+  <p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> 目前发的是文本，但带上了 <code>com.starrocks.data.*</code> 逻辑名；<code>JSON</code> 用 Debezium 自己的 <code>io.debezium.data.Json</code>（JSON 列按定义就是 JSON 文档，这个承诺是安全的）。前三者不借用那个名字，是因为那等于承诺每个值都能按 JSON 解析，而 NULL、内嵌引号、深层嵌套这些边界尚未验证。<code>srColumnType</code> 已经留在 <code>ColumnMeta</code> 上，是为重建嵌套 schema 那一步准备的——注意 StarRocks 超过 15 层嵌套会渲染成 <code>array&lt;...&gt;</code>，将来的解析器必须对此显式失败而不是猜。</p>
+</div>
+
+<div class="invariant warn">
+  <span class="tag">HLL / BITMAP / PERCENTILE 直接拒绝</span>
+  <p>这三种是聚合中间态，不是值：不配合聚合函数直接 <code>SELECT</code>，得到的东西消费者既解释不了也回灌不了。此前 preflight 只查表模型、CDC 属性和元数据列名冲突，所以带 HLL 列的表能顺利建起 connector，然后持续向 Kafka 发送无意义内容——<strong>从外部看和正常工作没有区别</strong>。现在在 preflight 拒绝并指明列名。</p>
+  <p><code>DATA_TYPE</code> 为 <code>unknown</code>（StarRocks 新增了类型）不阻塞，但会记一条带 <code>COLUMN_TYPE</code> 的 WARN——值仍按文本保留，不至于丢，但值得在启动时说一次。</p>
+</div>
+
 <div class="invariant warn">
   <span class="tag">快照行的 row_version 必须是 0，不能是 bookmark id</span>
   <p>变更记录的 <code>row_version</code> 是分区的可见版本号，从 1 开始逐次发布递增；而 bookmark id 来自 FE 全局 id 生成器，通常大几个数量级。把 bookmark id 放进这个字段，会让每一行快照数据看起来都比其后的所有变更更新——下游若按"仅当 row_version 增大才应用"去重，就会把全部变更丢掉。</p>

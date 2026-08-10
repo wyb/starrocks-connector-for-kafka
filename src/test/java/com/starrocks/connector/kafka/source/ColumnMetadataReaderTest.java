@@ -25,6 +25,8 @@ import org.junit.Test;
 import java.sql.Types;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 /**
  * The {@code DATA_TYPE} spelling to {@link Types} mapping used on the Arrow Flight transport, where
@@ -94,5 +96,55 @@ public class ColumnMetadataReaderTest {
     public void testBinarySpellingsDoNotFallBackToText() {
         assertEquals(Types.BINARY, ColumnMetadataReader.toJdbcType("binary"));
         assertEquals(Types.VARBINARY, ColumnMetadataReader.toJdbcType("varbinary"));
+    }
+
+    /**
+     * Complex types share {@link Types#OTHER} with everything else carried as text, so the JDBC
+     * type alone cannot tell them apart -- which is why they are listed explicitly in the switch
+     * and why the StarRocks name is kept on {@link ColumnMeta}. FE renders these three via
+     * {@code toMysqlDataTypeString()} as exactly "array", "map" and "struct".
+     */
+    @Test
+    public void testComplexTypesAreCarriedAsTextForNow() {
+        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("array"));
+        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("map"));
+        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("struct"));
+        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("json"));
+    }
+
+    /**
+     * The three aggregate sketches. A SELECT of one yields nothing a consumer can use, so the
+     * connector refuses the table outright rather than streaming a non-value.
+     */
+    @Test
+    public void testAggregateSketchTypesAreNonExportable() {
+        assertTrue(ColumnMetadataReader.isNonExportable("hll"));
+        assertTrue(ColumnMetadataReader.isNonExportable("bitmap"));
+        assertTrue(ColumnMetadataReader.isNonExportable("percentile"));
+    }
+
+    /**
+     * Everything else must pass, complex types included: they are exportable, just as text. A
+     * guard that also caught ARRAY would reject perfectly capturable tables.
+     */
+    @Test
+    public void testOrdinaryAndComplexTypesAreExportable() {
+        for (String t : new String[] {"int", "varchar", "datetime", "json", "array", "map", "struct",
+                                      "binary", "unknown", ""}) {
+            assertFalse("expected " + t + " to be exportable", ColumnMetadataReader.isNonExportable(t));
+        }
+    }
+
+    /** A column described without consulting the server has no StarRocks name; it must not throw. */
+    @Test
+    public void testNullStarRocksTypeIsExportable() {
+        assertFalse(ColumnMetadataReader.isNonExportable(null));
+    }
+
+    /** DATA_TYPE casing is the server's choice here too. */
+    @Test
+    public void testNonExportableMatchingIgnoresCaseAndPadding() {
+        assertTrue(ColumnMetadataReader.isNonExportable("  HLL "));
+        assertTrue(ColumnMetadataReader.isNonExportable("BitMap"));
     }
 }

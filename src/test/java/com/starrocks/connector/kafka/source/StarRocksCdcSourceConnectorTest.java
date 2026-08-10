@@ -161,6 +161,57 @@ public class StarRocksCdcSourceConnectorTest {
         }
     }
 
+    /**
+     * HLL, BITMAP and PERCENTILE hold aggregate sketches. Selecting one yields nothing a consumer
+     * can interpret, so the table is refused at startup -- otherwise the connector runs happily and
+     * streams that non-value to Kafka indefinitely, which from the outside is indistinguishable
+     * from working.
+     */
+    @Test
+    public void testPreflightRejectsAggregateSketchColumns() {
+        for (String sketch : new String[] {"hll", "bitmap", "percentile"}) {
+            FakeCdcClient fake = new FakeCdcClient();
+            fake.modelByTable.put("t1", "DUP_KEYS");
+            fake.colsByTable.put("t1", Arrays.asList(
+                    new ColumnMeta("k", Types.INTEGER, 10, 0, false, "int", "int(11)"),
+                    new ColumnMeta("sketch", Types.OTHER, 0, 0, true, sketch, sketch)));
+            Map<String, String> props = base();
+            props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+
+            try {
+                newConnector(fake).start(props);
+                fail("expected ConnectException for a " + sketch + " column");
+            } catch (ConnectException e) {
+                assertTrue("message should name the column, was: " + e.getMessage(),
+                        e.getMessage().contains("sketch"));
+                assertTrue("message should name the type, was: " + e.getMessage(),
+                        e.getMessage().contains(sketch));
+            }
+        }
+    }
+
+    /**
+     * Complex types are exportable -- as text, for now -- so the same guard must not catch them.
+     * A check that also rejected ARRAY would turn away perfectly capturable tables.
+     */
+    @Test
+    public void testPreflightAcceptsComplexTypeColumns() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "DUP_KEYS");
+        fake.colsByTable.put("t1", Arrays.asList(
+                new ColumnMeta("k", Types.INTEGER, 10, 0, false, "int", "int(11)"),
+                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int>"),
+                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int>"),
+                new ColumnMeta("s", Types.OTHER, 0, 0, true, "struct", "struct<x int>"),
+                new ColumnMeta("j", Types.OTHER, 0, 0, true, "json", "json"),
+                // An unrecognised type warns but must not block: the value is still preserved.
+                new ColumnMeta("u", Types.OTHER, 0, 0, true, "unknown", "somenewtype<int>")));
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+
+        newConnector(fake).start(props);
+    }
+
     @Test
     public void testPreflightAcceptsDupAndPkWithCdc() {
         FakeCdcClient fake = new FakeCdcClient();

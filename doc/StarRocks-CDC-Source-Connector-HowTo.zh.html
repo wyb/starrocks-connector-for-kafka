@@ -395,6 +395,30 @@ connect.timeoutms=1000</code></pre>
 <h3>Key 与无 key 的表</h3>
 <p>Kafka 记录的 key 是一个仅由该表主键列构成的 <code>Struct</code>，同一张表的所有记录使用相同的 key schema。DUPLICATE KEY 和 AGGREGATE KEY 表没有主键，因此它们的记录携带的 key 为 <code>null</code>——这对顺序性意味着什么，参见<a href="#limitations">限制</a>。</p>
 
+<h3>列类型映射</h3>
+
+<div class="tablewrap">
+<table>
+  <tr><th>StarRocks</th><th>Connect schema</th></tr>
+  <tr><td><code>TINYINT</code> / <code>SMALLINT</code> / <code>INT</code> / <code>BIGINT</code></td><td><code>INT8</code> / <code>INT16</code> / <code>INT32</code> / <code>INT64</code></td></tr>
+  <tr><td><code>LARGEINT</code></td><td><code>STRING</code>——128 位，用 <code>INT64</code> 会静默截断</td></tr>
+  <tr><td><code>FLOAT</code> / <code>DOUBLE</code></td><td><code>FLOAT32</code> / <code>FLOAT64</code></td></tr>
+  <tr><td><code>DECIMAL</code></td><td><code>Decimal</code>，scale 取自列定义</td></tr>
+  <tr><td><code>CHAR</code> / <code>VARCHAR</code></td><td><code>STRING</code></td></tr>
+  <tr><td><code>DATE</code> / <code>DATETIME</code></td><td><code>Date</code> / <code>Timestamp</code>，均为 UTC</td></tr>
+  <tr><td><code>BINARY</code> / <code>VARBINARY</code></td><td><code>BYTES</code></td></tr>
+  <tr><td><code>JSON</code></td><td><code>STRING</code>，逻辑名 <code>io.debezium.data.Json</code></td></tr>
+  <tr><td><code>ARRAY</code> / <code>MAP</code> / <code>STRUCT</code></td><td><code>STRING</code>，逻辑名 <code>com.starrocks.data.Array</code> / <code>.Map</code> / <code>.Struct</code></td></tr>
+  <tr><td><code>HLL</code> / <code>BITMAP</code> / <code>PERCENTILE</code></td><td><strong>启动时直接拒绝</strong></td></tr>
+</table>
+</div>
+
+<p><strong>复杂类型目前按文本承载</strong>，不是 Connect 的 <code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code>。值本身完整保留（就是 StarRocks 渲染出的文本），下游拿不到的是可供投影的嵌套 schema。schema 上的逻辑名是为了让消费者无需了解源表，就能把「结构化文本」和「普通字符串」区分开。</p>
+
+<p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> <strong>刻意不使用</strong> <code>io.debezium.data.Json</code>：它们渲染出的形态确实像 JSON，但用那个名字等于承诺每个值都能按 JSON 解析，而这一点在边界情况上（NULL、内嵌引号、深层嵌套）尚未验证。逻辑名只说明这一列是什么，不对文本如何解析作任何承诺。</p>
+
+<p><code>HLL</code>/<code>BITMAP</code>/<code>PERCENTILE</code> 存的是聚合中间态而非值：直接 <code>SELECT</code> 出来的内容消费者既无法解释也无法回灌。含这类列的表会在 preflight 阶段被拒绝并指明是哪一列，而不是启动后源源不断地往 Kafka 发无意义内容。需要时改为捕获一个只投影所需列的视图。</p>
+
 <h2 id="semantics"><span class="no">5</span>语义</h2>
 <ul>
   <li><strong>至少一次（at-least-once）投递。</strong> 一张表旧的 bookmark 只会在 task 的 <code>commit()</code> 回调中被释放，而 Kafka Connect 只在此前已返回记录所携带的 offset 被持久化 flush 之后才会调用这个回调——绝不会在 <code>poll()</code> 过程中提前释放。如果 task 在该 flush 完成之前崩溃并重启，同一个 CHANGES 窗口（或同一次快照）会在重启后被重放，产生重复记录。下游消费者应当基于记录的 key 做幂等处理，并按 Kafka partition 的顺序依次处理这些记录——重放会以相同的顺序重新投递相同的记录，因此按 key 的"后写覆盖前写"（last-write-wins）处理方式最终会收敛到一致结果——或者改为从经过压缩（compacted）的 topic 读取。<strong>不要</strong>通过要求 <code>source.row_version</code> 单调递增来做去重：它在不同记录类型之间不可比较（参见<a href="#row_version-across-record-types"><code>row_version</code> 在不同记录类型中的表现</a>），而且一次 <code>UPDATE</code> 的两条记录本来就会合法地共享同一个值。</li>

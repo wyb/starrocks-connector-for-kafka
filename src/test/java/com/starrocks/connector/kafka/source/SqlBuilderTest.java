@@ -74,10 +74,23 @@ public class SqlBuilderTest {
      */
     @Test
     public void testColumnsMetadataSqlSelectsOrderedByOrdinalPosition() {
-        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
+        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
                         + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
                         + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
                 SqlBuilder.columnsMetadataSql("db1", "t1"));
+    }
+
+    /**
+     * DATA_TYPE and COLUMN_TYPE are different answers and both are needed: the first names the
+     * StarRocks type ("array", "hll") and is the only way to tell a complex or non-exportable
+     * column from a VARCHAR, the second carries the full nesting ("array&lt;int&gt;"). Dropping
+     * either one silently disables a guard downstream, so both are asserted by name.
+     */
+    @Test
+    public void testColumnsMetadataSqlSelectsBothTypeColumns() {
+        String sql = SqlBuilder.columnsMetadataSql("db1", "t1");
+        assertTrue("DATA_TYPE is what the HLL/BITMAP guard reads", sql.contains("DATA_TYPE"));
+        assertTrue("COLUMN_TYPE carries the nested type", sql.contains("COLUMN_TYPE"));
     }
 
     /** Identifiers reach information_schema as string literals, so they are quoted, not backticked. */

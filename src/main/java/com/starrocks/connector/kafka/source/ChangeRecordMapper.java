@@ -21,6 +21,7 @@
 package com.starrocks.connector.kafka.source;
 
 import io.debezium.data.Envelope;
+import io.debezium.data.Json;
 import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
@@ -34,6 +35,7 @@ import java.sql.Types;
 import java.time.Instant;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -285,7 +287,50 @@ public final class ChangeRecordMapper {
             case Types.LONGVARBINARY:
                 return col.nullable ? Schema.OPTIONAL_BYTES_SCHEMA : Schema.BYTES_SCHEMA;
             default:
-                return col.nullable ? Schema.OPTIONAL_STRING_SCHEMA : Schema.STRING_SCHEMA;
+                return textSchemaFor(col);
+        }
+    }
+
+    /**
+     * The schema for everything StarRocks renders as text: plain strings, but also JSON and the
+     * complex types, which are carried as their text form until nested schemas are built from
+     * {@link ColumnMeta#srColumnType}.
+     *
+     * <p>Those last ones get a logical name so a consumer can tell structured text from an ordinary
+     * string without knowing the source table. JSON uses Debezium's own {@code io.debezium.data.Json},
+     * which is what its PostgreSQL connector stamps on {@code json}/{@code jsonb} and what
+     * downstream SMTs and sinks already recognise -- the claim is safe because a JSON column is a
+     * JSON document by definition.
+     *
+     * <p>ARRAY, MAP and STRUCT get StarRocks-specific names instead. They render in a JSON-like
+     * shape, but calling them {@code io.debezium.data.Json} would promise every value parses as
+     * JSON, and that has not been verified for the edges -- NULLs, embedded quotes, nesting. The
+     * name says what the column is; it does not promise how the text parses.
+     */
+    private static Schema textSchemaFor(ColumnMeta col) {
+        String logicalName = logicalNameFor(col.srDataType);
+        if (logicalName == null) {
+            return col.nullable ? Schema.OPTIONAL_STRING_SCHEMA : Schema.STRING_SCHEMA;
+        }
+        SchemaBuilder builder = SchemaBuilder.string().name(logicalName).version(1);
+        return col.nullable ? builder.optional().build() : builder.build();
+    }
+
+    private static String logicalNameFor(String srDataType) {
+        if (srDataType == null) {
+            return null;
+        }
+        switch (srDataType.trim().toLowerCase(Locale.ROOT)) {
+            case "json":
+                return Json.LOGICAL_NAME;
+            case "array":
+                return "com.starrocks.data.Array";
+            case "map":
+                return "com.starrocks.data.Map";
+            case "struct":
+                return "com.starrocks.data.Struct";
+            default:
+                return null;
         }
     }
 }

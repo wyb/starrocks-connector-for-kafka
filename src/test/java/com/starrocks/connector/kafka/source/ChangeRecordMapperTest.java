@@ -233,6 +233,55 @@ public class ChangeRecordMapperTest {
         assertArrayEquals(variable, (byte[]) after.get("vb"));
     }
 
+    /**
+     * JSON and the complex types are still carried as text, but a consumer should be able to tell
+     * them from an ordinary string without knowing the source table, so their schemas get a logical
+     * name. JSON uses Debezium's own, which downstream SMTs and sinks already recognise; ARRAY, MAP
+     * and STRUCT get StarRocks-specific names, deliberately not io.debezium.data.Json -- that would
+     * promise every value parses as JSON, which has not been verified for NULLs, embedded quotes or
+     * nesting.
+     */
+    @Test
+    public void testStructuredTextColumnsCarryALogicalTypeName() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("j", Types.OTHER, 0, 0, true, "json", "json"),
+                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int>"),
+                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int>"),
+                new ColumnMeta("s", Types.OTHER, 0, 0, false, "struct", "struct<x int>"),
+                new ColumnMeta("v", Types.VARCHAR, 20, 0, true, "varchar", "varchar(20)"));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
+                cols, Collections.emptyList());
+
+        SourceRecord r = mapper.toSnapshotRecord(
+                new Object[]{"{\"k\":1}", "[1,2]", "{\"a\":1}", "{\"x\":7}", "plain"}, 1L);
+        Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();
+
+        assertEquals("io.debezium.data.Json", rowSchema.field("j").schema().name());
+        assertEquals("com.starrocks.data.Array", rowSchema.field("a").schema().name());
+        assertEquals("com.starrocks.data.Map", rowSchema.field("m").schema().name());
+        assertEquals("com.starrocks.data.Struct", rowSchema.field("s").schema().name());
+        // A plain string must stay unnamed -- naming everything would make the marker meaningless.
+        assertNull(rowSchema.field("v").schema().name());
+
+        // Still STRING underneath, and nullability still comes from the column, not the name.
+        assertEquals(Schema.Type.STRING, rowSchema.field("a").schema().type());
+        assertTrue(rowSchema.field("a").schema().isOptional());
+        assertFalse(rowSchema.field("s").schema().isOptional());
+    }
+
+    /** Columns described without the server's view (no srDataType) must still work, unnamed. */
+    @Test
+    public void testColumnsWithoutStarRocksTypeFallBackToPlainString() {
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", Types.OTHER, 0, 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
+                cols, Collections.emptyList());
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{"x"}, 1L);
+        Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();
+        assertEquals(Schema.Type.STRING, rowSchema.field("t").schema().type());
+        assertNull(rowSchema.field("t").schema().name());
+    }
+
     @Test
     public void testTombstoneSharesKeyAndOffset() {
         ChangeRecordMapper m = mapper();

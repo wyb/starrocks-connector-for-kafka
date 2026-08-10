@@ -199,6 +199,26 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                             "table " + db + "." + t + " has a column named " + col.name
                                     + " which collides with a CDC metadata column");
                 }
+                // HLL, BITMAP and PERCENTILE are aggregate sketches, not values: a plain SELECT of
+                // one yields nothing a consumer can interpret or load back. Without this guard the
+                // connector starts happily and streams that non-value to Kafka forever, which from
+                // the outside looks like it is working.
+                if (ColumnMetadataReader.isNonExportable(col.srDataType)) {
+                    throw new ConnectException(
+                            "table " + db + "." + t + " has column '" + col.name + "' of type "
+                                    + col.srDataType + ", whose value cannot be exported by a SELECT"
+                                    + " -- it is an aggregate sketch, not a value. Capture a view that"
+                                    + " projects only the columns you need, or remove this column from"
+                                    + " the captured table.");
+                }
+                // Not fatal: an unrecognised type is carried as text, which preserves the value. But
+                // it means StarRocks grew a type this connector was never told about, and that is
+                // worth saying once at startup rather than leaving it to be discovered downstream.
+                if ("unknown".equals(col.srDataType)) {
+                    LOG.warn("Column {}.{}.{} has a type this connector does not recognise (declared as: {});"
+                                    + " it will be carried as text. This usually means StarRocks added a type.",
+                            db, t, col.name, col.srColumnType);
+                }
             }
         } catch (SQLException e) {
             throw new ConnectException("Failed CDC preflight check for table " + db + "." + t, e);

@@ -249,6 +249,27 @@ Key: `{ "id": 2 }`. If `source.tombstones.on.delete=true`, this record is immedi
 
 The Kafka record key is a `Struct` built from just the table's primary key column(s), using the same key schema for every record from that table. DUPLICATE KEY and AGGREGATE KEY tables have no primary key, so their records carry a `null` key — see [Limitations](#limitations) for what that means for ordering.
 
+### Column types
+
+| StarRocks | Connect schema |
+| --- | --- |
+| `TINYINT` / `SMALLINT` / `INT` / `BIGINT` | `INT8` / `INT16` / `INT32` / `INT64` |
+| `LARGEINT` | `STRING` — 128-bit, so `INT64` would silently truncate |
+| `FLOAT` / `DOUBLE` | `FLOAT32` / `FLOAT64` |
+| `DECIMAL` | `org.apache.kafka.connect.data.Decimal`, scale from the column |
+| `CHAR` / `VARCHAR` | `STRING` |
+| `DATE` / `DATETIME` | `org.apache.kafka.connect.data.Date` / `Timestamp`, both UTC |
+| `BINARY` / `VARBINARY` | `BYTES` |
+| `JSON` | `STRING` named `io.debezium.data.Json` |
+| `ARRAY` / `MAP` / `STRUCT` | `STRING` named `com.starrocks.data.Array` / `.Map` / `.Struct` |
+| `HLL` / `BITMAP` / `PERCENTILE` | **rejected at startup** |
+
+**Complex types are carried as their text form**, not as Connect `ARRAY`/`MAP`/`STRUCT`. The value is preserved exactly as StarRocks renders it; what a consumer does not get is a nested schema it could project into. The logical name exists so a consumer can tell structured text from an ordinary string without knowing the source table.
+
+`ARRAY`, `MAP` and `STRUCT` deliberately do **not** claim `io.debezium.data.Json`. They render in a JSON-like shape, but that name would promise every value parses as JSON, and that has not been verified at the edges — NULLs, embedded quotes, deep nesting. The name says what the column is; it makes no promise about how the text parses.
+
+`HLL`, `BITMAP` and `PERCENTILE` hold aggregate sketches rather than values: a plain `SELECT` of one returns nothing a consumer can interpret or load back. A table containing one is refused during preflight, with the offending column named, rather than started and streamed as a non-value. Capture a view that projects only the columns you need instead.
+
 ---
 
 ## Semantics

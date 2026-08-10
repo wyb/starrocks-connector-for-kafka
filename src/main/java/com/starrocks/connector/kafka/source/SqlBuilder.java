@@ -99,9 +99,17 @@ public final class SqlBuilder {
      * <p>{@code COLUMN_SIZE} and {@code DECIMAL_DIGITS} are StarRocks' JDBC-shaped spellings of
      * precision and scale (the names {@code DatabaseMetaData.getColumns} uses), so they land in
      * {@link ColumnMeta} without reinterpretation.
+     *
+     * <p>{@code DATA_TYPE} and {@code COLUMN_TYPE} are two different answers and both are needed.
+     * The first is StarRocks' own type name ({@code "array"}, {@code "hll"}), which is the only way
+     * to tell a complex or non-exportable column from a VARCHAR -- {@code java.sql.Types} cannot
+     * express the difference. The second is the full nested type ({@code "array<int>"}), carried
+     * for diagnostics now and needed to rebuild nested schemas later. FE fills both from
+     * {@code Type.toMysqlDataTypeString()} / {@code toMysqlColumnTypeString()}; the BE scanner only
+     * falls back to its own flat primitive mapping when FE leaves them unset.
      */
     public static String columnsMetadataSql(String db, String table) {
-        return "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
+        return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
                 + " FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
     }
