@@ -15,6 +15,14 @@
     </properties>
 
     <build>
+        <!-- starrocks-connector.properties carries ${project.version} and is read by
+             com.starrocks.connector.kafka.common.Version, so it must be filtered. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>

@@ -20,53 +20,36 @@
 
 package com.starrocks.connector.kafka;
 
-import org.slf4j.Logger;
-import org.slf4j.LoggerFactory;
+import com.starrocks.connector.kafka.common.KeyValueListParser;
 
-import java.util.HashMap;
+import org.apache.kafka.common.config.ConfigException;
+
 import java.util.Map;
 
 public class Util {
-    private static final Logger LOG = LoggerFactory.getLogger(Util.class);
-    public static final String VERSION = "1.0.3";
 
     static boolean isValidStarrocksTableName(String tableName) {
         return tableName.matches("^([_a-zA-Z]{1}[_$a-zA-Z0-9]+\\.){0,2}[_a-zA-Z]{1}[_$a-zA-Z0-9]+$");
     }
+    /**
+     * Parses {@code starrocks.topic2table.map} and checks every mapped table name.
+     *
+     * <p>Always throws {@link ConfigException} on a bad value; it never returns {@code null}. The
+     * previous version returned {@code null} for a malformed list, and the caller read that as
+     * "mapping disabled" and routed every topic to a same-named table -- so a typo silently changed
+     * where data landed instead of failing the task. The parsing itself now lives in
+     * {@link KeyValueListParser}, shared with the CDC source connector.
+     */
     public static Map<String, String> parseTopicToTableMap(String input) {
-        Map<String, String> topic2Table = new HashMap<>();
-        boolean isInvalid = false;
-        for (String str : input.split(",")) {
-            String[] tt = str.split(":");
-
-            if (tt.length != 2 || tt[0].trim().isEmpty() || tt[1].trim().isEmpty()) {
-                LOG.error(
-                        "Invalid {} config format: {}", StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP, input);
-                return null;
+        Map<String, String> topic2Table =
+                KeyValueListParser.parse(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP, input);
+        for (Map.Entry<String, String> entry : topic2Table.entrySet()) {
+            if (!isValidStarrocksTableName(entry.getValue())) {
+                throw new ConfigException(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP, input,
+                        "table name '" + entry.getValue() + "' mapped from topic '" + entry.getKey()
+                                + "' must be at least 2 characters, start with _ or a-zA-Z, and contain only"
+                                + " _$a-zA-Z0-9");
             }
-
-            String topic = tt[0].trim();
-            String table = tt[1].trim();
-
-            if (!isValidStarrocksTableName(table)) {
-                LOG.error(
-                        "table name {} should have at least 2 "
-                                + "characters, start with _a-zA-Z, and only contains "
-                                + "_$a-zA-z0-9",
-                        table);
-                isInvalid = true;
-            }
-
-            if (topic2Table.containsKey(topic)) {
-                LOG.error("topic name {} is duplicated", topic);
-                isInvalid = true;
-            }
-
-            topic2Table.put(tt[0].trim(), tt[1].trim());
-        }
-        if (isInvalid) {
-            String errMsg = String.format("Invalid {} config format: {}", StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP, input);
-            throw new RuntimeException(errMsg);
         }
         return topic2Table;
     }

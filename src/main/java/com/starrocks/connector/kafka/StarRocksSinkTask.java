@@ -20,6 +20,8 @@
 
 package com.starrocks.connector.kafka;
 
+import com.starrocks.connector.kafka.common.Version;
+
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashMap;
@@ -186,7 +188,7 @@ public class StarRocksSinkTask extends SinkTask  {
 
     @Override
     public String version() {
-        return Util.VERSION;
+        return Version.get();
     }
 
     public static JsonConverter createJsonConverter() {
@@ -200,24 +202,28 @@ public class StarRocksSinkTask extends SinkTask  {
 
     @Override
     public void start(Map<String, String> props) {
-        LOG.info("Starrocks sink task starting. version is " + Util.VERSION);
+        LOG.info("Starrocks sink task starting. version is " + Version.get());
         this.props = props;
         loadProperties = buildLoadProperties();
         loadManager = buildLoadManager(loadProperties);
         topic2Table = getTopicToTableMap(props);
         jsonConverter = createJsonConverter();
         maxRetryTimes = Long.parseLong(props.getOrDefault(StarRocksSinkConnectorConfig.SINK_MAXRETRIES, "3"));
-        LOG.info("Starrocks sink task started. version is " + Util.VERSION);
+        LOG.info("Starrocks sink task started. version is " + Version.get());
     }
 
+    /**
+     * Reads the optional topic-to-table mapping, or an empty map when the property is absent.
+     *
+     * <p>A malformed mapping now propagates the {@link org.apache.kafka.common.config.ConfigException}
+     * from {@link Util#parseTopicToTableMap} and fails the task. It used to be swallowed here and
+     * downgraded to an empty map, which left the task running with every topic routed to a
+     * same-named table -- the one outcome an operator who configured a mapping never wants, arrived
+     * at silently.
+     */
     static Map<String, String> getTopicToTableMap(Map<String, String> config) {
         if (config.containsKey(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP)) {
-            Map<String, String> result =
-                    Util.parseTopicToTableMap(config.get(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP));
-            if (result != null) {
-                return result;
-            }
-            LOG.error("Invalid Input, Topic2Table Map disabled");
+            return Util.parseTopicToTableMap(config.get(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP));
         }
         return new HashMap<>();
     }
@@ -395,6 +401,6 @@ public class StarRocksSinkTask extends SinkTask  {
         if (jsonConverter != null) {
             jsonConverter.close();
         }
-        LOG.info("Starrocks sink task stopped. version is " + Util.VERSION);
+        LOG.info("Starrocks sink task stopped. version is " + Version.get());
     }
 }
