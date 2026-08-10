@@ -1,0 +1,501 @@
+<title>StarRocks CDC Source Connector 代码逐文件详解</title>
+<style>
+  :root {
+    --bg:#f7f8f9; --surface:#fff; --ink:#1f262e; --ink-2:#5a646e; --line:#e3e6e9;
+    --accent:#0e7c86; --accent-ink:#0a5b63; --amber:#b26a00; --amber-bg:#fdf6ec;
+    --code-bg:#eff1f3; --chip-bg:#e9edee; --danger:#c0392b; --danger-bg:#fdf0ee;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#14181d; --surface:#1a1f26; --ink:#d9dee4; --ink-2:#8b96a1; --line:#2a3138;
+      --accent:#4fb3bd; --accent-ink:#6fc5cd; --amber:#e0a458; --amber-bg:#241d13;
+      --code-bg:#1c2228; --chip-bg:#232a32; --danger:#e07a68; --danger-bg:#2a1c19; }
+  }
+  :root[data-theme="dark"] { --bg:#14181d; --surface:#1a1f26; --ink:#d9dee4; --ink-2:#8b96a1;
+    --line:#2a3138; --accent:#4fb3bd; --accent-ink:#6fc5cd; --amber:#e0a458; --amber-bg:#241d13;
+    --code-bg:#1c2228; --chip-bg:#232a32; --danger:#e07a68; --danger-bg:#2a1c19; }
+  :root[data-theme="light"] { --bg:#f7f8f9; --surface:#fff; --ink:#1f262e; --ink-2:#5a646e;
+    --line:#e3e6e9; --accent:#0e7c86; --accent-ink:#0a5b63; --amber:#b26a00; --amber-bg:#fdf6ec;
+    --code-bg:#eff1f3; --chip-bg:#e9edee; --danger:#c0392b; --danger-bg:#fdf0ee; }
+
+  body { background:var(--bg); color:var(--ink); margin:0; font-size:15.5px; line-height:1.85;
+    font-family:"PingFang SC","Hiragino Sans GB","Source Han Sans SC","Noto Sans SC",system-ui,sans-serif; }
+  main { max-width:840px; margin:0 auto; padding:48px 28px 96px; }
+  code,pre,.mono { font-family:ui-monospace,"SF Mono","JetBrains Mono",Menlo,Consolas,monospace; }
+  code { background:var(--code-bg); border-radius:4px; padding:1px 5px; font-size:.86em; }
+  pre { background:var(--code-bg); border:1px solid var(--line); border-radius:6px; padding:14px 16px;
+    overflow-x:auto; font-size:12.8px; line-height:1.7; }
+  pre code { background:none; padding:0; font-size:inherit; }
+  .c { color:var(--ink-2); }
+
+  header.doc { border-bottom:2px solid var(--ink); padding-bottom:20px; margin-bottom:8px; }
+  .eyebrow { color:var(--accent); font-size:12px; letter-spacing:.14em; font-weight:600; margin:0 0 10px; }
+  h1 { font-size:27px; font-weight:700; line-height:1.4; margin:0 0 16px; text-wrap:balance; }
+  .meta { display:flex; flex-wrap:wrap; gap:8px; }
+  .meta span { background:var(--chip-bg); border-radius:4px; padding:2px 10px; font-size:12.5px; color:var(--ink-2); }
+  .meta b { color:var(--ink); font-weight:600; margin-left:4px; }
+  .lead { color:var(--ink-2); margin:14px 0 0; }
+
+  h2 { font-size:19px; font-weight:700; margin:52px 0 14px; padding-top:20px;
+    border-top:1px solid var(--line); text-wrap:balance; }
+  h2 .no { color:var(--accent); font-variant-numeric:tabular-nums; margin-right:10px; }
+  h3 { font-size:16.5px; font-weight:650; margin:34px 0 6px; }
+  h3 .fn { font-family:ui-monospace,Menlo,monospace; font-size:15.5px; }
+  h3 .sz { color:var(--ink-2); font-weight:400; font-size:12.5px; margin-left:8px; font-variant-numeric:tabular-nums; }
+  h4 { font-size:14px; font-weight:650; margin:20px 0 4px; color:var(--accent-ink); }
+  p { margin:10px 0; }
+  ul,ol { padding-left:1.6em; margin:10px 0; }
+  li { margin:5px 0; }
+  strong { font-weight:650; }
+
+  .role { color:var(--ink-2); font-size:14px; border-left:3px solid var(--accent); padding-left:12px; margin:8px 0 14px; }
+
+  .tablewrap { overflow-x:auto; margin:14px 0; }
+  table { border-collapse:collapse; width:100%; font-size:13.8px; line-height:1.7; }
+  th { text-align:left; font-size:12.5px; color:var(--ink-2); font-weight:650;
+    border-bottom:1.5px solid var(--ink); padding:8px 14px 6px 2px; white-space:nowrap; }
+  td { border-bottom:1px solid var(--line); padding:8px 14px 8px 2px; vertical-align:top; }
+  td code { white-space:nowrap; }
+  td:first-child { white-space:nowrap; }
+
+  .note { border:1px solid var(--line); background:var(--surface); border-radius:6px; padding:12px 16px; margin:14px 0; }
+  .note .tag { color:var(--accent-ink); font-size:12px; font-weight:700; letter-spacing:.1em; display:block; margin-bottom:4px; }
+  .note p:first-of-type { margin-top:0; } .note p:last-child { margin-bottom:0; }
+  .warn { border-color:var(--amber); background:var(--amber-bg); } .warn .tag { color:var(--amber); }
+  .bad { border-color:var(--danger); background:var(--danger-bg); } .bad .tag { color:var(--danger); }
+
+  .figwrap { overflow-x:auto; margin:20px 0; }
+  figure { margin:20px 0; }
+  figure svg { display:block; width:100%; min-width:620px; height:auto;
+    font-family:"PingFang SC","Noto Sans SC",system-ui,sans-serif; }
+  figcaption { color:var(--ink-2); font-size:12.6px; margin-top:10px; line-height:1.7; }
+  .bx { fill:var(--surface); stroke:var(--line); stroke-width:1; }
+  .bxa { fill:var(--surface); stroke:var(--accent); stroke-width:1.4; }
+  .bxg { fill:var(--chip-bg); stroke:none; }
+  .t { fill:var(--ink); font-size:12.4px; }
+  .ts { fill:var(--ink-2); font-size:11.3px; }
+  .tb { fill:var(--ink); font-size:12.6px; font-weight:650; }
+  .tm { font-family:ui-monospace,Menlo,monospace; font-size:11.2px; fill:var(--ink); }
+  .tms { font-family:ui-monospace,Menlo,monospace; font-size:10.8px; fill:var(--ink-2); }
+  .ln { stroke:var(--ink-2); stroke-width:1.2; fill:none; }
+  .ax { stroke:var(--line); stroke-width:1; }
+  .dash { stroke-dasharray:4 3; }
+
+  footer { margin-top:60px; padding-top:18px; border-top:1px solid var(--line); color:var(--ink-2); font-size:13px; }
+</style>
+
+<main>
+<header class="doc">
+  <p class="eyebrow">STARROCKS-CONNECTOR-FOR-KAFKA · 代码详解</p>
+  <h1>CDC Source Connector 代码逐文件详解</h1>
+  <div class="meta">
+    <span>分支<b>cdc-source-connector-refactor</b></span>
+    <span>主代码<b>15 个类 / 约 2400 行</b></span>
+    <span>测试<b>108 个</b></span>
+  </div>
+  <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
+</header>
+
+<h2 id="map"><span class="no">1</span>先看全景</h2>
+
+<p>15 个类分四层，外加一个跨 sink/source 复用的 <code>common</code> 包。Kafka Connect 只认识其中两个（<code>SourceConnector</code> 和 <code>SourceTask</code> 的实现），其余都是被它们调用的。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 780 330" role="img" aria-label="四层结构与调用方向">
+  <defs><marker id="w1" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+    <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/></marker></defs>
+
+  <text class="ts" x="8" y="18" fill="var(--accent)">Connect 运行时调用的两个入口</text>
+  <rect class="bxa" x="8" y="26" width="250" height="46" rx="5"/>
+  <text class="tm" x="20" y="46">StarRocksCdcSourceConnector</text>
+  <text class="ts" x="20" y="63">preflight · 分表</text>
+  <rect class="bxa" x="278" y="26" width="250" height="46" rx="5"/>
+  <text class="tm" x="290" y="46">StarRocksCdcSourceTask</text>
+  <text class="ts" x="290" y="63">poll 循环 · bookmark 状态机</text>
+  <rect class="bx" x="548" y="26" width="224" height="46" rx="5"/>
+  <text class="tm" x="560" y="46">StarRocksCdcSourceConfig</text>
+  <text class="ts" x="560" y="63">ConfigDef · 校验 · topic 命名</text>
+
+  <line class="ln" x1="133" y1="72" x2="133" y2="96" marker-end="url(#w1)"/>
+  <line class="ln" x1="403" y1="72" x2="403" y2="96" marker-end="url(#w1)"/>
+
+  <text class="ts" x="8" y="114" fill="var(--accent)">数据访问：接口 + 实现 + 三个协作者</text>
+  <rect class="bxa" x="8" y="122" width="250" height="44" rx="5"/>
+  <text class="tm" x="20" y="141">CdcClient（接口，9 方法）</text>
+  <text class="ts" x="20" y="158">测试注入点</text>
+  <rect class="bx" x="278" y="122" width="250" height="44" rx="5"/>
+  <text class="tm" x="290" y="141">StarRocksJdbcClient</text>
+  <text class="ts" x="290" y="158">业务查询，委托下面三个</text>
+  <rect class="bxg" x="548" y="122" width="224" height="44" rx="5"/>
+  <text class="tm" x="560" y="141">SqlBuilder</text>
+  <text class="ts" x="560" y="158">纯静态 SQL 构造</text>
+
+  <line class="ln" x1="403" y1="166" x2="403" y2="190" marker-end="url(#w1)"/>
+
+  <rect class="bx" x="8" y="196" width="248" height="44" rx="5"/>
+  <text class="tm" x="20" y="215">FeConnection</text>
+  <text class="ts" x="20" y="232">URL 扇出 · 连接 · leader 轮转 · 重试</text>
+  <rect class="bx" x="266" y="196" width="248" height="44" rx="5"/>
+  <text class="tm" x="278" y="215">ColumnMetadataReader</text>
+  <text class="ts" x="278" y="232">列清单（双策略）· 类型映射</text>
+  <rect class="bx" x="524" y="196" width="248" height="44" rx="5"/>
+  <text class="tm" x="536" y="215">RowExtractor</text>
+  <text class="ts" x="536" y="232">ResultSet 行 → Object[]</text>
+
+  <line class="ax dash" x1="8" y1="256" x2="772" y2="256"/>
+
+  <text class="ts" x="8" y="278" fill="var(--accent)">值对象与映射</text>
+  <rect class="bxg" x="8" y="286" width="184" height="36" rx="4"/>
+  <text class="tm" x="20" y="309">ColumnMeta</text>
+  <rect class="bxg" x="200" y="286" width="184" height="36" rx="4"/>
+  <text class="tm" x="212" y="309">OffsetState</text>
+  <rect class="bxg" x="392" y="286" width="196" height="36" rx="4"/>
+  <text class="tm" x="404" y="309">NonTrackableException</text>
+  <rect class="bxa" x="596" y="286" width="176" height="36" rx="4"/>
+  <text class="tm" x="608" y="309">ChangeRecordMapper</text>
+</svg>
+</div>
+<figcaption><b>图 1</b>箭头是调用方向。<code>ChangeRecordMapper</code> 单独画在下面，因为只有 Task 用它，且它完全不碰 JDBC。</figcaption>
+</figure>
+
+<h4>一条记录的完整旅程</h4>
+<p>把文件串起来看，一条变更记录要经过：</p>
+<pre><code>Connector.start()      preflight，每张表查表模型/CDC 属性/列，探测 bookmark 函数
+Connector.taskConfigs() 表按 round-robin 切给 task
+  ↓
+Task.start()           每表 fetchColumns + fetchPrimaryKeys，建 ChangeRecordMapper，
+                       从 offset store 恢复位点（restoreOffset）
+  ↓
+Task.poll()            drainPendingReleases → bookmarkCreate → 若 head==committed 则跳过
+                       → streamChanges(base, head)
+  ↓  StarRocksJdbcClient.streamChanges
+     SqlBuilder.changesSql   拼 SQL（含强制 ORDER BY）
+     FeConnection.get()      拿连接 + applyStreamingFetchSize
+     RowExtractor.extractRow 按 ColumnMeta 取值
+  ↓
+ChangeRecordMapper.toChangeRecord   Object[] → Debezium envelope SourceRecord
+  ↓
+Connect 运行时发往 Kafka → commitRecord() 记 ack 水位 → commit() 授权释放
+  ↓
+下次 Task.poll() 开头 drainPendingReleases() → bookmarkRelease</code></pre>
+
+<h2 id="entry"><span class="no">2</span>入口层</h2>
+
+<h3><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">208 行</span></h3>
+<p class="role">Connect 创建的第一个对象。只做两件事：启动期校验，和把表分配给 task。它<strong>不搬运任何数据</strong>。</p>
+
+<h4>start(props) —— 全部的失败都在这里暴露</h4>
+<p>建一个临时 <code>CdcClient</code>，对每张表跑 <code>preflightCheckTable</code>，然后用第一张表跑一次 <code>probeBookmarkFunctions</code>，最后 <code>finally</code> 关掉客户端。这个客户端是一次性的，task 后面会各建各的。</p>
+
+<p><code>preflightCheckTable</code> 的检查顺序：</p>
+<ol>
+  <li><code>fetchTableModel</code> → 含 <code>UNQ</code> 或 <code>UNIQUE</code> 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。两种拼写都匹配，因为 FE 实际发 <code>UNIQUE_KEYS</code>，而文档里写的是 <code>UNQ_KEYS</code>。</li>
+  <li>含 <code>PRIMARY</code> 或 <code>PRI</code> → 再查 <code>cdcPropertyEnabled</code>，未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
+  <li><code>fetchColumns</code> 遍历每列，三项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；<code>srDataType</code> 为 <code>unknown</code> 则记 WARN 但放行。</li>
+</ol>
+<p>整段包在 <code>try/catch (SQLException)</code> 里，任何 SQL 异常都包成 <code>ConnectException</code> 并带上表名——包括"表不存在"。</p>
+
+<div class="note warn">
+  <span class="tag">probeBookmarkFunctions 的 holder 必须独立</span>
+  <p>它用 <code>config.holderId(name) + ":preflight"</code>，TTL 60 秒。不能复用 task 的 holder：<code>bookmark_create</code> 对同一 holder 是幂等的，表没变化时会返回<em>已存在</em>的那个 bookmark，于是探针的释放会把 task 正在用的位点删掉。常量 <code>PROBE_HOLDER_SUFFIX</code> 存在的唯一理由就是这个。</p>
+  <p>释放是 best-effort——能证明开关打开的是<em>创建</em>；泄漏的探测 bookmark 60 秒内自己过期。</p>
+</div>
+
+<h4>taskConfigs(maxTasks)</h4>
+<pre><code>int groups = Math.min(maxTasks, tables.size());
+for (int i = 0; i &lt; tables.size(); i++)
+    groupTables.get(i % groups).add(tables.get(i));</code></pre>
+<p>每组拷一份完整 props，只多塞一个内部键 <code>task.tables</code>。这个键不在 <code>CONFIG_DEF</code> 里，是 Connector 与 Task 之间的私有通道，不对用户暴露。</p>
+
+<h3><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">241 行</span></h3>
+<p class="role">一个 <code>AbstractConfig</code>：14 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
+
+<p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>
+
+<ul>
+  <li><strong><code>topicFor(table)</code></strong>：先查 <code>table2topic.map</code>，没有映射才回落到 <code>&lt;prefix&gt;.&lt;db&gt;.&lt;table&gt;</code>。</li>
+  <li><strong><code>holderId(connectorName)</code></strong>：返回 <code>"kc:" + name</code>。这是 bookmark 在服务端的持有者标识，同名 connector 重启后仍认领同一批 bookmark。</li>
+  <li><strong><code>rejectNoSnapshotWithResnapshot()</code></strong> 在构造函数里跑。</li>
+</ul>
+
+<div class="note bad">
+  <span class="tag">被显式拒绝的组合</span>
+  <p><code>snapshot.mode=no_snapshot</code> + <code>nontrackable.policy=resnapshot</code> 会在构造时抛 <code>ConfigException</code>。resnapshot 的自愈方式是丢弃位点、用新快照重建；关掉快照后它什么都读不到，于是会<strong>静默丢掉</strong>"不可用 base"到"新 bookmark"之间的全部变更，而运维看到的是"表已自愈"。</p>
+</div>
+
+<p><code>parseTable2Topic</code> 现在只是 <code>KeyValueListParser.parse</code> 的一行转发。</p>
+
+<h2 id="state"><span class="no">3</span>状态机层</h2>
+
+<h3><span class="fn">StarRocksCdcSourceTask</span><span class="sz">353 行 · 正确性核心</span></h3>
+<p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
+
+<h4>TableState —— 每张表的全部状态</h4>
+<div class="tablewrap">
+<table>
+  <tr><th>字段</th><th>含义</th></tr>
+  <tr><td><code>cols</code> / <code>pks</code> / <code>mapper</code></td><td>启动时解析一次，之后只读</td></tr>
+  <tr><td><code>committedBookmark</code></td><td>下一个窗口的 base。仅 poll 线程读写</td></tr>
+  <tr><td><code>snapshotDone</code></td><td>内存标志；<em>不是</em>持久 offset 里那个</td></tr>
+  <tr><td><code>lastAckedBookmark</code></td><td><strong>ack 水位</strong>，由 <code>commitRecord</code> 维护。可能领先已落盘的 offset</td></tr>
+  <tr><td><code>releaseFenceBookmark</code></td><td>上一轮 <code>commit()</code> 时的 ack 水位。释放围栏</td></tr>
+  <tr><td><code>liveBookmarks</code></td><td><code>ArrayDeque</code>，已创建未释放，最旧在前。<strong>真并发</strong></td></tr>
+  <tr><td><code>pendingReleases</code></td><td><code>ConcurrentLinkedQueue</code>，commit 授权、poll 执行</td></tr>
+</table>
+</div>
+<p>前三个字段只在 poll 线程上动，无需同步；中间三个由 <code>synchronized (liveBookmarks)</code> 统一保护——注意<strong>两个 long 水位也用这把锁</strong>，不是各自独立的；最后一个自带线程安全。</p>
+
+<h4>start(props)</h4>
+<p>读配置 → 建 client → 解析 <code>task.tables</code> → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、<code>fetchPrimaryKeys</code>、建 mapper）→ 从 <code>context.offsetStorageReader()</code> 读回位点交给 <code>restoreOffset</code>。</p>
+<p><code>context</code> 为 null 时（单测直接 new 一个 task）每张表都按首次运行处理，这是刻意留的口子。</p>
+
+<h4>restoreOffset(t, raw)</h4>
+<pre><code>OffsetState state = OffsetState.fromMap(raw);
+if (state.snapshotDone) {
+    t.committedBookmark = state.bookmarkId;
+    t.snapshotDone = true;
+    synchronized (t.liveBookmarks) { t.liveBookmarks.addLast(state.bookmarkId); }
+}</code></pre>
+<p><strong>只信 <code>snapshot_done=true</code></strong>。其余情况（包括完全没有 offset）什么都不做，表保持 fresh，下次 poll 重做全量快照。</p>
+<p>最后那行 <code>addLast</code> 不是可选的：恢复出来的 bookmark 必须重新进入存活队列，否则永远没人释放它，每次重启/rebalance 泄漏一个，直到 TTL 到期。</p>
+
+<h4>poll() —— 每次调用遍历本 task 的所有表</h4>
+<ol>
+  <li><code>drainPendingReleases(t)</code>——把上一轮 <code>commit()</code> 授权的释放真正发出去。放在开头是因为<strong>所有 JDBC 必须在 poll 线程</strong>。</li>
+  <li><code>!snapshotDone</code> → 走 <code>bootstrap(t, out)</code> 然后 <code>continue</code>。</li>
+  <li><code>head = bookmarkCreate(...)</code>；<code>head == committedBookmark</code> → 本轮无新版本，<code>continue</code>（idle dedup）。</li>
+  <li>否则 <code>head</code> 入 <code>liveBookmarks</code>，<code>streamChanges(base, head)</code>，回调里逐行 <code>toChangeRecord</code>；<code>tombstones</code> 开启且是 DELETE 时追加一条墓碑。</li>
+  <li>成功后 <code>committedBookmark = head</code>，记一条 INFO。</li>
+</ol>
+<p>捕获 <code>NonTrackableException</code> → <code>applyPolicy</code>；捕获 <code>SQLException</code> → 包成 <code>ConnectException</code> 抛出（task 停止）。</p>
+<p>全部表都没产出记录时 <code>Thread.sleep(pollIntervalMs)</code> 并返回 <code>null</code>——Connect 的约定是 null 表示"这轮没有数据"。</p>
+
+<h4>bootstrap(t, out)</h4>
+<p>创建 <code>b0</code> 并入队；<code>snapshot.mode=initial</code> 时 <code>streamSnapshot</code> 把全表读出来（每行 <code>toSnapshotRecord(row, b0)</code>），否则只记一条日志。无论哪种，最后都设 <code>committedBookmark = b0; snapshotDone = true;</code>。</p>
+
+<h4>applyPolicy(t, e)</h4>
+<p><code>policy=resnapshot</code> → 记 WARN，把表打回 fresh（<code>snapshotDone=false</code>、<code>committedBookmark=-1</code>），下次 poll 重做快照。<strong>不动 <code>liveBookmarks</code></strong>——刚才那次失败的窗口所开的 bookmark 在服务端是真实存在的，仍归 <code>commit()</code> 的规则和 TTL 管。<br><code>policy=fail</code> → 记 ERROR 并抛 <code>ConnectException</code>。</p>
+
+<h4>commitRecord(record, metadata) —— producer 回调线程</h4>
+<p>从记录的 <code>sourceOffset</code> 取 <code>bookmark_id</code>，用 <code>tableOf(record)</code> 按 <code>sourcePartition</code> 里的表名找到 <code>TableState</code>，然后 <code>lastAckedBookmark = max(旧值, 本条)</code>。</p>
+<p>取 max 而不是"最后一条"，因为同一张表的记录可能乱序 ack。</p>
+
+<h4>commit() —— offset committer 线程</h4>
+<pre><code>long fence = t.releaseFenceBookmark;      // 上一轮的值
+t.releaseFenceBookmark = t.lastAckedBookmark;   // 先推进，供下一轮用
+if (fence &lt; 0) continue;                  // 首次 commit 什么都不释放
+迭代 liveBookmarks，凡 live &lt; fence 的移出并放进 pendingReleases</code></pre>
+<p>注意<strong>先推进围栏再使用旧值</strong>，所以本轮用的永远是一个 commit 周期之前的水位。这个滞后就是全部机制：<code>commitRecord</code> 跑在 producer 发送回调里，而 offset 落盘要等下一次 flush，所以 ack 水位可能领先持久位点；按当前水位释放，会正好删掉那次 flush 刚刚变成持久的那个 bookmark。</p>
+<p><strong>这个方法不发任何 SQL</strong>，只入队。</p>
+
+<h3><span class="fn">OffsetState</span><span class="sz">79 行</span></h3>
+<p class="role">Connect offset 的编解码。四个 key 常量 + 两个静态构造 + 一个容错的解析。</p>
+<pre><code>sourcePartition = {"db": db, "table": table}
+sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;}</code></pre>
+<p><code>fromMap</code> 的三条容错：<code>raw</code> 为 null 或缺 <code>bookmark_id</code> → <code>fresh()</code>；<code>bookmark_id</code> 可能被反序列化成 <code>Integer</code> 或 <code>Long</code>，统一走 <code>((Number) v).longValue()</code>；<code>snapshot_done</code> 缺失或不是 <code>Boolean.TRUE</code> → false。</p>
+<p>按表拆分 partition 的后果：表之间互相独立，rebalance 把表挪到别的 task 上也能各自恢复。</p>
+
+<h3><span class="fn">NonTrackableException</span><span class="sz">54 行</span></h3>
+<p class="role">把服务端多种"窗口不可重放"的说法归一化成一个异常类型。</p>
+<p>核心是静态的 <code>classify(SQLException)</code>：消息转小写后匹配三种标记之一就包装返回，否则返回 <code>null</code>（调用方原样抛出）。</p>
+<div class="tablewrap">
+<table>
+  <tr><th>标记</th><th>来自</th></tr>
+  <tr><td><code>cdc-error-</code></td><td>BE 执行期</td></tr>
+  <tr><td><code>bookmark</code> + <code>not found</code></td><td>base 已被释放或过期</td></tr>
+  <tr><td><code>not trackable</code></td><td>FE 规划期（分区被 drop/重写/reshard）</td></tr>
+</table>
+</div>
+<p>三种缺一不可：早期只匹配第一种，结果 <code>policy=resnapshot</code> 在生产环境<strong>从未生效</strong>，而所有单测照常通过。</p>
+
+<h2 id="access"><span class="no">4</span>数据访问层</h2>
+
+<h3><span class="fn">CdcClient</span><span class="sz">52 行</span></h3>
+<p class="role">9 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
+<p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchPrimaryKeys</code>/<code>streamSnapshot</code>/<code>streamChanges</code> 只有 Task 用，其余三个两边都用。</p>
+<p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
+
+<h3><span class="fn">StarRocksJdbcClient</span><span class="sz">220 行</span></h3>
+<p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>方法</th><th>做什么</th></tr>
+  <tr><td><code>bookmarkCreate</code></td><td><code>executeOnLeader</code> 拿回字符串结果。<strong>null 和非数字都转成 <code>SQLException</code></strong>——直接 <code>parseLong</code> 会抛非受检的 <code>NumberFormatException</code>，逃过 poll 的 <code>catch (SQLException)</code> 直接杀掉 task</td></tr>
+  <tr><td><code>bookmarkRelease</code></td><td>一行转发</td></tr>
+  <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetadataReader</code></td></tr>
+  <tr><td><code>fetchPrimaryKeys</code></td><td>读 <code>tables_config.PRIMARY_KEY</code>，逗号切分，逐个 <code>stripBackticksAndWhitespace</code></td></tr>
+  <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；两者共用 <code>fetchTableConfigRow</code></td></tr>
+  <tr><td><code>cdcPropertyEnabled</code></td><td><code>SHOW CREATE TABLE</code> 取第 2 列，字符串包含判断</td></tr>
+  <tr><td><code>streamSnapshot</code></td><td>建 statement → <code>applyStreamingFetchSize</code> → 每行 <code>extractRow</code> 回调</td></tr>
+  <tr><td><code>streamChanges</code></td><td>同上，另外从 <code>cols.size()+1</code> 和 <code>+2</code> 读出两个伪列；异常先 <code>classify</code></td></tr>
+</table>
+</div>
+<p>每个查询方法都以 <code>catch (SQLException e) { connection.closeIfBroken(e); throw e; }</code> 收尾——连接坏了就丢掉，下次 <code>get()</code> 会重建。</p>
+
+<h3><span class="fn">FeConnection</span><span class="sz">227 行</span></h3>
+<p class="role">连接的一切：URL 扇出、传输判定、复用、leader 轮转、有界重试。</p>
+
+<h4>静态初始化块</h4>
+<p>显式 <code>Class.forName</code> 注册两个驱动。Connect 的每插件类加载器隔离会让 <code>ServiceLoader</code> 发现不到它们，找不到就抛 <code>IllegalStateException</code> 并点名是哪个 artifact。</p>
+
+<h4>parseUrls(jdbcUrl)</h4>
+<p>先 <code>rewriteMariadbScheme</code>（只把 <code>jdbc:mysql://</code> 换成 <code>jdbc:mariadb://</code>，其余原样），再按 <code>://</code> 切出 scheme，从 host 列表里找第一个 <code>/</code> 或 <code>?</code> 作为后缀起点，然后<strong>把后缀复制到每一个 host 上</strong>。</p>
+<p>最后这点是必要的：Arrow Flight 的明文服务端需要 <code>?useEncryption=false</code>，只挂在最后一个 host 上会让前面的连接全部失败。</p>
+
+<h4>executeOnLeader(sql)</h4>
+<p>两层循环。外层按 URL 个数轮转，内层按 <code>maxRetries()</code> 重试。<code>isLeaderRedirect</code>（消息含 "must run on the FE leader"）→ 关连接、轮转、跳出内层；其他 <code>SQLException</code> → <code>closeIfBroken</code> 后在同一 URL 上重试并 sleep。转满一圈仍未成功则抛出最后一个异常。</p>
+
+<div class="note warn">
+  <span class="tag">STREAM_FETCH_SIZE = 1024，不能是 Integer.MIN_VALUE</span>
+  <p><code>MIN_VALUE</code> 是 MySQL Connector/J 的流式习惯用法。MariaDB 驱动对任何负值都抛 <code>SQLException("invalid fetch size")</code>——查询根本发不出去，一行都读不到。Arrow Flight 本来就流式，直接跳过这个调用。</p>
+</div>
+
+<h3><span class="fn">ColumnMetadataReader</span><span class="sz">285 行</span></h3>
+<p class="role">权威列清单。两条通道各一套策略，但<strong>产出必须一致</strong>。</p>
+
+<pre><code>fetchColumns()
+ ├─ Arrow  → fetchFromInformationSchema()  ── readInformationSchema() 全用
+ └─ MySQL  → fetchFromResultSetMetadata()  ── 驱动描述 + withServerTypes() 补类型名
+                                                    └─ readInformationSchema()</code></pre>
+
+<p><strong>MySQL 通道为什么要查两次</strong>：<code>ResultSetMetaData</code> 说不出"这列是 ARRAY / JSON / HLL"——它们在 MySQL 协议上都是字符串类型，和 VARCHAR 无法区分。没有服务端的答案，这条通道既不能拒绝无法捕获的表，也不能给 schema 打逻辑类型名，而且同一张表会因为 URL scheme 不同产出不同的 schema。</p>
+
+<p><strong>Arrow 通道为什么不能用驱动描述</strong>：实测一张 4 列的表被报成 8 列、全部 <code>nullable=false</code>、precision 和 scale 全为 0。仅可空性一项就是致命的——被描述成 NOT NULL 的列会变成 Connect 的必填字段，第一个 NULL 值就会让 Struct 校验失败。</p>
+
+<p>两条路径都做<strong>重名检测</strong>。不检的话，问题会在很远的地方浮现成一句光秃秃的 <code>SchemaBuilderException</code>，完全看不出是驱动的元数据有问题。</p>
+
+<p><code>withServerTypes</code> 按列名做 map 合并，<strong>对不上就抛异常</strong>——一个没被补上类型名的列，正是 HLL 守卫看不见的那一列。</p>
+
+<h4>toJdbcType(dataType) 与 isNonExportable(srDataType)</h4>
+<p>前者是一个封闭集合的 switch，对应 FE 的 <code>Type.toMysqlDataTypeString()</code>。三组值得注意：</p>
+<ul>
+  <li><code>bigint unsigned</code>（LARGEINT，128 位）→ <code>OTHER</code>，按文本承载。映射成 BIGINT 会静默截断。</li>
+  <li><code>array</code>/<code>map</code>/<code>struct</code>/<code>json</code> → <code>OTHER</code>，但<strong>显式列出</strong>而非落到 default——"已知的复杂类型"和"没见过的类型"在 mapper 里会拿到不同的逻辑名。</li>
+  <li><code>hll</code>/<code>bitmap</code>/<code>percentile</code> → <code>OTHER</code>，但 <code>isNonExportable</code> 对它们返回 true，preflight 会直接拒绝整张表。</li>
+</ul>
+
+<h3><span class="fn">RowExtractor</span><span class="sz">106 行</span></h3>
+<p class="role">三个静态方法。看着简单，但类型来源的收敛就发生在这里。</p>
+<p><code>extractValue</code> 的 switch 基于 <strong><code>col.jdbcType</code></strong>，不是 <code>ResultSetMetaData.getColumnType()</code>。后者等于让一条读取路径有两个真相源，而 Arrow 通道上驱动的说法已知不可信。</p>
+<p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会用 JVM 默认时区，本地午夜的 <code>java.sql.Date</code> 会让 converter 在 Connect 的 Date 逻辑类型上抛异常，Timestamp 则静默偏移。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
+<p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
+
+<h3><span class="fn">SqlBuilder</span><span class="sz">100 行</span> · <span class="fn">ColumnMeta</span><span class="sz">58 行</span></h3>
+<p class="role">纯函数与值对象，没有状态。</p>
+<p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
+<p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
+<p><code>ColumnMeta</code> 同时保留 JDBC 视角（<code>jdbcType</code>/<code>precision</code>/<code>scale</code>/<code>nullable</code>）与 StarRocks 视角（<code>srDataType</code>/<code>srColumnType</code>），因为两者单独都不够用。5 参构造留给测试和无法查服务端的路径。</p>
+
+<h2 id="mapper"><span class="no">5</span>记录映射</h2>
+
+<h3><span class="fn">ChangeRecordMapper</span><span class="sz">276 行</span></h3>
+<p class="role">纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，所以极易测试。</p>
+
+<h4>构造函数：所有 schema 只建一次</h4>
+<p>建四个 schema 加一个 envelope，之后每条记录复用：</p>
+<ul>
+  <li><code>rowSchema</code>——<strong>必须 optional</strong>，因为 <code>c</code> 和 <code>d</code> 各有一侧为 null</li>
+  <li><code>keySchema</code>——无主键时为 null</li>
+  <li><code>bookmarkSchema</code> / <code>sourceSchema</code>——StarRocks 特有的 <code>{db, table, row_version, bookmark{base, head}}</code></li>
+  <li><code>envelope</code>——<code>Envelope.defineSchema().withName(...).withRecord(rowSchema).withSource(sourceSchema).build()</code></li>
+</ul>
+<p>另外建一个 <code>colIndexByName</code>，供 <code>toKeyStruct</code> 按主键列名反查下标。</p>
+
+<div class="note">
+  <span class="tag">envelope 必须用 Debezium 的，不能手拼</span>
+  <p>该库拥有字段集合与<strong>顺序</strong>（<code>before, after, source, op, ts_ms, transaction</code>）以及各工厂方法打的 op 码。这个顺序是 Avro schema 身份的一部分，下游消费者和 schema registry 会比对；手写的会静默漂移。<code>transaction</code> 恒为 null——CHANGES 流没有事务元数据。</p>
+</div>
+
+<h4>三个产出方法</h4>
+<div class="tablewrap">
+<table>
+  <tr><th>方法</th><th>op</th><th>要点</th></tr>
+  <tr><td><code>toChangeRecord</code></td><td><code>c</code> / <code>d</code></td><td><code>changeType==1</code> 走 <code>envelope.delete</code>（填 before），否则 <code>envelope.create</code>（填 after）。offset 带 <code>snapshot_done=true</code></td></tr>
+  <tr><td><code>toSnapshotRecord</code></td><td><code>r</code></td><td><code>envelope.read</code>。offset 带 <code>snapshot_done=false</code></td></tr>
+  <tr><td><code>tombstoneFor</code></td><td>—</td><td>复用删除记录的 key/topic/partition/offset，value 与 valueSchema 均为 null</td></tr>
+</table>
+</div>
+
+<div class="note warn">
+  <span class="tag">快照行的 row_version 是 0，不是 bookmark id</span>
+  <p>变更记录的 <code>row_version</code> 是分区可见版本，从 1 开始递增；bookmark id 来自 FE 全局 id 生成器，大几个数量级。放进去会让每一行快照数据看起来都比其后的所有变更更新，下游若按"仅当 row_version 增大才应用"去重就会把变更全丢掉。</p>
+  <p>钉住的读跨多个分区、各自处在自己的版本上，本来就没有单一版本可报。要识别"这行来自哪次快照"应看 <code>source.bookmark</code>。</p>
+</div>
+
+<h4>schemaFor(col) —— 类型映射</h4>
+<p>一个基于 <code>col.jdbcType</code> 的 switch，每个分支按 <code>col.nullable</code> 选 optional 与否。DECIMAL 用 <code>Decimal.builder(col.scale)</code>，DATE/TIMESTAMP 用 Connect 的逻辑类型。</p>
+<p>BINARY/VARBINARY/LONGVARBINARY → <strong>BYTES</strong>。此前它们和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变 U+FFFD，不可恢复。因为要两侧同时改，单独回退任何一侧都会立刻抛 <code>DataException</code>。</p>
+<p>其余落到 <code>textSchemaFor</code>：<code>srDataType</code> 为 <code>json</code> 用 <code>io.debezium.data.Json</code>，<code>array</code>/<code>map</code>/<code>struct</code> 用 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code>，其余为无名的普通 STRING。</p>
+<p><code>putValue</code> 里唯一的特殊处理是 DECIMAL：<code>((BigDecimal) value).setScale(col.scale)</code>，因为 Connect 的 Decimal 逻辑类型要求 scale 与 schema 声明严格一致。</p>
+
+<h2 id="common"><span class="no">6</span>common 包</h2>
+
+<h3><span class="fn">Version</span><span class="sz">61 行</span></h3>
+<p class="role">版本号的唯一来源。</p>
+<p>静态初始化时读 <code>/starrocks-connector.properties</code>——该文件由 Maven 的 <code>&lt;resources&gt;&lt;filtering&gt;</code> 在构建期填入 <code>${project.version}</code>。三种情况返回 <code>"unknown"</code>：资源不存在、值为空、值里还含 <code>${</code>（说明过滤没跑）。最后一条尤其重要——报字面量 <code>${project.version}</code> 比承认不知道更糟。</p>
+
+<h3><span class="fn">KeyValueListParser</span><span class="sz">67 行</span></h3>
+<p class="role"><code>k:v,k:v</code> 格式的唯一解析器，sink 与 source 共用。</p>
+<p>四条规则：空值返回空 map；按<strong>第一个</strong> <code>:</code> 切分（值里可以有冒号）；任一侧为空则抛；<strong>重复 key 直接拒绝</strong>而不是后者覆盖。全部失败都抛 <code>ConfigException</code>，绝不返回 null——sink 那份旧实现返回 null，调用方把它当成"映射已禁用"，于是每个 topic 静默路由到同名表。</p>
+<p>用 <code>LinkedHashMap</code> 保序，让错误信息和测试都是确定的。</p>
+
+<h2 id="tests"><span class="no">7</span>测试</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
+  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>13</td><td>三条不变式：释放滞后一个周期、快照崩溃语义、idle dedup。含重启续读与孤儿 bookmark 回归</td></tr>
+  <tr><td><code>ChangeRecordMapperTest</code></td><td>12</td><td>envelope 字段顺序、d/c 拆分、快照 row_version、BINARY 走 BYTES、逻辑类型名</td></tr>
+  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>10</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表</td></tr>
+  <tr><td><code>ColumnMetadataReaderTest</code></td><td>10</td><td>类型映射封闭集、LARGEINT 不截断、不可导出类型判定</td></tr>
+  <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>四条解析规则与错误信息内容</td></tr>
+  <tr><td><code>FeConnectionTest</code></td><td>8</td><td>URL 扇出、scheme 重写、query string 复制到每个 host</td></tr>
+  <tr><td><code>SqlBuilderTest</code></td><td>8</td><td>强制 ORDER BY、转义、两个类型列都被选中</td></tr>
+  <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>8</td><td>默认值、必填校验、被拒绝的组合</td></tr>
+  <tr><td><code>OffsetStateTest</code></td><td>5</td><td>往返、Integer/Long 容错、缺字段降级</td></tr>
+  <tr><td><code>NonTrackableExceptionTest</code></td><td>4</td><td>三种标记都识别，且不过度匹配</td></tr>
+  <tr><td><code>VersionTest</code></td><td>3</td><td>资源存在且被过滤——盯的是构建接线，不是逻辑</td></tr>
+</table>
+</div>
+
+<h3><span class="fn">FakeCdcClient</span><span class="sz">178 行 · 无 @Test</span></h3>
+<p class="role">Connector 与 Task 两套测试共用的可编排替身。</p>
+<p><strong>编排输入</strong>：<code>setColumns</code>/<code>setPrimaryKeys</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>，外加 <code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>bookmarkCreateFailure</code> 三个可直接写的字段。</p>
+<p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>
+<p><code>bookmarkCreate</code> 的三段逻辑值得留意：队列非空就出队；队列空但见过该表就<strong>重复上次的值</strong>（这就是 idle dedup 的模拟）；从没编排过就用自增计数器（Connector 的 preflight 探针走这条）。</p>
+
+<h2 id="scripts"><span class="no">8</span>集成脚本</h2>
+
+<p>单测全部注入 <code>FakeCdcClient</code>，所以驱动和服务端的真实行为一律测不到。<code>setFetchSize</code> 那个缺陷让流式读 100% 不可用，而全部单测照常通过——集成冒烟因此是必需的，不是补充。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>文件</th><th>内容</th></tr>
+  <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
+  <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 切换两条通道</td></tr>
+  <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，共享步骤 0–9</td></tr>
+</table>
+</div>
+
+<p><code>sr_sql</code>、<code>cleanup</code>、<code>start_worker</code>、<code>stop_worker</code> 在两个脚本里<strong>同名但实现不同</strong>（容器 exec vs 本地进程），所以留在各自脚本里。把同名不同实现的函数合并是合并，不是去重。</p>
+
+<h4>12 个步骤在验什么</h4>
+<ol>
+  <li><strong>0</strong> 打包完整性（连接器类、两个驱动、Debezium 三个类、版本资源）+ 集群前置（run_mode、meta functions 开关、OPERATE 权限、FE leader）</li>
+  <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic</li>
+  <li><strong>3</strong> 启动 worker，等到快照记录到达</li>
+  <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、<code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、envelope 带 <code>transaction</code> 字段</li>
+  <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
+  <li><strong>7</strong> DATE/DATETIME 的时区无关取值</li>
+  <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>
+  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次），JSON/ARRAY/MAP/STRUCT 值完整</li>
+  <li><strong>11</strong> preflight 拒绝含 HLL 列的表并指明列名——同时证明 StarRocks 类型名在当前通道上确实传到了守卫</li>
+</ol>
+
+<p>步骤 5 那条顺序断言最关键：它把消费者输出的行序当作消息序，因此 topic 必须是单分区。</p>
+
+<footer>
+  同目录另有：《设计文档》讲为什么这么设计，《使用指南》讲怎么配置和运行。
+</footer>
+</main>
