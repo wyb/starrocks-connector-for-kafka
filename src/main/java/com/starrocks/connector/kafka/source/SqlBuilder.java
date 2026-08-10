@@ -43,17 +43,13 @@ public final class SqlBuilder {
         return "'" + escaped + "'";
     }
 
-    /** SELECT `c1`,`c2` FROM `db`.`t` [_BOOKMARK_&lt;id&gt;_] */
     public static String snapshotSql(String db, String table, List<String> cols, long bookmarkId) {
         return "SELECT " + quoteCols(cols) + " FROM " + qualifiedTable(db, table) +
                 " [_BOOKMARK_" + bookmarkId + "_]";
     }
 
     /**
-     * SELECT `c1`,`c2`,__CHANGE_TYPE__,__ROW_VERSION__ FROM `db`.`t` [_CHANGES_&lt;base&gt;_&lt;head&gt;_]
-     * ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC
-     *
-     * <p>The ORDER BY is a correctness invariant. The BE emits version-descending with INSERT
+     * The ORDER BY is a correctness invariant. The BE emits version-descending with INSERT
      * ahead of DELETE inside a version; passed through, an UPDATE would apply as insert-then-delete
      * and the row would vanish downstream.
      */
@@ -63,19 +59,18 @@ public final class SqlBuilder {
                 " ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC";
     }
 
-    /** SELECT bookmark_create('db','t','holder','&lt;ttl&gt;') -- ttl passed as a decimal string. */
+    /** The ttl goes in as a decimal string, not a number. */
     public static String bookmarkCreateSql(String db, String table, String holder, long ttlMs) {
         return "SELECT bookmark_create(" + quoteStr(db) + "," + quoteStr(table) + "," +
                 quoteStr(holder) + "," + quoteStr(Long.toString(ttlMs)) + ")";
     }
 
-    /** SELECT bookmark_release('db','t','&lt;id&gt;','holder') */
     public static String bookmarkReleaseSql(String db, String table, long bookmarkId, String holder) {
         return "SELECT bookmark_release(" + quoteStr(db) + "," + quoteStr(table) + "," +
                 quoteStr(Long.toString(bookmarkId)) + "," + quoteStr(holder) + ")";
     }
 
-    /** SELECT * FROM `db`.`t` LIMIT 0 -- used only to read ResultSetMetaData. */
+    /** Never read for rows; it exists only to get at ResultSetMetaData. */
     public static String columnsProbeSql(String db, String table) {
         return "SELECT * FROM " + qualifiedTable(db, table) + " LIMIT 0";
     }
@@ -95,13 +90,11 @@ public final class SqlBuilder {
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
     }
 
-    /** SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config WHERE TABLE_SCHEMA = 'db' AND TABLE_NAME = 't' */
     public static String tableConfigSql(String db, String table) {
         return "SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config WHERE TABLE_SCHEMA = " +
                 quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
     }
 
-    /** SHOW CREATE TABLE `db`.`t` */
     public static String showCreateTableSql(String db, String table) {
         return "SHOW CREATE TABLE " + qualifiedTable(db, table);
     }

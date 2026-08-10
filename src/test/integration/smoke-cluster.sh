@@ -25,14 +25,11 @@
 #   SR_TRANSPORT       mysql | arrow-flight                     (default mysql)
 #   SR_ARROW_PORT      FE arrow_flight_port, arrow-flight only  (default 9408)
 #
-# The two ports are not alternatives. SR_PORT is what this script's own mysql client uses for
-# DDL/DML, the config probes and cleanup -- always, on both transports. SR_ARROW_PORT is only
-# ever put in the connector's JDBC URL. Override SR_PORT only if your FE's query_port is not
-# 9030, which is unrelated to which transport you picked.
+# The two ports are not alternatives: SR_PORT is what this script's own mysql client always
+# uses, on both transports; SR_ARROW_PORT only ever goes in the connector's JDBC URL.
 #
-# The whole point of SR_TRANSPORT is that both settings run the SAME nine assertions. The
-# ordering invariant and the temporal reads are the two things most likely to regress when the
-# driver underneath changes, and they are asserted identically either way.
+# Both SR_TRANSPORT settings run the same steps -- that is the point. The ordering invariant
+# and the temporal reads are what regress when the driver underneath changes.
 #
 set -euo pipefail
 
@@ -169,30 +166,14 @@ note "Kafka reachable"
 
 # ------------------------------------------------------------------- set up --
 step "1. seed StarRocks"
-# One table carries every case. The temporal columns are here rather than in a table of their
-# own because they must ride the same records the other assertions inspect: a DATE read in the
-# worker's local zone makes Kafka Connect's Date logical type reject the whole record, so the
-# ordering and delete assertions below would fail too -- which is the coupling worth testing.
-# The type columns live here for the same reason the temporal ones do, and the PK
-# restriction that might have forced them elsewhere applies only to KEY columns
-# (CreateTableAnalyzer loops over keysColumnNames): value columns of a PRIMARY KEY table
-# take any type. Keeping them here means they ride the update and delete records too, so
-# the VARBINARY round trip is checked in a before-image as well as in the snapshot -- a
-# separate table would only ever have produced op=r.
+# One table carries every case, so the temporal and type columns ride the same records the
+# ordering and delete assertions inspect -- a separate table would only ever have produced
+# op=r, and the VARBINARY round trip would never be checked in a before-image. Value columns
+# of a PK table take any type; the restriction applies only to key columns.
 #
-#   b   VARBINARY -- must arrive as Connect BYTES, i.e. base64 on the wire
-#   j   JSON      -- carried as text, schema named io.debezium.data.Json
-#   arr ARRAY     -- carried as text, schema named com.starrocks.data.Array
-#   m   MAP       -- ditto, com.starrocks.data.Map
-#   s   STRUCT    -- ditto, com.starrocks.data.Struct
-#
-# All three complex types are here rather than just ARRAY because they take separate
-# branches in toJdbcType and in the logical-name lookup, and because information_schema
-# reports each with its own DATA_TYPE -- a mapping that only holds if the server really
-# spells them "array", "map" and "struct", which only a live cluster can confirm.
-#
-# 0x0102ff is deliberately not valid UTF-8: it is the byte sequence a text round trip
-# mangles, and its base64 is AQL/.
+# All three complex types, not just ARRAY: each takes its own branch in toJdbcType and in the
+# logical-name lookup, and only a live cluster confirms the server really spells them "array",
+# "map" and "struct". 0x0102ff is not valid UTF-8 on purpose -- base64 AQL/.
 sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME,
                                  b VARBINARY, j JSON, arr ARRAY<INT>,
                                  m MAP<VARCHAR(10),INT>, s STRUCT<x INT, y VARCHAR(10)>)
