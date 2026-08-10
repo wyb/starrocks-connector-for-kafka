@@ -37,11 +37,11 @@
 set -euo pipefail
 
 cd "$(dirname "$0")"
-REPO_ROOT="$(cd ../../.. && pwd)"
-JAR="$REPO_ROOT/target/starrocks-connector-for-kafka-1.0.5.jar"
-PLUGIN_DIR="$REPO_ROOT/target/smoke-plugin"
-OUT_DIR="$(mktemp -d)"
-CONSUMED="$OUT_DIR/consumed.json"
+
+# REPO_ROOT / JAR / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
+# note, verify_plugin_jar and stage_plugin_dir.
+# shellcheck source=common.sh
+. ./common.sh
 
 SR_PORT="${SR_PORT:-9030}"
 SR_USER="${SR_USER:-root}"
@@ -56,18 +56,6 @@ DB="cdc_smoke_${SUFFIX}"
 TABLE=orders
 CONNECTOR_NAME="sr-cdc-smoke-${SUFFIX}"
 TOPIC="sr.${DB}.${TABLE}"
-
-# Fixed literals so the expected wire values below are constants, not derived at run time.
-# 2026-08-05T00:00:00Z is 20670 days after the epoch; 2026-08-05T12:34:56Z is 1785933296000 ms.
-# Both are what a UTC-Calendar read must produce regardless of the worker's own timezone.
-TZ_DATE="2026-08-05"
-TZ_DATETIME="2026-08-05 12:34:56"
-TZ_EXPECT_DAYS=20670
-TZ_EXPECT_MILLIS=1785933296000
-
-step() { printf '\n=== %s ===\n' "$1"; }
-fail() { printf '\nFAIL: %s\n' "$1" >&2; exit 1; }
-note() { printf '  %s\n' "$1"; }
 
 # ${VAR:-} throughout: the required-arg checks below must be able to print a
 # useful message instead of dying on `set -u` while building this array.
@@ -123,22 +111,7 @@ command -v java  >/dev/null   || fail "java not found on PATH"
 [ -x "$KAFKA_BIN/connect-standalone.sh" ]     || fail "$KAFKA_BIN/connect-standalone.sh not executable"
 [ -x "$KAFKA_BIN/kafka-console-consumer.sh" ] || fail "$KAFKA_BIN/kafka-console-consumer.sh not executable"
 
-[ -f "$JAR" ] || fail "plugin jar missing at $JAR — run: (cd $REPO_ROOT && mvn -DskipTests package)"
-jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSourceConnector.class' \
-  || fail "connector class missing from $JAR"
-jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
-  || fail "mariadb JDBC driver missing from $JAR — the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
-# ChangeRecordMapper builds every record with io.debezium.data.Envelope, whose class-init also
-# pulls TransactionMonitor and SchemaNameAdjuster. Unit tests run on the full compile classpath
-# and cannot see a missing shade include; it surfaces only here or as a NoClassDefFoundError in
-# a real worker.
-for cls in io/debezium/data/Envelope.class \
-           io/debezium/pipeline/txmetadata/TransactionMonitor.class \
-           io/debezium/util/SchemaNameAdjuster.class; do
-  jar tf "$JAR" | grep -q "^$cls$" \
-    || fail "$cls missing from $JAR — the primary maven-shade execution must include io.debezium:debezium-core"
-done
-note "plugin jar OK (connector + JDBC driver + Debezium envelope classes)"
+verify_plugin_jar
 
 sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
 note "StarRocks reachable"
@@ -233,8 +206,7 @@ esac
 note "transport=$SR_TRANSPORT, connector URL=$CONNECTOR_JDBC_URL"
 
 step "2. stage plugin and configs"
-rm -rf "$PLUGIN_DIR"; mkdir -p "$PLUGIN_DIR"; cp "$JAR" "$PLUGIN_DIR/"
-note "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
+stage_plugin_dir
 
 cat > "$OUT_DIR/worker.properties" <<EOF
 bootstrap.servers=$KAFKA_BOOTSTRAP

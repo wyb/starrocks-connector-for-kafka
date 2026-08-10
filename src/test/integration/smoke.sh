@@ -15,27 +15,19 @@
 #
 set -euo pipefail
 
+# docker compose needs docker-compose.yml in $PWD, so this harness must run from
+# its own directory regardless of where it was invoked from.
 cd "$(dirname "$0")"
-REPO_ROOT="$(cd ../../.. && pwd)"
-JAR="$REPO_ROOT/target/starrocks-connector-for-kafka-1.0.5.jar"
-# Dedicated single-jar plugin directory, mounted at /plugins by docker-compose.yml.
-PLUGIN_DIR="$REPO_ROOT/target/smoke-plugin"
-OUT_DIR="$(mktemp -d)"
-CONSUMED="$OUT_DIR/consumed.json"
+
+# REPO_ROOT / JAR / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
+# note, verify_plugin_jar and stage_plugin_dir.
+# shellcheck source=common.sh
+. ./common.sh
+
 DB=smoke
 TABLE=orders
 TOPIC=sr.smoke.orders
 
-# Fixed literals so the expected wire values are constants, not derived at run time.
-# 2026-08-05T00:00:00Z is 20670 days after the epoch; 2026-08-05T12:34:56Z is 1785933296000 ms.
-# Both are what a UTC-Calendar read must produce regardless of the worker's own timezone.
-TZ_DATE="2026-08-05"
-TZ_DATETIME="2026-08-05 12:34:56"
-TZ_EXPECT_DAYS=20670
-TZ_EXPECT_MILLIS=1785933296000
-
-step()  { printf '\n=== %s ===\n' "$1"; }
-fail()  { printf 'FAIL: %s\n' "$1" >&2; exit 1; }
 sr_sql() { docker compose exec -T starrocks mysql -h127.0.0.1 -P9030 -uroot -e "$1"; }
 kafka()  { docker compose exec -T kafka "$@"; }
 
@@ -47,32 +39,8 @@ cleanup() {
 trap cleanup EXIT
 
 step "0. preflight: plugin jar contents"
-[ -f "$JAR" ] || fail "plugin jar not found at $JAR — run: mvn -DskipTests package"
-jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSourceConnector.class' \
-  || fail "connector class missing from $JAR"
-jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
-  || fail "mariadb JDBC driver missing from $JAR — the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
-# ChangeRecordMapper builds every record with io.debezium.data.Envelope, whose class-init also
-# pulls TransactionMonitor and SchemaNameAdjuster. Unit tests run on the full compile classpath
-# and cannot see a missing shade include; it surfaces only here or as a NoClassDefFoundError in
-# a real worker.
-for cls in io/debezium/data/Envelope.class \
-           io/debezium/pipeline/txmetadata/TransactionMonitor.class \
-           io/debezium/util/SchemaNameAdjuster.class; do
-  jar tf "$JAR" | grep -q "^$cls$" \
-    || fail "$cls missing from $JAR — the primary maven-shade execution must include io.debezium:debezium-core"
-done
-echo "plugin jar OK (connector + JDBC driver + Debezium envelope classes present)"
-
-# Stage exactly one jar as the only plugin location. target/ itself must NOT be
-# mounted: after `mvn package` it also holds the -with-dependencies jar, the
-# original-*.jar (connector present, JDBC driver ABSENT -> IllegalStateException
-# at worker startup), classes/ and the assembly dirs. Connect scans each of those
-# as a separate plugin location, so which copy of the connector wins is arbitrary.
-rm -rf "$PLUGIN_DIR"
-mkdir -p "$PLUGIN_DIR"
-cp "$JAR" "$PLUGIN_DIR/"
-echo "staged $(basename "$JAR") as the only plugin in $PLUGIN_DIR"
+verify_plugin_jar
+stage_plugin_dir
 
 step "1. start containers"
 docker compose up -d
