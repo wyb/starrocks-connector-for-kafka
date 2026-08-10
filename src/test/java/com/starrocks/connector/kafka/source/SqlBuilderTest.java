@@ -22,7 +22,6 @@ package com.starrocks.connector.kafka.source;
 
 import org.junit.Test;
 
-import java.sql.SQLException;
 import java.util.Arrays;
 
 import static org.junit.Assert.*;
@@ -64,19 +63,26 @@ public class SqlBuilderTest {
         assertEquals("SHOW CREATE TABLE `db1`.`t1`", SqlBuilder.showCreateTableSql("db1", "t1"));
     }
 
+    /**
+     * The Arrow Flight transport's only route to column metadata, and until now the one method in
+     * this class with no test at all -- so the SQL that the less-exercised of the two transports
+     * depends on was also the SQL nothing pinned.
+     *
+     * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
+     * matched positionally against the projected result set by {@code RowExtractor}, so any other
+     * order silently reads every value into the wrong field.
+     */
     @Test
-    public void testNonTrackableClassification() {
-        assertNotNull(NonTrackableException.classify(new SQLException(
-                "CDC-ERROR-1 (CHANGE_NOT_TRACKABLE): CHANGES window on tablet 1 spans version 3 ...")));
-        assertNotNull(NonTrackableException.classify(new SQLException("Bookmark 11952 not found")));
-        // FE planning-time SemanticExceptions (partition dropped/rewritten/resharded, or a
-        // partition/tablet hint that no longer resolves) never contain "CDC-ERROR-" or
-        // "bookmark"+"not found", but always contain "not trackable".
-        assertNotNull(NonTrackableException.classify(new SQLException(
-                "CHANGES from bookmark 5 to 9 on table 't' not trackable: physical partition 100 dropped")));
-        assertNotNull(NonTrackableException.classify(new SQLException(
-                "CHANGES on table 't' not trackable: partition p1 not present in the changeset")));
-        assertNull(NonTrackableException.classify(new SQLException("Connection refused")));
-        assertNull(NonTrackableException.classify(new SQLException((String) null)));
+    public void testColumnsMetadataSqlSelectsOrderedByOrdinalPosition() {
+        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"
+                        + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
+                        + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
+                SqlBuilder.columnsMetadataSql("db1", "t1"));
+    }
+
+    /** Identifiers reach information_schema as string literals, so they are quoted, not backticked. */
+    @Test
+    public void testColumnsMetadataSqlEscapesStringLiterals() {
+        assertTrue(SqlBuilder.columnsMetadataSql("db'1", "t1").contains("TABLE_SCHEMA = 'db\\'1'"));
     }
 }

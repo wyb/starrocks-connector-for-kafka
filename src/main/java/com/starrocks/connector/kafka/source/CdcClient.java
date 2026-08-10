@@ -44,10 +44,17 @@ public interface CdcClient extends AutoCloseable {
 
     boolean cdcPropertyEnabled(String db, String table) throws SQLException;
 
-    void streamSnapshot(String db, String table, List<String> cols, long bookmarkId, RowConsumer consumer)
+    /**
+     * @param cols the column list from {@link #fetchColumns}, which both names the columns to
+     *             project and types the values read back. Passing names alone would leave the read
+     *             side to re-derive types from the driver, and that is not a second opinion worth
+     *             having -- see {@code RowExtractor}.
+     */
+    void streamSnapshot(String db, String table, List<ColumnMeta> cols, long bookmarkId, RowConsumer consumer)
             throws SQLException;
 
-    void streamChanges(String db, String table, List<String> cols, long base, long head, ChangeRowConsumer consumer)
+    /** @param cols as for {@link #streamSnapshot}. */
+    void streamChanges(String db, String table, List<ColumnMeta> cols, long base, long head, ChangeRowConsumer consumer)
             throws SQLException, NonTrackableException;
 
     @Override

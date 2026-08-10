@@ -20,6 +20,8 @@
 
 package com.starrocks.connector.kafka.source;
 
+import com.starrocks.connector.kafka.common.Version;
+
 import org.apache.kafka.clients.producer.RecordMetadata;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -142,7 +144,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     @Override
     public String version() {
-        return "1.0";
+        return Version.get();
     }
 
     @Override
@@ -233,7 +235,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 }
                 final long base = t.committedBookmark;
                 final int emittedBefore = out.size();
-                client.streamChanges(db, t.table, colNames(t), base, head, (row, changeType, rowVersion) -> {
+                client.streamChanges(db, t.table, t.cols, base, head, (row, changeType, rowVersion) -> {
                     SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true);
                     out.add(r);
                     if (tombstones && changeType == 1) {
@@ -264,7 +266,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (snapshotInitial) {
             LOG.info("Starting snapshot of {}.{} at bookmark {}", db, t.table, b0);
             int rowsBefore = out.size();
-            client.streamSnapshot(db, t.table, colNames(t), b0, row -> out.add(t.mapper.toSnapshotRecord(row, b0)));
+            client.streamSnapshot(db, t.table, t.cols, b0, row -> out.add(t.mapper.toSnapshotRecord(row, b0)));
             LOG.info("Finished snapshot of {}.{} at bookmark {}: {} row(s)",
                     db, t.table, b0, out.size() - rowsBefore);
         } else {
@@ -425,14 +427,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
         }
         return null;
-    }
-
-    private static List<String> colNames(TableState t) {
-        List<String> names = new ArrayList<>(t.cols.size());
-        for (ColumnMeta c : t.cols) {
-            names.add(c.name);
-        }
-        return names;
     }
 
     private static List<String> parseTaskTables(String raw) {

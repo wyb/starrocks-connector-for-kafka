@@ -200,6 +200,39 @@ public class ChangeRecordMapperTest {
         assertTrue(jSchema.isOptional());
     }
 
+    /**
+     * BINARY/VARBINARY must reach Kafka as BYTES, carrying the exact bytes read.
+     *
+     * <p>These used to fall through to the STRING default on both sides at once -- schema and read
+     * -- so nothing ever threw and the corruption was invisible: bytes went through
+     * {@code getString()}, got decoded with the connection charset, and anything that was not valid
+     * text came out as U+FFFD. The round trip below is what makes that regression loud.
+     */
+    @Test
+    public void testBinaryColumnsCarryRawBytesNotText() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("b", Types.BINARY, 4, 0, false),
+                new ColumnMeta("vb", Types.VARBINARY, 16, 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "blobs", "sr.db1.blobs",
+                cols, Collections.emptyList());
+
+        // 0xFF 0xFE is not valid UTF-8; decoding it as text is exactly the lossy path being guarded.
+        byte[] fixed = new byte[]{(byte) 0xFF, (byte) 0xFE, 0x00, 0x41};
+        byte[] variable = new byte[]{(byte) 0xC3, 0x28};
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{fixed, variable}, 1L);
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema rowSchema = after.schema();
+
+        assertEquals(Schema.Type.BYTES, rowSchema.field("b").schema().type());
+        assertFalse(rowSchema.field("b").schema().isOptional());
+        assertEquals(Schema.Type.BYTES, rowSchema.field("vb").schema().type());
+        assertTrue(rowSchema.field("vb").schema().isOptional());
+
+        assertArrayEquals(fixed, (byte[]) after.get("b"));
+        assertArrayEquals(variable, (byte[]) after.get("vb"));
+    }
+
     @Test
     public void testTombstoneSharesKeyAndOffset() {
         ChangeRecordMapper m = mapper();

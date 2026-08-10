@@ -20,6 +20,8 @@
 
 package com.starrocks.connector.kafka.source;
 
+import com.starrocks.connector.kafka.common.Version;
+
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.errors.ConnectException;
@@ -82,7 +84,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
 
     @Override
     public String version() {
-        return "1.0";
+        return Version.get();
     }
 
     @Override

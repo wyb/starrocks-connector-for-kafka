@@ -255,14 +255,14 @@ public class StarRocksCdcSourceTaskTest {
         task.commit();
         pollToFlushReleases();
 
-        assertTrue("first commit after acks released " + fake.released, fake.released.isEmpty());
+        assertTrue("first commit after acks released " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
         assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
 
         // One more commit cycle has now elapsed, so 101's offset is durable too and 100 is safe.
         task.commit();
         pollToFlushReleases();
 
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
 
         // Still nothing newer: 101 is the ack watermark and stays pinned however often commit runs.
@@ -270,7 +270,7 @@ public class StarRocksCdcSourceTaskTest {
         pollToFlushReleases();
         task.commit();
         pollToFlushReleases();
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
     }
 
@@ -314,7 +314,7 @@ public class StarRocksCdcSourceTaskTest {
         task.commit();
         pollToFlushReleases();
 
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
         // Repeating commit() must not start releasing the acked bookmark either, however many
@@ -323,7 +323,7 @@ public class StarRocksCdcSourceTaskTest {
         pollToFlushReleases();
         task.commit();
         pollToFlushReleases();
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
         // (b) Zero-row windows: two polls advance the position and append to the deque without
@@ -356,7 +356,7 @@ public class StarRocksCdcSourceTaskTest {
             zeroRowTask.poll();
         }
 
-        assertTrue("released " + zeroRowFake.released, zeroRowFake.released.isEmpty());
+        assertTrue("released " + zeroRowFake.releasedBookmarks, zeroRowFake.releasedBookmarks.isEmpty());
         assertEquals(Arrays.asList(200L, 201L, 202L), liveBookmarksOf(zeroRowTask));
     }
 
@@ -383,7 +383,7 @@ public class StarRocksCdcSourceTaskTest {
             pollToFlushReleases();
         }
 
-        assertTrue("released " + fake.released, fake.released.isEmpty());
+        assertTrue("released " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
         assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
     }
 
@@ -402,7 +402,7 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(1, out.size());
         assertTrue(fake.streamedWindows.contains("11952_11955"));
         assertEquals(0, fake.snapshotCalls);
-        assertTrue(fake.released.isEmpty());
+        assertTrue(fake.releasedBookmarks.isEmpty());
     }
 
     /**
@@ -429,11 +429,11 @@ public class StarRocksCdcSourceTaskTest {
         // commit cycle has elapsed -- the same protection every crash-replay base gets.
         task.commit();
         pollToFlushReleases();
-        assertTrue("released too early: " + fake.released, fake.released.isEmpty());
+        assertTrue("released too early: " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
 
         task.commit();
         pollToFlushReleases();
-        assertEquals(Collections.singletonList("db1.orders:11952:kc:c1"), fake.released);
+        assertEquals(Collections.singletonList("db1.orders:11952:kc:c1"), fake.releasedBookmarks);
         assertEquals(Collections.singletonList(11955L), liveBookmarksOf(task));
     }
 
@@ -502,135 +502,5 @@ public class StarRocksCdcSourceTaskTest {
         assertNull(tombstone.valueSchema());
         assertEquals(deleteRecord.key(), tombstone.key());
         assertFalse(deleteRecord == tombstone);
-    }
-
-    /**
-     * Scripted-and-recording {@link CdcClient} test double. bookmarkCreate() consumes a
-     * per-table queue of enqueued head values, repeating the last dequeued value once the queue
-     * runs dry (simulating an idle table: no new bookmark version to report). streamChanges()
-     * consumes and clears the table's queued {@link ChangeRow}s after replaying them, unless the
-     * table was armed via {@link #failNextChangesWithNonTrackable} -- then it throws once and
-     * leaves any queued changes untouched.
-     */
-    static final class FakeCdcClient implements CdcClient {
-
-        private final Map<String, List<ColumnMeta>> columnsByTable = new HashMap<>();
-        private final Map<String, List<String>> pksByTable = new HashMap<>();
-        private final Map<String, Deque<Long>> queuedHeadsByTable = new HashMap<>();
-        private final Map<String, Long> lastHeadByTable = new HashMap<>();
-        private final Map<String, List<Object[]>> queuedSnapshotRowsByTable = new HashMap<>();
-        private final Map<String, List<ChangeRow>> queuedChangesByTable = new HashMap<>();
-        private final Set<String> failNextChangesTables = new HashSet<>();
-
-        final List<String> released = new ArrayList<>();
-        final List<String> createdHolders = new ArrayList<>();
-        final List<String> streamedWindows = new ArrayList<>();
-        int snapshotCalls = 0;
-
-        void setColumns(String table, List<ColumnMeta> cols) {
-            columnsByTable.put(table, cols);
-        }
-
-        void setPrimaryKeys(String table, List<String> pks) {
-            pksByTable.put(table, pks);
-        }
-
-        void enqueueHead(String table, long id) {
-            queuedHeadsByTable.computeIfAbsent(table, k -> new ArrayDeque<>()).addLast(id);
-        }
-
-        void enqueueSnapshotRows(String table, List<Object[]> rows) {
-            queuedSnapshotRowsByTable.put(table, rows);
-        }
-
-        void enqueueChanges(String table, ChangeRow... changeRows) {
-            queuedChangesByTable.put(table, new ArrayList<>(Arrays.asList(changeRows)));
-        }
-
-        void failNextChangesWithNonTrackable(String table) {
-            failNextChangesTables.add(table);
-        }
-
-        @Override
-        public long bookmarkCreate(String db, String table, String holder, long ttlMs) {
-            createdHolders.add(holder);
-            Deque<Long> queue = queuedHeadsByTable.get(table);
-            long value;
-            if (queue != null && !queue.isEmpty()) {
-                value = queue.pollFirst();
-            } else {
-                value = lastHeadByTable.containsKey(table) ? lastHeadByTable.get(table) : -1L;
-            }
-            lastHeadByTable.put(table, value);
-            return value;
-        }
-
-        @Override
-        public void bookmarkRelease(String db, String table, long bookmarkId, String holder) {
-            released.add(db + "." + table + ":" + bookmarkId + ":" + holder);
-        }
-
-        @Override
-        public List<ColumnMeta> fetchColumns(String db, String table) {
-            return columnsByTable.get(table);
-        }
-
-        @Override
-        public List<String> fetchPrimaryKeys(String db, String table) {
-            return pksByTable.get(table);
-        }
-
-        @Override
-        public String fetchTableModel(String db, String table) {
-            return "DUP_KEYS";
-        }
-
-        @Override
-        public boolean cdcPropertyEnabled(String db, String table) {
-            return true;
-        }
-
-        @Override
-        public void streamSnapshot(String db, String table, List<String> cols, long bookmarkId, RowConsumer consumer) {
-            snapshotCalls++;
-            List<Object[]> queued = queuedSnapshotRowsByTable.get(table);
-            if (queued != null) {
-                for (Object[] row : queued) {
-                    consumer.accept(row);
-                }
-            }
-        }
-
-        @Override
-        public void streamChanges(String db, String table, List<String> cols, long base, long head,
-                                   ChangeRowConsumer consumer) throws NonTrackableException {
-            streamedWindows.add(base + "_" + head);
-            if (failNextChangesTables.remove(table)) {
-                throw new NonTrackableException("synthetic non-trackable window for " + table, null);
-            }
-            List<ChangeRow> queued = queuedChangesByTable.remove(table);
-            if (queued != null) {
-                for (ChangeRow row : queued) {
-                    consumer.accept(row.row, row.changeType, row.rowVersion);
-                }
-            }
-        }
-
-        @Override
-        public void close() {
-            // no resources held
-        }
-
-        static final class ChangeRow {
-            final Object[] row;
-            final int changeType;
-            final long rowVersion;
-
-            ChangeRow(Object[] row, int changeType, long rowVersion) {
-                this.row = row;
-                this.changeType = changeType;
-                this.rowVersion = rowVersion;
-            }
-        }
     }
 }

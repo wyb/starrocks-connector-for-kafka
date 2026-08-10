@@ -224,7 +224,6 @@
   <tr><td><code>source.poll.intervalms</code></td><td>Long</td><td><code>5000</code></td><td>在一次未产生任何记录的轮询之后，到下一次轮询之间的休眠毫秒数。</td></tr>
   <tr><td><code>source.bookmark.ttlms</code></td><td>Long</td><td><code>604800000</code>（7 天）</td><td>支撑每张表位置的 bookmark 的存活时间（time-to-live），单位为毫秒。在当前版本中，这只是租约的兜底手段，而不是一个可续期的租约——参见<a href="#limitations">限制</a>。</td></tr>
   <tr><td><code>source.nontrackable.policy</code></td><td>String</td><td><code>fail</code></td><td>当某张表的 CHANGES 窗口变为不可追踪时应采取的动作。取值为 <code>fail</code>、<code>resnapshot</code> 之一。<strong><code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code></strong>（即默认值）：与 <code>source.snapshot.mode=no_snapshot</code> 组合时会在启动时被 <code>ConfigException</code> 拒绝，因为此时没有任何快照可用于重建该表的位置。</td></tr>
-  <tr><td><code>source.netchanges</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会设置会话变量 <code>enable_cdc_net_change=true</code>，使 StarRocks 折叠中间变更，在一个窗口内针对每个 key 只返回最终的净变更。</td></tr>
   <tr><td><code>source.tombstones.on.delete</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会在每条删除记录之后立即发出一条额外的 tombstone 记录（value 为 null，key 相同）。</td></tr>
   <tr><td><code>source.maxretries</code></td><td>Int</td><td><code>3</code></td><td>一次 bookmark 调用在放弃前的尝试次数（对应 sink 连接器的 <code>sink.maxretries</code>）。</td></tr>
   <tr><td><code>connect.timeoutms</code></td><td>Int</td><td><code>1000</code></td><td>连接 StarRocks 的尝试在超时前等待的毫秒数（与 sink 连接器使用相同的键名）。</td></tr>
@@ -255,7 +254,6 @@ source.snapshot.mode=initial
 source.poll.intervalms=5000
 source.bookmark.ttlms=604800000
 source.nontrackable.policy=fail
-source.netchanges=false
 source.tombstones.on.delete=false
 source.maxretries=3
 connect.timeoutms=1000</code></pre>

@@ -20,12 +20,13 @@
 
 package com.starrocks.connector.kafka.source;
 
+import com.starrocks.connector.kafka.common.KeyValueListParser;
+
 import org.apache.kafka.common.config.AbstractConfig;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigException;
 
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 
@@ -56,8 +57,6 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public static final String BOOKMARK_TTLMS = "source.bookmark.ttlms";
     // The action to take when a captured table becomes non-trackable.
     public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
-    // Whether to emit only the final net change per key instead of every intermediate change.
-    public static final String NETCHANGES = "source.netchanges";
     // Whether to emit an additional tombstone record (null value) following a delete record.
     public static final String TOMBSTONES_ON_DELETE = "source.tombstones.on.delete";
     // The number of times to retry a failed source operation before giving up.
@@ -168,12 +167,6 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Importance.MEDIUM,
                         "The action to take when a captured table becomes non-trackable."
                 ).define(
-                        NETCHANGES,
-                        ConfigDef.Type.BOOLEAN,
-                        false,
-                        ConfigDef.Importance.LOW,
-                        "Whether to emit only the final net change per key instead of every intermediate change."
-                ).define(
                         TOMBSTONES_ON_DELETE,
                         ConfigDef.Type.BOOLEAN,
                         false,
@@ -195,33 +188,12 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     /**
-     * Parses and validates the TABLE2TOPIC_MAP value. Each non-empty entry must be split on the
-     * first ':' into two non-empty segments; otherwise a ConfigException is raised.
+     * Parses the TABLE2TOPIC_MAP value. Shared with the sink connector's
+     * {@code starrocks.topic2table.map} via {@link KeyValueListParser}; a malformed list, an empty
+     * side, or a repeated table raises a ConfigException.
      */
     private static Map<String, String> parseTable2Topic(String raw) {
-        Map<String, String> result = new HashMap<>();
-        if (raw == null || raw.trim().isEmpty()) {
-            return result;
-        }
-        for (String rawEntry : raw.split(",")) {
-            String entry = rawEntry.trim();
-            if (entry.isEmpty()) {
-                continue;
-            }
-            int idx = entry.indexOf(':');
-            if (idx < 0) {
-                throw new ConfigException(TABLE2TOPIC_MAP, raw,
-                        "Entry '" + entry + "' is missing a ':' separator; expected table:topic.");
-            }
-            String table = entry.substring(0, idx).trim();
-            String topic = entry.substring(idx + 1).trim();
-            if (table.isEmpty() || topic.isEmpty()) {
-                throw new ConfigException(TABLE2TOPIC_MAP, raw,
-                        "Entry '" + entry + "' must have non-empty table and topic segments.");
-            }
-            result.put(table, topic);
-        }
-        return result;
+        return KeyValueListParser.parse(TABLE2TOPIC_MAP, raw);
     }
 
     public List<String> tableNames() {
@@ -281,10 +253,6 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
 
     public String nonTrackablePolicy() {
         return getString(NONTRACKABLE_POLICY);
-    }
-
-    public boolean netChanges() {
-        return getBoolean(NETCHANGES);
     }
 
     public boolean tombstonesOnDelete() {

@@ -276,6 +276,14 @@ public final class ChangeRecordMapper {
                 return col.nullable ? Date.builder().optional().build() : Date.SCHEMA;
             case Types.TIMESTAMP:
                 return col.nullable ? Timestamp.builder().optional().build() : Timestamp.SCHEMA;
+            // BINARY/VARBINARY must not fall through to the STRING default. Doing so was silently
+            // lossy rather than loud: the read side matched by also defaulting to getString(), so
+            // nothing failed -- the bytes were just decoded with the connection charset, and every
+            // sequence that is not valid text became U+FFFD with no way back to the original.
+            case Types.BINARY:
+            case Types.VARBINARY:
+            case Types.LONGVARBINARY:
+                return col.nullable ? Schema.OPTIONAL_BYTES_SCHEMA : Schema.BYTES_SCHEMA;
             default:
                 return col.nullable ? Schema.OPTIONAL_STRING_SCHEMA : Schema.STRING_SCHEMA;
         }

@@ -46,7 +46,6 @@ public class StarRocksCdcSourceConfigTest {
         assertEquals(5000L, c.pollIntervalMs());
         assertEquals(604800000L, c.bookmarkTtlMs());
         assertEquals("fail", c.nonTrackablePolicy());
-        assertFalse(c.netChanges());
         assertFalse(c.tombstonesOnDelete());
     }
 

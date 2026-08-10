@@ -49,7 +49,6 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
 | `source.poll.intervalms` | Long | `5000` | Milliseconds to sleep between polls after a poll that produced no records. |
 | `source.bookmark.ttlms` | Long | `604800000` (7 days) | Time-to-live, in milliseconds, for the bookmark backing each table's position. This is a lease backstop, not a renewable lease in this version — see [Limitations](#limitations). |
 | `source.nontrackable.policy` | String | `fail` | Action to take when a table's CHANGES window becomes non-trackable. One of `fail`, `resnapshot`. **`resnapshot` requires `source.snapshot.mode=initial`** (the default): combined with `source.snapshot.mode=no_snapshot` it is rejected at startup with a `ConfigException`, since there would be no snapshot to rebuild the table's position from. |
-| `source.netchanges` | Boolean | `false` | When `true`, sets the session variable `enable_cdc_net_change=true` so StarRocks collapses intermediate changes and returns only the final net change per key within a window. |
 | `source.tombstones.on.delete` | Boolean | `false` | When `true`, emits an extra tombstone record (null value, same key) immediately following each delete record. |
 | `source.maxretries` | Int | `3` | Number of attempts for a bookmark call before giving up (mirrors the sink's `sink.maxretries`). |
 | `connect.timeoutms` | Int | `1000` | Milliseconds before a connection attempt to StarRocks times out (same key name as the sink connector). |
@@ -79,7 +78,6 @@ source.snapshot.mode=initial
 source.poll.intervalms=5000
 source.bookmark.ttlms=604800000
 source.nontrackable.policy=fail
-source.netchanges=false
 source.tombstones.on.delete=false
 source.maxretries=3
 connect.timeoutms=1000
