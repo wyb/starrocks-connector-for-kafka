@@ -24,11 +24,8 @@ import java.sql.SQLException;
 import java.util.Locale;
 
 /**
- * Signals that a CHANGES read failed because the requested version range is no longer
- * trackable -- the window has aged out, the bookmark pinning it has expired/been released, or
- * FE-side planning rejected it outright (e.g. a partition was dropped, truncated, rewritten, or
- * resharded since the base bookmark) -- as opposed to a transient or unrelated failure. Callers
- * use this to decide when to fall back to a fresh snapshot instead of retrying the same range.
+ * A CHANGES read failed because the version range is no longer replayable, as opposed to
+ * transiently. Callers use this to decide whether to fall back to a fresh snapshot.
  */
 public class NonTrackableException extends Exception {
 
@@ -37,15 +34,13 @@ public class NonTrackableException extends Exception {
     }
 
     /**
-     * Classifies a SQLException raised while executing a CHANGES read.
+     * Wraps the exception when it is a non-trackable failure, else returns null so the caller
+     * propagates it unchanged.
      *
-     * <p>Returns a wrapping {@link NonTrackableException} when the message contains
-     * {@code "CDC-ERROR-"} (a BE execution-time error), contains both {@code "bookmark"} and
-     * {@code "not found"} (a stale/expired bookmark reference), or contains
-     * {@code "not trackable"} (an FE planning-time {@code SemanticException} rejection, e.g. a
-     * dropped/rewritten/resharded partition or a partition/tablet hint that no longer resolves)
-     * -- all checks case-insensitive; returns {@code null} for every other message, including a
-     * null message, telling the caller to propagate the original SQLException unchanged.
+     * <p>Three spellings, because they come from three places: {@code "CDC-ERROR-"} from the BE at
+     * execution time, {@code "bookmark" + "not found"} from a released or expired base, and
+     * {@code "not trackable"} from FE planning (dropped/rewritten/resharded partition). Matching
+     * only the first left {@code policy=resnapshot} inert in production while every test passed.
      */
     public static NonTrackableException classify(SQLException e) {
         String message = e.getMessage();

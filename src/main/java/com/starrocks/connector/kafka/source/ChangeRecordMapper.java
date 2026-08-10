@@ -39,24 +39,16 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * Pure function mapper that turns a raw row (as {@code Object[]} + column metadata) into a
- * Debezium envelope {@link SourceRecord}.
+ * Turns a raw row plus column metadata into a Debezium envelope {@link SourceRecord}. Pure: never
+ * touches JDBC, and every schema is built once in the constructor.
  *
- * <p>The envelope is built by Debezium's own {@link Envelope} rather than by hand. That library
- * owns the envelope's field set and field order -- {@code before, after, source, op, ts_ms,
- * transaction} -- and the {@code op} code each factory method stamps ({@code r}/{@code c}/{@code
- * d}). Do not go back to assembling it with {@link SchemaBuilder}/{@link Struct}: the canonical
- * order is part of the Avro schema identity that downstream consumers and schema registries
- * compare against, and a hand-rolled envelope drifts from it silently. The only pieces this class
- * still defines are the two schemas Debezium cannot know about: the row schema (which must stay
- * optional, since {@code before}/{@code after} are null on {@code c}/{@code d} respectively) and
- * the StarRocks-specific {@code source} block.
+ * <p>The envelope comes from Debezium's own {@link Envelope}, which owns the field order
+ * ({@code before, after, source, op, ts_ms, transaction}) and the {@code op} codes.
+ * <b>Do not reassemble it by hand</b> with {@link SchemaBuilder}/{@link Struct}: that order is part
+ * of the Avro schema identity consumers and registries compare against, and a hand-rolled envelope
+ * drifts from it silently. Only the row schema and the StarRocks {@code source} block are ours.
  *
- * <p>{@code transaction} is left null: StarRocks' CHANGES stream carries no transaction metadata.
- *
- * <p>Never touches JDBC/ResultSet directly so it stays trivially testable. All schemas
- * (row/key/source) and the envelope itself are built once in the constructor and reused for every
- * record produced by this instance.
+ * <p>{@code transaction} stays null; the CHANGES stream carries no transaction metadata.
  */
 public final class ChangeRecordMapper {
 
@@ -64,10 +56,7 @@ public final class ChangeRecordMapper {
     // constants since the method signature (not this encoding detail) is what Task 5 depends on.
     private static final int CHANGE_TYPE_DELETE = 1;
 
-    /**
-     * {@code source.row_version} reported for a snapshot ({@code op="r"}) record. Snapshot rows
-     * carry no version: see {@link #toSnapshotRecord} for why a bookmark id must not be used here.
-     */
+    /** Snapshot rows carry no version; see {@link #toSnapshotRecord} for why not a bookmark id. */
     private static final long SNAPSHOT_ROW_VERSION = 0L;
 
     private static final String FIELD_DB = "db";
@@ -117,8 +106,6 @@ public final class ChangeRecordMapper {
                 .field(FIELD_ROW_VERSION, Schema.INT64_SCHEMA)
                 .field(FIELD_BOOKMARK, bookmarkSchema)
                 .build();
-        // withRecord() defines before and after from the one row schema; build() appends op, ts_ms
-        // and transaction, giving the canonical order before, after, source, op, ts_ms, transaction.
         this.envelope = Envelope.defineSchema()
                 .withName(Envelope.schemaName(topic))
                 .withRecord(rowSchema)
@@ -126,10 +113,7 @@ public final class ChangeRecordMapper {
                 .build();
     }
 
-    /**
-     * changeType: 0=INSERT/UPSERT -&gt; op "c" (after populated); 1=DELETE -&gt; op "d" (before populated).
-     * sourceOffset = OffsetState.sourceOffset(headBookmark, snapshotDoneFlag).
-     */
+    /** 0=INSERT/UPSERT -&gt; op "c"; 1=DELETE -&gt; op "d" (before populated). */
     public SourceRecord toChangeRecord(Object[] row, int changeType, long rowVersion,
                                         long baseBookmark, long headBookmark, boolean snapshotDoneFlag) {
         Struct rowStruct = toRowStruct(row);
@@ -149,18 +133,14 @@ public final class ChangeRecordMapper {
     }
 
     /**
-     * op "r", after populated; sourceOffset = OffsetState.sourceOffset(bookmarkId, false).
+     * op "r", with {@code row_version} = {@link #SNAPSHOT_ROW_VERSION} rather than the bookmark id.
      *
-     * <p>{@code source.row_version} is {@link #SNAPSHOT_ROW_VERSION}, not the bookmark id. A
-     * change record's {@code row_version} is the partition's visible version, which starts at 1
-     * and increments per publish; a bookmark id comes from the FE's global id generator and is
-     * typically orders of magnitude larger. Putting a bookmark id in that field would make every
-     * snapshot row look newer than every change that follows it, so a consumer deduplicating on
-     * "apply only if row_version increased" would discard all of them. A snapshot row genuinely
-     * has no single version to report -- the pinned read spans partitions that each sit at their
-     * own version -- so it reports none. {@code source.bookmark.base}/{@code head} still carry
-     * the pinning bookmark id: those fields are in the bookmark id space and are the right place
-     * to identify which snapshot a row came from.
+     * <p>A change record's {@code row_version} is the partition's visible version, starting at 1;
+     * a bookmark id comes from FE's global id generator and is orders of magnitude larger. Using it
+     * here would make every snapshot row look newer than every change that follows, so a consumer
+     * deduplicating on "apply only if row_version increased" would discard them all. A pinned read
+     * spans partitions each at their own version, so there is no one version to report.
+     * {@code source.bookmark} still identifies which snapshot the row came from.
      */
     public SourceRecord toSnapshotRecord(Object[] row, long bookmarkId) {
         Struct after = toRowStruct(row);
@@ -174,9 +154,7 @@ public final class ChangeRecordMapper {
         return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelope.schema(), value);
     }
 
-    /**
-     * Tombstone sharing key/topic/partition/offset with {@code deleteRecord}: value and valueSchema are both null.
-     */
+    /** Shares key/topic/partition/offset with {@code deleteRecord}; value and schema are null. */
     public SourceRecord tombstoneFor(SourceRecord deleteRecord) {
         return new SourceRecord(
                 deleteRecord.sourcePartition(),
@@ -278,10 +256,9 @@ public final class ChangeRecordMapper {
                 return col.nullable ? Date.builder().optional().build() : Date.SCHEMA;
             case Types.TIMESTAMP:
                 return col.nullable ? Timestamp.builder().optional().build() : Timestamp.SCHEMA;
-            // BINARY/VARBINARY must not fall through to the STRING default. Doing so was silently
-            // lossy rather than loud: the read side matched by also defaulting to getString(), so
-            // nothing failed -- the bytes were just decoded with the connection charset, and every
-            // sequence that is not valid text became U+FFFD with no way back to the original.
+            // Must not fall through to STRING: the read side defaulted to getString() too, so
+            // nothing failed -- the bytes were just charset-decoded and anything not valid text
+            // became U+FFFD, unrecoverably.
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:
@@ -292,20 +269,13 @@ public final class ChangeRecordMapper {
     }
 
     /**
-     * The schema for everything StarRocks renders as text: plain strings, but also JSON and the
-     * complex types, which are carried as their text form until nested schemas are built from
-     * {@link ColumnMeta#srColumnType}.
+     * Everything StarRocks renders as text. JSON and the complex types get a logical name so a
+     * consumer can tell structured text from an ordinary string without knowing the source table.
      *
-     * <p>Those last ones get a logical name so a consumer can tell structured text from an ordinary
-     * string without knowing the source table. JSON uses Debezium's own {@code io.debezium.data.Json},
-     * which is what its PostgreSQL connector stamps on {@code json}/{@code jsonb} and what
-     * downstream SMTs and sinks already recognise -- the claim is safe because a JSON column is a
-     * JSON document by definition.
-     *
-     * <p>ARRAY, MAP and STRUCT get StarRocks-specific names instead. They render in a JSON-like
-     * shape, but calling them {@code io.debezium.data.Json} would promise every value parses as
-     * JSON, and that has not been verified for the edges -- NULLs, embedded quotes, nesting. The
-     * name says what the column is; it does not promise how the text parses.
+     * <p>JSON uses Debezium's own name, which downstream SMTs already recognise and which is safe
+     * to claim. ARRAY/MAP/STRUCT get StarRocks-specific ones instead: they look JSON-shaped, but
+     * that name would promise every value parses as JSON, unverified for NULLs, embedded quotes
+     * and nesting.
      */
     private static Schema textSchemaFor(ColumnMeta col) {
         String logicalName = logicalNameFor(col.srDataType);

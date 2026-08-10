@@ -25,18 +25,13 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * The single source of truth for the version every connector and task in this artifact reports.
- *
- * <p>The value is read from {@code /starrocks-connector.properties}, which Maven filters at build
- * time so it carries {@code ${project.version}} verbatim from the POM. Hand-maintained version
- * constants drift: this class replaces one that had been left at {@code 1.0.3} while the POM said
- * {@code 1.0.5}, and a separate hard-coded {@code "1.0"} on the CDC source side. Connect surfaces
- * {@code version()} over the REST API and in startup logs, so operators use it to tell which build
- * is actually deployed -- three disagreeing answers made that impossible.
+ * The version every connector and task here reports, read from a Maven-filtered resource so the
+ * POM is the only place it is written. The hand-maintained constants this replaced had drifted to
+ * three different answers, and Connect surfaces {@code version()} to operators.
  */
 public final class Version {
 
-    /** Reported when the properties file is missing or was never filtered (e.g. running from raw sources). */
+    /** Reported when the resource is missing or was never filtered. */
     private static final String UNKNOWN = "unknown";
 
     private static final String RESOURCE = "/starrocks-connector.properties";
@@ -62,8 +57,8 @@ public final class Version {
                 return UNKNOWN;
             }
             String trimmed = value.trim();
-            // An unsubstituted "${project.version}" means resource filtering did not run. Reporting
-            // that string would be worse than admitting we do not know.
+            // An unsubstituted "${project.version}" means filtering did not run; saying so beats
+            // reporting the placeholder.
             if (trimmed.isEmpty() || trimmed.contains("${")) {
                 return UNKNOWN;
             }

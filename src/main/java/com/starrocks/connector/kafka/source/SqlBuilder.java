@@ -23,12 +23,9 @@ package com.starrocks.connector.kafka.source;
 import java.util.List;
 
 /**
- * Pure static SQL string builder for the handful of statements the CDC source issues against
- * StarRocks: metadata probes, bookmark functions, and snapshot/CHANGES reads.
- *
- * <p>Identifiers are always backtick-quoted ({@link #quoteId(String)}) and string literals are
- * always single-quote-quoted ({@link #quoteStr(String)}). The two metadata pseudo-columns
- * {@code __CHANGE_TYPE__} and {@code __ROW_VERSION__} are never quoted.
+ * Every statement the CDC source issues, as pure functions. Identifiers are backtick-quoted and
+ * literals single-quoted; the pseudo-columns {@code __CHANGE_TYPE__} and {@code __ROW_VERSION__}
+ * are never quoted.
  */
 public final class SqlBuilder {
 
@@ -40,11 +37,7 @@ public final class SqlBuilder {
         return "`" + id.replace("`", "``") + "`";
     }
 
-    /**
-     * Wraps a string literal in single quotes. Escapes backslashes first (each {@code \} becomes
-     * {@code \\}), then escapes single quotes (each {@code '} becomes {@code \'}) so the
-     * backslash introduced by quote-escaping is not itself re-escaped.
-     */
+    /** Backslashes are escaped before quotes, so the backslash quote-escaping adds is not re-escaped. */
     public static String quoteStr(String s) {
         String escaped = s.replace("\\", "\\\\").replace("'", "\\'");
         return "'" + escaped + "'";
@@ -60,10 +53,9 @@ public final class SqlBuilder {
      * SELECT `c1`,`c2`,__CHANGE_TYPE__,__ROW_VERSION__ FROM `db`.`t` [_CHANGES_&lt;base&gt;_&lt;head&gt;_]
      * ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC
      *
-     * <p>The trailing ORDER BY is a correctness invariant, not cosmetic formatting: the BE's
-     * natural output order for a CHANGES scan is version-descending with, within a version,
-     * INSERT ahead of DELETE. Passing that order straight through would be wrong, so it is always
-     * re-sorted to version-ascending with DELETE-before-INSERT ties broken by {@code DESC}.
+     * <p>The ORDER BY is a correctness invariant. The BE emits version-descending with INSERT
+     * ahead of DELETE inside a version; passed through, an UPDATE would apply as insert-then-delete
+     * and the row would vanish downstream.
      */
     public static String changesSql(String db, String table, List<String> cols, long base, long head) {
         return "SELECT " + quoteCols(cols) + ",__CHANGE_TYPE__,__ROW_VERSION__ FROM " +
@@ -89,24 +81,13 @@ public final class SqlBuilder {
     }
 
     /**
-     * The column list read as ordinary rows instead of as result-set metadata.
+     * The column list as rows, asking the server to describe the table rather than asking the
+     * driver to describe a query -- which on Arrow Flight is unusable (repeated schema, every
+     * column NOT NULL, precision and scale zeroed).
      *
-     * <p>{@link #columnsProbeSql} asks the driver to describe a query; this asks the server to
-     * describe a table. The difference matters on Arrow Flight, where the driver's description is
-     * unusable -- it repeats the schema, calls every column NOT NULL, and zeroes precision and
-     * scale. These rows are data, so both transports return the same thing.
-     *
-     * <p>{@code COLUMN_SIZE} and {@code DECIMAL_DIGITS} are StarRocks' JDBC-shaped spellings of
-     * precision and scale (the names {@code DatabaseMetaData.getColumns} uses), so they land in
-     * {@link ColumnMeta} without reinterpretation.
-     *
-     * <p>{@code DATA_TYPE} and {@code COLUMN_TYPE} are two different answers and both are needed.
-     * The first is StarRocks' own type name ({@code "array"}, {@code "hll"}), which is the only way
-     * to tell a complex or non-exportable column from a VARCHAR -- {@code java.sql.Types} cannot
-     * express the difference. The second is the full nested type ({@code "array<int>"}), carried
-     * for diagnostics now and needed to rebuild nested schemas later. FE fills both from
-     * {@code Type.toMysqlDataTypeString()} / {@code toMysqlColumnTypeString()}; the BE scanner only
-     * falls back to its own flat primitive mapping when FE leaves them unset.
+     * <p>Both type columns are needed: {@code DATA_TYPE} is StarRocks' type name ("array", "hll"),
+     * the only way to tell a complex or non-exportable column from a VARCHAR, and
+     * {@code COLUMN_TYPE} carries the nesting ("array&lt;int&gt;").
      */
     public static String columnsMetadataSql(String db, String table) {
         return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"

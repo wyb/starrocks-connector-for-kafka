@@ -28,22 +28,10 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
-/**
- * The {@code DATA_TYPE} spelling to {@link Types} mapping used on the Arrow Flight transport, where
- * the driver's own result-set description is unusable and {@code information_schema.columns} is the
- * only trustworthy source.
- *
- * <p>These cases used to live in a class named after URL parsing, which is where they were least
- * likely to be found or maintained.
- */
+/** The {@code DATA_TYPE} to {@link Types} mapping, and which types the connector refuses outright. */
 public class ColumnMetadataReaderTest {
 
-    /**
-     * Every spelling the BE's {@code SchemaColumnsScanner::to_mysql_data_type_string} can put in
-     * {@code information_schema.columns.DATA_TYPE}. That switch is the closed set this mapping
-     * answers to, so the cases here are a transcription of it -- if StarRocks adds a type there,
-     * one of these will be the thing that notices.
-     */
+    /** A transcription of the closed set FE can emit; if StarRocks adds a type, this notices. */
     @Test
     public void testEveryStarRocksDataTypeMapsToAJdbcType() {
         assertEquals(Types.TINYINT, ColumnMetadataReader.toJdbcType("tinyint"));
@@ -61,11 +49,7 @@ public class ColumnMetadataReaderTest {
         assertEquals(Types.VARBINARY, ColumnMetadataReader.toJdbcType("varbinary"));
     }
 
-    /**
-     * LARGEINT is 128-bit and arrives spelled "bigint unsigned". Mapping it to BIGINT would
-     * silently truncate every value that does not fit a long, so it goes to OTHER and is carried
-     * as text instead.
-     */
+    /** LARGEINT is 128-bit and spelled "bigint unsigned"; BIGINT would silently truncate it. */
     @Test
     public void testLargeIntIsNotMappedToBigint() {
         assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("bigint unsigned"));
@@ -87,23 +71,14 @@ public class ColumnMetadataReaderTest {
         assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("BIGINT UNSIGNED"));
     }
 
-    /**
-     * BINARY and VARBINARY must not land on OTHER: OTHER is rendered as a string by
-     * {@code ChangeRecordMapper}, and putting binary through a string is exactly the lossy path
-     * these two spellings exist to avoid.
-     */
+    /** OTHER is rendered as text, which is the lossy path these two spellings exist to avoid. */
     @Test
     public void testBinarySpellingsDoNotFallBackToText() {
         assertEquals(Types.BINARY, ColumnMetadataReader.toJdbcType("binary"));
         assertEquals(Types.VARBINARY, ColumnMetadataReader.toJdbcType("varbinary"));
     }
 
-    /**
-     * Complex types share {@link Types#OTHER} with everything else carried as text, so the JDBC
-     * type alone cannot tell them apart -- which is why they are listed explicitly in the switch
-     * and why the StarRocks name is kept on {@link ColumnMeta}. FE renders these three via
-     * {@code toMysqlDataTypeString()} as exactly "array", "map" and "struct".
-     */
+    /** FE spells these exactly "array", "map" and "struct"; all share OTHER, hence srDataType. */
     @Test
     public void testComplexTypesAreCarriedAsTextForNow() {
         assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("array"));
@@ -112,10 +87,7 @@ public class ColumnMetadataReaderTest {
         assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("json"));
     }
 
-    /**
-     * The three aggregate sketches. A SELECT of one yields nothing a consumer can use, so the
-     * connector refuses the table outright rather than streaming a non-value.
-     */
+    /** A SELECT of a sketch yields nothing usable, so the table is refused rather than streamed. */
     @Test
     public void testAggregateSketchTypesAreNonExportable() {
         assertTrue(ColumnMetadataReader.isNonExportable("hll"));
@@ -123,10 +95,7 @@ public class ColumnMetadataReaderTest {
         assertTrue(ColumnMetadataReader.isNonExportable("percentile"));
     }
 
-    /**
-     * Everything else must pass, complex types included: they are exportable, just as text. A
-     * guard that also caught ARRAY would reject perfectly capturable tables.
-     */
+    /** Complex types are exportable, just as text; a guard catching ARRAY would reject valid tables. */
     @Test
     public void testOrdinaryAndComplexTypesAreExportable() {
         for (String t : new String[] {"int", "varchar", "datetime", "json", "array", "map", "struct",

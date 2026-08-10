@@ -28,17 +28,11 @@ import java.util.List;
 import java.util.TimeZone;
 
 /**
- * Reads one result-set row into an {@code Object[]}, choosing the JDBC getter from the
- * {@link ColumnMeta} the schema was built from.
- *
- * <p><b>That last part is the point of this class.</b> It used to switch on
- * {@code ResultSetMetaData.getColumnType()}, re-asking the driver what each column was -- while
- * {@code ChangeRecordMapper} built the Connect schema from {@link ColumnMetadataReader}'s list.
- * Two sources of truth for one read path, and on Arrow Flight the driver's own account is known to
- * be wrong: it repeats the schema, calls every column NOT NULL, and zeroes precision and scale.
- * Any disagreement between the two lands as a {@code DataException} at serialization time -- schema
- * says {@code Date}, value arrives a {@code String} -- far from the cause. Reading through the same
- * list the schema came from means the two cannot drift apart.
+ * Reads one row into an {@code Object[]}, choosing each getter from the {@link ColumnMeta} the
+ * schema was built from -- which is the point of the class. Switching on
+ * {@code ResultSetMetaData.getColumnType()} instead would re-ask the driver, giving one read path
+ * two sources of truth; on Arrow Flight the driver's account is known to be wrong, and any
+ * disagreement surfaces as a {@code DataException} at serialization time, far from the cause.
  */
 final class RowExtractor {
 
@@ -46,31 +40,18 @@ final class RowExtractor {
     }
 
     /**
-     * Builds the UTC calendar handed to every {@code getDate}/{@code getTimestamp} call of one
-     * streaming read.
+     * The UTC calendar for one streaming read. Without it the driver materializes temporal values
+     * in the JVM default zone: a local-midnight {@code java.sql.Date} makes converters throw on
+     * Connect's Date logical type, and a Timestamp silently lands off by the worker's UTC offset.
      *
-     * <p>Without an explicit calendar the driver materializes temporal values in the JVM default
-     * zone, which breaks Kafka Connect's logical types on any worker not running in UTC. Connect's
-     * {@code Date} logical type is defined as UTC midnight, so a local-midnight {@code
-     * java.sql.Date} makes JsonConverter/AvroConverter throw {@code DataException("Kafka Connect
-     * Date type should not have any time fields set to non-zero values")}; a {@code Timestamp}
-     * read in local time silently lands the instant off by the worker's UTC offset.
-     *
-     * <p>{@link Calendar} is not thread-safe, so this is deliberately not a shared static: one
-     * instance is created per streaming read and stays confined to the poll thread driving it
-     * (the MariaDB date/timestamp codecs {@code clear()} it before each use, so reuse across the
-     * rows of a single read is safe).
+     * <p>Per-read, not a shared static: {@link Calendar} is not thread-safe.
      */
     static Calendar newUtcCalendar() {
         return Calendar.getInstance(TimeZone.getTimeZone("UTC"));
     }
 
-    /**
-     * Reads the leading {@code cols.size()} columns of the current row.
-     *
-     * <p>A CHANGES query projects {@code __CHANGE_TYPE__} and {@code __ROW_VERSION__} after the
-     * business columns; those are not described by {@code cols} and are read by the caller.
-     */
+    /** The leading {@code cols.size()} columns; a CHANGES query's two trailing pseudo-columns are
+     * read by the caller. */
     static Object[] extractRow(ResultSet rs, List<ColumnMeta> cols, Calendar utc) throws SQLException {
         Object[] row = new Object[cols.size()];
         for (int i = 0; i < cols.size(); i++) {
@@ -116,8 +97,8 @@ final class RowExtractor {
             case Types.DOUBLE:
                 value = rs.getDouble(index);
                 break;
-            // Kept in step with ChangeRecordMapper.schemaFor, which maps these to a BYTES schema.
-            // getString() here would hand back charset-decoded text and lose the original bytes.
+            // In step with ChangeRecordMapper.schemaFor, which maps these to BYTES. getString()
+            // would charset-decode and lose the original bytes.
             case Types.BINARY:
             case Types.VARBINARY:
             case Types.LONGVARBINARY:

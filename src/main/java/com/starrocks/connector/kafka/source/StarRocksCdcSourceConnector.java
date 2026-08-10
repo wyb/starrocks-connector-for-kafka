@@ -36,24 +36,14 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Entry point for the StarRocks CDC source connector: validates configuration, runs fail-fast
- * preflight checks against every captured table, and shards the table list round-robin across
- * {@code maxTasks} {@link StarRocksCdcSourceTask} instances.
+ * Validates configuration, runs fail-fast preflight against every captured table, and shards the
+ * table list round-robin across {@code maxTasks} tasks.
  *
- * <p>Preflight, run once from {@link #start}, rejects a configuration outright rather than
- * letting a task discover the problem mid-stream:
- * <ul>
- *   <li>a table using the UNIQUE KEY model, which CHANGES does not support;</li>
- *   <li>a PRIMARY KEY table that does not have {@code enable_change_data_capture} turned on --
- *       the error message names the exact {@code ALTER TABLE ... SET (...)} statement that fixes
- *       it, so the failure is directly actionable;</li>
- *   <li>a table with a column named {@code __CHANGE_TYPE__} or {@code __ROW_VERSION__}, which
- *       would collide with the CDC metadata pseudo-columns appended to every CHANGES read (see
- *       {@code StarRocksJdbcClient#streamChanges});</li>
- *   <li>bookmark meta functions being disabled cluster-wide, proven by actually creating and
- *       releasing one throwaway bookmark under a holder id of the probe's own -- see {@link
- *       #probeBookmarkFunctions}.</li>
- * </ul>
+ * <p>Preflight rejects, at {@link #start} rather than mid-stream: the UNIQUE KEY model, which
+ * CHANGES does not support; a PRIMARY KEY table without {@code enable_change_data_capture} (the
+ * message names the exact ALTER); a column colliding with {@code __CHANGE_TYPE__} or
+ * {@code __ROW_VERSION__}; a column whose type cannot be exported at all; and bookmark meta
+ * functions being disabled, proven by {@link #probeBookmarkFunctions}.</p>
  * Any other {@link SQLException} encountered while probing a table (e.g. the table does not
  * exist) is likewise wrapped into a {@link ConnectException} rather than left to propagate raw.
  */
@@ -120,33 +110,17 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     }
 
     /**
-     * Proves that bookmark meta functions actually work, by creating one short-TTL bookmark on the
-     * first captured table and releasing it again.
+     * Creates and releases one short-TTL bookmark, proving the meta functions actually work.
+     * {@code enable_bookmark_meta_functions} defaults to false, so this is the likeliest first-run
+     * blocker; without the probe it surfaces two {@code getCause()} levels inside a poll failure.
+     * The release is best-effort -- the create is what proves the gate is open.
      *
-     * <p>Worth its own round trip because {@code Config.enable_bookmark_meta_functions} defaults to
-     * {@code false} in StarRocks, making this the single likeliest first-run blocker -- and without
-     * this probe the configuration validates, tasks start, and the real cause only surfaces two
-     * {@code getCause()} levels inside a per-table poll failure after the client's silent retries.
-     * The release is best-effort: it is the create that proves the gate is open, and a leaked
-     * probe bookmark expires within {@link #PROBE_BOOKMARK_TTL_MS}.
-     *
-     * <p><b>The probe's holder id must differ from the tasks' holder id -- do not "simplify" the
-     * {@link #PROBE_HOLDER_SUFFIX} away.</b> {@code bookmark_create} is idempotent per holder: when
-     * the table's partition meta is unchanged <i>and</i> the given holder already references the
-     * table's newest bookmark, FE's {@code TableBookmarkTracker.create} raises
-     * {@code AlreadyAtLatestException} and {@code MetaFunctions.bookmark_create} turns that into a
-     * plain return of the <i>existing</i> bookmark id (this is exactly the connector's idle-dedup
-     * behavior, see {@code StarRocksCdcSourceTask#poll}). So if the probe reused the task holder
-     * {@code kc:<name>}, then on any restart of {@link #start} -- worker restart, config edit,
-     * rebalance -- where the first captured table has produced no new version since its last
-     * committed bookmark {@code B}, the probe would be handed back that still-held {@code B} and
-     * its release would drop the task's own reference to it, deleting {@code B} once the tracker
-     * empties. The task would then restore durable offset {@code B}, issue
-     * {@code [_CHANGES_B_head_]}, and get "bookmark B not found": a task killed on every restart
-     * under {@code policy=fail}, or a silent full re-read of the table under
-     * {@code policy=resnapshot}. With a distinct holder, {@code create} takes the
-     * {@code AcquireReference} branch instead and the release drops only the probe's own reference,
-     * leaving the task's reference -- and therefore the bookmark itself -- intact.
+     * <p><b>The probe's holder must differ from the tasks' -- do not "simplify"
+     * {@link #PROBE_HOLDER_SUFFIX} away.</b> {@code bookmark_create} is idempotent per holder: on an
+     * unchanged table it returns the holder's <i>existing</i> bookmark. Sharing the holder would
+     * hand the probe the task's committed bookmark {@code B}, and releasing it would delete
+     * {@code B} -- so every restart of an idle table would then fail with "bookmark B not found",
+     * or silently re-read the whole table under {@code policy=resnapshot}.
      */
     private void probeBookmarkFunctions(CdcClient client, StarRocksCdcSourceConfig config, String db, String table) {
         String holder = config.holderId(props.getOrDefault("name", "default")) + PROBE_HOLDER_SUFFIX;
@@ -199,10 +173,9 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                             "table " + db + "." + t + " has a column named " + col.name
                                     + " which collides with a CDC metadata column");
                 }
-                // HLL, BITMAP and PERCENTILE are aggregate sketches, not values: a plain SELECT of
-                // one yields nothing a consumer can interpret or load back. Without this guard the
-                // connector starts happily and streams that non-value to Kafka forever, which from
-                // the outside looks like it is working.
+                // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can
+                // interpret. Without this the connector starts happily and streams that non-value
+                // forever, which from the outside looks like working.
                 if (ColumnMetadataReader.isNonExportable(col.srDataType)) {
                     throw new ConnectException(
                             "table " + db + "." + t + " has column '" + col.name + "' of type "
@@ -211,9 +184,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                                     + " projects only the columns you need, or remove this column from"
                                     + " the captured table.");
                 }
-                // Not fatal: an unrecognised type is carried as text, which preserves the value. But
-                // it means StarRocks grew a type this connector was never told about, and that is
-                // worth saying once at startup rather than leaving it to be discovered downstream.
+                // Not fatal -- text preserves the value -- but it means StarRocks grew a type this
+                // connector was never told about, worth saying once at startup.
                 if ("unknown".equals(col.srDataType)) {
                     LOG.warn("Column {}.{}.{} has a type this connector does not recognise (declared as: {});"
                                     + " it will be carried as text. This usually means StarRocks added a type.",

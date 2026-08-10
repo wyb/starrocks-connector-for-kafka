@@ -26,34 +26,21 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 
 /**
- * Parses the {@code key:value,key:value} config format shared by the sink's
- * {@code starrocks.topic2table.map} and the CDC source's {@code starrocks.table2topic.map}.
+ * The {@code key:value,key:value} config format, shared by the sink's
+ * {@code starrocks.topic2table.map} and the source's {@code starrocks.table2topic.map}.
  *
- * <p>Both connectors used to carry their own copy of this parsing, and the copies disagreed on
- * every failure: one returned {@code null} for a malformed list (which the caller then treated as
- * "mapping disabled", silently routing every topic to a same-named table) while throwing for a bad
- * table name, and the other threw for everything. This is the strict behaviour, for both: a
- * malformed mapping is a configuration error and fails loudly rather than changing routing behind
- * the operator's back.
+ * <p>Always throws on a malformed value. The sink's old copy returned {@code null}, which its
+ * caller read as "mapping disabled" and quietly routed every topic to a same-named table.
  *
- * <p>Entries split on the <i>first</i> {@code ':'}, so a value may itself contain a colon. Duplicate
- * keys are rejected rather than silently last-one-wins -- a repeated key is always a config mistake,
- * and which of the two mappings takes effect is not something an operator should have to guess.
- *
- * <p>Values are returned unvalidated; callers apply whatever naming rules their side requires
- * (the sink, for instance, additionally checks that each value is a legal StarRocks table name).
+ * <p>Entries split on the first {@code ':'}, so values may contain one. Duplicate keys are
+ * rejected rather than last-one-wins. Values are returned unvalidated.
  */
 public final class KeyValueListParser {
 
     private KeyValueListParser() {
     }
 
-    /**
-     * @param configKey the config property name, used only to build the {@link ConfigException}
-     * @param raw       the raw config value; {@code null} or blank yields an empty map
-     * @return the parsed pairs, in the order they appeared
-     * @throws ConfigException if any entry lacks a {@code ':'}, has an empty side, or repeats a key
-     */
+    /** @throws ConfigException if an entry lacks a {@code ':'}, has an empty side, or repeats a key */
     public static Map<String, String> parse(String configKey, String raw) {
         Map<String, String> result = new LinkedHashMap<>();
         if (raw == null || raw.trim().isEmpty()) {

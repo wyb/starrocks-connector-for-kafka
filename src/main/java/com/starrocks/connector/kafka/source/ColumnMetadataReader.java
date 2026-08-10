@@ -38,12 +38,8 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Resolves a table's column list -- the authoritative one, used both to build the Connect schema
- * and to read values back out.
- *
- * <p>Two strategies, because the transports do not describe a result set the same way. The MySQL
- * path reads {@link ResultSetMetaData}; the Arrow Flight path cannot, and asks the server instead.
- * See {@link #fetchColumns} for why.
+ * The authoritative column list, used both to build the Connect schema and to read values back out.
+ * Two strategies, because the transports do not describe a result set the same way.
  */
 final class ColumnMetadataReader {
 
@@ -58,15 +54,10 @@ final class ColumnMetadataReader {
     /**
      * The column list for one table, in ordinal order.
      *
-     * <p>Arrow Flight's driver cannot describe a result set usably: it repeats the schema, reports
-     * every column NOT NULL, and zeroes precision and scale. Nullability alone is fatal -- a
-     * column described as NOT NULL becomes a required Connect field, and the first NULL value then
-     * fails Struct validation. Ask the server for the table definition instead.
-     *
-     * <p>The MySQL path deliberately stays on result-set metadata: it is correct there and has
-     * been verified end to end, and there is no reason to put it behind newer, less-exercised
-     * code. Both paths log what they resolved, so the two can be compared directly before this
-     * divergence is ever collapsed back into one.
+     * <p>Arrow Flight's driver cannot describe a result set usably: it repeats the schema, calls
+     * every column NOT NULL and zeroes precision and scale. Nullability alone is fatal -- NOT NULL
+     * becomes a required Connect field and the first NULL fails Struct validation. The MySQL path
+     * stays on result-set metadata, which is correct there and verified end to end.
      */
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException {
         return connection.isArrowFlight()
@@ -77,13 +68,10 @@ final class ColumnMetadataReader {
     /**
      * Result-set metadata, then StarRocks' own type names layered on top.
      *
-     * <p>The second query is not redundant. {@link ResultSetMetaData} cannot say that a column is
-     * an ARRAY, a JSON or an HLL sketch -- all three arrive as a string type over the MySQL
-     * protocol, indistinguishable from VARCHAR. Without the server's answer this transport could
-     * neither refuse a table it cannot meaningfully capture nor stamp a logical type on the schema,
-     * and the same table would then produce a different schema depending on which URL scheme was
-     * configured. The transport is meant to be an implementation detail; a schema that changes with
-     * it would not be one.
+     * <p>The second query is not redundant: {@link ResultSetMetaData} cannot tell an ARRAY, a JSON
+     * or an HLL sketch from a VARCHAR over the MySQL protocol. Without it this transport could
+     * neither refuse a table it cannot capture nor stamp a logical type, and the same table would
+     * produce a different schema depending on the URL scheme.
      */
     private List<ColumnMeta> fetchFromResultSetMetadata(String db, String table) throws SQLException {
         String sql = SqlBuilder.columnsProbeSql(db, table);
@@ -110,10 +98,8 @@ final class ColumnMetadataReader {
                             .append(",p=").append(precision)
                             .append(",s=").append(scale)
                             .append(",null=").append(nullable).append(')');
-                    // A duplicate name would otherwise surface much later and far away, as a bare
-                    // SchemaBuilderException("Cannot create field because of field name
-                    // duplication") from inside ChangeRecordMapper, with no hint that the column
-                    // metadata this driver reported was the problem. Fail here, quoting all of it.
+                    // Otherwise this surfaces far away as a bare SchemaBuilderException about field
+                    // name duplication, with no hint that the driver's metadata was the problem.
                     if (!seen.add(name)) {
                         throw new SQLException("Column metadata for " + db + "." + table
                                 + " reports the name '" + name + "' more than once, so no record schema can be"
@@ -123,9 +109,8 @@ final class ColumnMetadataReader {
                     }
                     result.add(new ColumnMeta(name, type, precision, scale, nullable));
                 }
-                // One line per table at task start, and the only record of what the driver actually
-                // reported. Column discovery differs enough between the two transports that this is
-                // worth having before anything downstream can go wrong.
+                // The only record of what the driver actually reported, and the transports differ
+                // enough that it is worth having before anything downstream goes wrong.
                 LOG.info("Resolved {} column(s) for {}.{}: {}", columnCount, db, table, described);
                 return withServerTypes(db, table, result);
             }
@@ -136,12 +121,8 @@ final class ColumnMetadataReader {
     }
 
     /**
-     * Layers {@code information_schema}'s type names onto columns already described by the driver,
-     * matching on column name.
-     *
-     * <p>A mismatch fails rather than leaving some columns without the server's view: a silently
-     * un-enriched column would be one the HLL/BITMAP guard cannot see, which is precisely the case
-     * that must not slip through.
+     * Layers the server's type names onto driver-described columns, matching by name. A mismatch
+     * fails rather than leaving a column un-enriched -- that column is one the HLL guard cannot see.
      */
     private List<ColumnMeta> withServerTypes(String db, String table, List<ColumnMeta> jdbcView)
             throws SQLException {
@@ -163,13 +144,7 @@ final class ColumnMetadataReader {
         return result;
     }
 
-    /**
-     * The column list as the server reports it, from {@code information_schema.columns}.
-     *
-     * <p>Used for the Arrow Flight transport, whose driver-supplied result-set metadata cannot be
-     * trusted. These are ordinary result rows, so the answer does not depend on how a driver
-     * chooses to describe a query.
-     */
+    /** The Arrow Flight path: the server's answer, used whole. */
     private List<ColumnMeta> fetchFromInformationSchema(String db, String table) throws SQLException {
         List<InfoSchemaColumn> rows = readInformationSchema(db, table);
         List<ColumnMeta> result = new ArrayList<>(rows.size());
@@ -181,11 +156,8 @@ final class ColumnMetadataReader {
     }
 
     /**
-     * The column list as the server reports it, from {@code information_schema.columns}.
-     *
-     * <p>Authoritative for the Arrow Flight transport, whose driver-supplied result-set metadata
-     * cannot be trusted, and the source of the StarRocks type names on both. These are ordinary
-     * result rows, so the answer does not depend on how a driver chooses to describe a query.
+     * The column list as the server reports it: authoritative on Arrow Flight, and the source of
+     * the StarRocks type names on both transports. Ordinary rows, so no driver opinion involved.
      */
     private List<InfoSchemaColumn> readInformationSchema(String db, String table) throws SQLException {
         String sql = SqlBuilder.columnsMetadataSql(db, table);
@@ -236,7 +208,7 @@ final class ColumnMetadataReader {
         return dataType == null ? null : dataType.trim().toLowerCase(Locale.ROOT);
     }
 
-    /** One {@code information_schema.columns} row, before it is reconciled with the JDBC view. */
+    /** One information_schema row, before reconciliation with the JDBC view. */
     private static final class InfoSchemaColumn {
         final String name;
         final String dataType;
@@ -257,14 +229,9 @@ final class ColumnMetadataReader {
     }
 
     /**
-     * StarRocks' {@code information_schema.columns.DATA_TYPE} spelling to a {@link Types} constant.
-     *
-     * <p>The accepted set is closed: it is exactly what the BE's
-     * {@code SchemaColumnsScanner::to_mysql_data_type_string} can emit, so an unrecognized value
-     * means StarRocks grew a type and this needs revisiting -- not that the caller passed
-     * something odd. Unrecognized and opaque types both land on {@link Types#OTHER}, which
-     * {@code ChangeRecordMapper} renders as a string, preserving the value rather than guessing at
-     * a structured representation.
+     * {@code DATA_TYPE} to a {@link Types} constant. The accepted set is closed -- exactly what FE's
+     * {@code Type.toMysqlDataTypeString()} emits -- so an unrecognized value means StarRocks grew a
+     * type. Unknown lands on {@link Types#OTHER} and is carried as text rather than guessed at.
      */
     static int toJdbcType(String dataType) {
         if (dataType == null) {
@@ -300,22 +267,15 @@ final class ColumnMetadataReader {
                 return Types.BINARY;
             case "varbinary":
                 return Types.VARBINARY;
-            // Complex types. java.sql.Types has nothing that describes them, and StarRocks renders
-            // them as text on the wire, so they are carried as text for now -- but they are listed
-            // explicitly rather than left to the default, because "a StarRocks ARRAY, carried as
-            // text" and "a type this connector has never heard of" are different situations and
-            // ChangeRecordMapper stamps a different logical type on each. The full nested type is
-            // in ColumnMeta.srColumnType, ready for the step that builds real nested schemas.
+            // Complex and semi-structured: carried as text for now, but listed explicitly rather
+            // than left to the default, because "a StarRocks ARRAY as text" and "a type never heard
+            // of" get different logical names in ChangeRecordMapper.
             case "array":
             case "map":
             case "struct":
-            // Semi-structured. Also text, and a genuine JSON document -- see ChangeRecordMapper.
             case "json":
                 return Types.OTHER;
-            // Opaque aggregate sketches. They have no exportable value at all: selecting one
-            // without an accompanying function yields nothing a consumer can use. The connector
-            // refuses tables that contain them (see StarRocksCdcSourceConnector's preflight), so
-            // this mapping exists only to keep the switch exhaustive.
+            // Aggregate sketches. Refused by preflight; listed only to keep the switch exhaustive.
             case "hll":
             case "bitmap":
             case "percentile":

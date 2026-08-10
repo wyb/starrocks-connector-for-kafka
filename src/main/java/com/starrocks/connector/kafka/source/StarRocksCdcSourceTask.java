@@ -41,37 +41,19 @@ import java.util.Queue;
 import java.util.concurrent.ConcurrentLinkedQueue;
 
 /**
- * Poll loop and bookmark state machine for the StarRocks CDC source connector's tasks.
- *
- * <p>This class is the correctness core of the connector. Three invariants hold across every
- * code path below and are pinned down by {@code StarRocksCdcSourceTaskTest}:
+ * Poll loop and bookmark state machine -- the correctness core. Three invariants, all pinned by
+ * {@code StarRocksCdcSourceTaskTest}:
  * <ol>
- *   <li><b>Release-after-commit, fenced one commit cycle behind the acked offset.</b> Nothing is
- *       released until {@link #commit()} -- which Connect invokes only after an offset flush
- *       completed -- has authorized it, and {@code commit()} deliberately lags the acks by one
- *       full commit cycle. {@code lastAckedBookmark} (the newest bookmark id Connect confirmed for
- *       the table via {@link #commitRecord}) is <i>not</i> the version the durable offset names:
- *       {@code commitRecord} fires from the producer send callback, while the flush preceding
- *       {@code commit()} only persists the offsets {@code updateCommittableOffsets()} snapshotted
- *       earlier on the task thread -- so the acked bookmark can lead the durable one. Releasing
- *       everything below {@code lastAckedBookmark} would therefore unpin the bookmark that flush
- *       just made durable. Instead each {@code commit()} releases only bookmarks strictly older
- *       than {@code releaseFenceBookmark}, the {@code lastAckedBookmark} value observed at the
- *       <i>previous</i> {@code commit()}, and then advances the fence; before the second
- *       {@code commit()} has ever run, and while nothing has been acked, nothing is released. One
- *       intervening flush cycle is what makes the fence provably no newer than durability.
- *       {@code commit()} performs no SQL: it only hands the authorized ids to {@code
- *       pendingReleases}, and {@link #poll()} issues the actual {@code bookmarkRelease} calls on
- *       the task thread, so all JDBC stays on one thread (see {@code StarRocksJdbcClient}).</li>
- *   <li><b>Snapshot-crash semantics.</b> Every snapshot row's offset carries {@code
- *       snapshot_done=false}; every change record's offset carries {@code snapshot_done=true}.
- *       A crash at any point before the first change record's offset is durably committed
- *       therefore resumes with {@code snapshot_done=false} (or no offset at all), and {@link
- *       #restoreOffset} redoes the snapshot from scratch rather than resuming a half-delivered
- *       one -- at-least-once, never a silent gap.</li>
- *   <li><b>Idle dedup.</b> When {@code bookmarkCreate} reports back the table's already-committed
- *       bookmark, the table produced no new version since the last poll, so this poll contributes
- *       no records for it and opens no new CHANGES window.</li>
+ *   <li><b>Releases lag acks by one commit cycle.</b> {@code commitRecord} fires from the producer
+ *       send callback, so the acked bookmark can lead the durable offset; releasing everything
+ *       below it would unpin the bookmark the last flush just made durable. Each {@code commit()}
+ *       therefore releases only below the fence observed at the <i>previous</i> one. See
+ *       {@link #commit()}.</li>
+ *   <li><b>Snapshot rows carry {@code snapshot_done=false}, change records {@code true}.</b> A
+ *       crash before the first change record's offset is durable redoes the whole snapshot rather
+ *       than resuming a half-delivered one -- duplicates, never a silent gap.</li>
+ *   <li><b>Idle dedup.</b> {@code bookmarkCreate} returning the committed bookmark means no new
+ *       version, so the poll opens no window.</li>
  * </ol>
  */
 public class StarRocksCdcSourceTask extends SourceTask {
@@ -86,34 +68,19 @@ public class StarRocksCdcSourceTask extends SourceTask {
         ChangeRecordMapper mapper;
         long committedBookmark = -1L;
         boolean snapshotDone = false;
-        // The newest bookmark id Kafka Connect has confirmed a record for, per commitRecord();
-        // -1 while nothing has been acked yet. Only written from commitRecord() and only read from
-        // commit() -- both of which run on Connect's producer-callback / offset-committer threads
-        // rather than the poll thread -- so it is guarded by synchronized (liveBookmarks) too.
-        // NOTE: this is an ack watermark, not a durability watermark; it can lead the offset the
-        // last flush persisted by one bookmark. See releaseFenceBookmark.
+        // Newest bookmark Connect has acked for the table. An ACK watermark, not a durability one:
+        // it can lead the last flushed offset by one bookmark. See releaseFenceBookmark.
         long lastAckedBookmark = -1L;
-        // The lastAckedBookmark value as observed at the PREVIOUS commit() call; -1 until commit()
-        // has run at least once. commit() releases strictly below this, never below the current
-        // lastAckedBookmark, which buys exactly one intervening offset-flush cycle: any record
-        // acked before the previous commit() had its offset snapshotted by
-        // updateCommittableOffsets() no later than the flush that precedes this commit(), so
-        // everything below the fence is provably superseded by a durable offset. Guarded by
-        // synchronized (liveBookmarks) along with lastAckedBookmark.
+        // lastAckedBookmark as of the PREVIOUS commit(). Releasing below this rather than below the
+        // current value buys one intervening flush cycle, which is what makes the fence provably no
+        // newer than durability.
         long releaseFenceBookmark = -1L;
-        // Every bookmark this task has created for the table and not yet released, oldest first.
-        // Shared between two threads per the Kafka Connect runtime contract: the task's own poll
-        // thread appends via addLast (poll()/bootstrap()), while SourceTaskOffsetCommitter's
-        // single scheduled-executor thread drains the release-eligible prefix (commit(), scheduled
-        // every offset.flush.interval.ms, default 60s) -- genuinely concurrent, not just
-        // interleaved. Every access must hold synchronized (liveBookmarks); see poll(),
-        // bootstrap(), commitRecord(), and commit().
+        // Created and not yet released, oldest first. Genuinely concurrent: the poll thread appends,
+        // SourceTaskOffsetCommitter's thread drains in commit(). Every access holds its monitor,
+        // which also guards the two watermarks above.
         final Deque<Long> liveBookmarks = new ArrayDeque<>();
-        // Bookmarks commit() has authorized for release, handed over for the poll thread to
-        // actually release. commit() must not call into the JDBC client itself: the client is
-        // single-threaded and the poll thread may be mid-scan on it (see StarRocksJdbcClient's
-        // class javadoc), so the SQL round trip is deferred to the next poll() instead. Thread-safe
-        // on its own, so unlike liveBookmarks it needs no external monitor.
+        // Authorized by commit(), released by poll(). commit() must issue no SQL: the JDBC client is
+        // single-threaded and the poll thread may be mid-scan on it.
         final Queue<Long> pendingReleases = new ConcurrentLinkedQueue<>();
 
         TableState(String table, String topic) {
@@ -187,29 +154,20 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Restores one table's in-memory bookmark state from the offset last durably stored for it.
+     * Restores one table from its durable offset. Only {@code snapshot_done=true} is trusted;
+     * anything else leaves the table fresh so the next poll redoes the snapshot.
      *
-     * <p>Package-visible (rather than private) so a test can drive it directly against a table
-     * of a started task without needing a real {@code SourceTaskContext} / offset store -- {@link
-     * #start} calls this exact same method for every table (with {@code raw} coming from {@code
-     * context.offsetStorageReader()} instead of being supplied directly), so the path a direct
-     * call exercises in tests is the same path production restarts go through.
-     *
-     * <p>Only an offset whose {@code snapshot_done} is {@code true} is trusted to resume
-     * streaming; anything else -- including no prior offset -- leaves the table fresh so the next
-     * {@link #poll()} redoes the snapshot, per the snapshot-crash invariant.
+     * <p>Package-visible so tests can drive it without a real offset store; {@link #start} calls
+     * the same method.
      */
     void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;
             t.snapshotDone = true;
-            // The restored bookmark must re-enter the retention deque, or nothing will ever
-            // release it: a restart would otherwise leave one bookmark per table pinned against
-            // vacuum for the whole source.bookmark.ttlms, once per rebalance/restart/config edit.
-            // Re-adding it is safe -- commit() only releases bookmarks strictly older than the
-            // previous cycle's ack watermark, so this one survives until a newer window's records
-            // are acknowledged, which is exactly the fence that protects a crash-replay base.
+            // Not optional: without this the resumed bookmark is never released, leaking one per
+            // table per restart until its TTL. Safe, because commit() only releases strictly below
+            // the previous cycle's ack watermark, so it survives until a newer window is acked.
             synchronized (t.liveBookmarks) {
                 t.liveBookmarks.addLast(state.bookmarkId);
             }
@@ -295,23 +253,16 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Issues the {@code bookmarkRelease} calls {@link #commit()} authorized, on the poll thread.
-     *
-     * <p>{@code commit()} runs on Connect's offset-committer thread and must not touch the JDBC
-     * client (single-threaded; the poll thread may be mid-scan on it), so it only enqueues ids and
-     * this drains them at the top of each table's poll iteration. Best-effort by design: a failed
-     * release leaks one pinned version until its TTL expires, which is survivable but invisible
-     * otherwise, hence the WARN naming the table and the id.
+     * Issues the releases {@link #commit()} authorized, on the poll thread because all JDBC lives
+     * there. Best-effort: a failure leaks one pinned version until its TTL, hence the WARN.
      */
     private void drainPendingReleases(TableState t) {
         Long id;
         while ((id = t.pendingReleases.poll()) != null) {
             try {
                 client.bookmarkRelease(db, t.table, id, holder);
-                // INFO, not DEBUG: this is the only externally visible sign that reclamation is
-                // keeping up. Without it, "no release failures" cannot be told apart from "no
-                // releases attempted", and a stalled fence looks healthy right until vacuum
-                // stops reclaiming storage.
+                // INFO, not DEBUG: the only external sign reclamation is keeping up. Without it
+                // "no failures" and "nothing attempted" look identical.
                 LOG.info("Released bookmark {} for {}.{}", id, db, t.table);
             } catch (Exception e) {
                 LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
@@ -321,19 +272,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Records the newest bookmark id Kafka Connect has actually confirmed a record for, per table.
-     *
-     * <p>This is what makes {@link #commit()} safe. Connect's {@code commit()} says only "some
-     * offset flush completed", not which offset, and a bookmark can be created without ever
-     * producing a record (an empty CHANGES window still advances {@code committedBookmark}), so
-     * "keep the newest N" would eventually release the very bookmark the durable offset names --
-     * after which a restart resumes from a released base and the read fails as non-trackable.
-     * Tracking the acked id instead gives {@code commit()} something real to fence against.
-     *
-     * <p>It is only an <i>ack</i> watermark though, not a durability one: this callback runs from
-     * the producer's send callback, ahead of the offset flush that will persist that record's
-     * offset. {@code commit()} closes that gap by acting on the previous cycle's value rather than
-     * this one -- see {@code TableState#releaseFenceBookmark}.
+     * Tracks the newest acked bookmark per table, which is what gives {@link #commit()} something
+     * real to fence against: Connect's {@code commit()} says only "a flush completed", not which
+     * offset, and an empty CHANGES window advances {@code committedBookmark} without producing any
+     * record -- so "keep the newest N" would eventually release the base the durable offset names.
      */
     @Override
     public void commitRecord(SourceRecord record, RecordMetadata metadata) throws InterruptedException {
@@ -363,23 +305,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Authorizes the release of every bookmark strictly older than the table's release fence, then
-     * advances that fence to the currently acked bookmark.
+     * Authorizes release of everything strictly below the fence, then advances the fence.
      *
-     * <p>The fence is the {@code lastAckedBookmark} value observed at the <i>previous</i>
-     * {@code commit()}, never the current one, so releases lag acknowledgements by one whole commit
-     * cycle. That lag is the point, not an accident: Connect calls {@link #commitRecord} from the
-     * producer's send callback, whereas the offset flush that precedes a {@code commit()} only
-     * persists the offsets {@code updateCommittableOffsets()} snapshotted earlier on the task
-     * thread. The acked bookmark can therefore be one ahead of the durable one, and releasing
-     * everything below it would unpin exactly the bookmark that flush just made durable -- after
-     * which a worker death before the next flush resumes from an unpinned base and the read fails
-     * as non-trackable. Waiting one cycle guarantees the fence is never ahead of durability.
+     * <p>The fence is the ack watermark from the <i>previous</i> commit, never the current one.
+     * That lag is the whole mechanism: {@link #commitRecord} runs in the producer send callback,
+     * ahead of the flush that persists the offset, so releasing below the current watermark would
+     * unpin the bookmark that flush just made durable -- and a crash before the next flush would
+     * then resume from a released base. Nothing acked, or the first commit, releases nothing.
      *
-     * <p>So: nothing acked yet, or {@code commit()} running for the first time, releases nothing at
-     * all. The authorized ids are only enqueued here -- the {@code bookmarkRelease} round trips
-     * happen on the poll thread, in {@link #drainPendingReleases}, because this method runs on
-     * Connect's offset-committer thread and the JDBC client is single-threaded.
+     * <p>Enqueues only; the SQL happens in {@link #drainPendingReleases} on the poll thread.
      */
     @Override
     public void commit() {

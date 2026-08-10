@@ -28,14 +28,8 @@ import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
 
 /**
- * Classification decides whether {@code source.nontrackable.policy} ever fires, so a gap here does
- * not surface as a wrong answer -- it surfaces as the policy silently never applying. That is
- * exactly what happened once: the matcher only looked for {@code "CDC-ERROR-"} and
- * {@code "bookmark" + "not found"}, missing FE planning-time messages entirely, which left
- * {@code policy=resnapshot} inert in production while every unit test still passed.
- *
- * <p>These cases used to live in {@code SqlBuilderTest}, which is not where anyone changing this
- * matcher would look.
+ * A gap here does not surface as a wrong answer but as {@code source.nontrackable.policy} silently
+ * never firing -- which is what happened when the matcher missed FE planning-time messages.
  */
 public class NonTrackableExceptionTest {
 
@@ -52,11 +46,7 @@ public class NonTrackableExceptionTest {
         assertNotNull(NonTrackableException.classify(new SQLException("Bookmark 11952 not found")));
     }
 
-    /**
-     * FE planning-time SemanticExceptions (partition dropped/rewritten/resharded, or a
-     * partition/tablet hint that no longer resolves) never contain "CDC-ERROR-" or
-     * "bookmark"+"not found", but always contain "not trackable".
-     */
+    /** FE planning messages contain none of the other markers, only "not trackable". */
     @Test
     public void testFrontendPlanningMessagesAreClassified() {
         assertNotNull(NonTrackableException.classify(new SQLException(
@@ -65,10 +55,7 @@ public class NonTrackableExceptionTest {
                 "CHANGES on table 't' not trackable: partition p1 not present in the changeset")));
     }
 
-    /**
-     * Over-matching is the opposite failure and just as bad: under {@code policy=resnapshot} a
-     * misclassified connection blip would discard the table's position and re-read the whole table.
-     */
+    /** Over-matching is as bad: under resnapshot a misclassified blip re-reads the whole table. */
     @Test
     public void testUnrelatedFailuresAreNotClassified() {
         assertNull(NonTrackableException.classify(new SQLException("Connection refused")));
