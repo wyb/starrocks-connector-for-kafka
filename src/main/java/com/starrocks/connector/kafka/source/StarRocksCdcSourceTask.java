@@ -82,6 +82,11 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // Authorized by commit(), released by poll(). commit() must issue no SQL: the JDBC client is
         // single-threaded and the poll thread may be mid-scan on it.
         final Queue<Long> pendingReleases = new ConcurrentLinkedQueue<>();
+        // -1 = never renewed, so the first round runs whatever the clock reads. A sentinel rather
+        // than 0, which would depend on the clock's origin being far from zero.
+        long lastRenewMs = -1L;
+        // The lease the server granted: -1 until one is known, 0 once it answers "no expiry".
+        long effectiveTtlMs = -1L;
 
         TableState(String table, String topic) {
             this.table = table;
@@ -175,6 +180,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         List<SourceRecord> out = new ArrayList<>();
         for (TableState t : tables) {
             drainPendingReleases(t);
+            renewLiveBookmarks(t);
             final int emittedBefore = out.size();
             try {
                 if (!t.snapshotDone) {
@@ -267,6 +273,54 @@ public class StarRocksCdcSourceTask extends SourceTask {
                             + "Cause: {}",
                     db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, e.getMessage());
             throw new ConnectException("CHANGES window not trackable for table " + t.table, e);
+        }
+    }
+
+    /** Overridden in tests to drive the renewal schedule without waiting out a real TTL. */
+    long currentTimeMillis() {
+        return System.currentTimeMillis();
+    }
+
+    /**
+     * Refreshes every bookmark the table holds -- not only {@code committedBookmark}, since the
+     * others stay pinned and ageing while acks lag. Without this an idle table loses its position:
+     * {@code bookmarkCreate} returns the same id on an unchanged table without moving the lease.
+     *
+     * <p>Paced off the lease the server granted, never {@code source.bookmark.ttlms}: a
+     * cluster-side ceiling can cap it and is readable nowhere else. A third of it leaves room for
+     * two failed rounds, which is why a failure here only waits for the next.
+     *
+     * <p>Never triggers {@code source.nontrackable.policy}. Reading a lost position out of a failed
+     * renewal would mean matching FE's exception text and would give recovery a second entry point;
+     * a bookmark that is really gone still surfaces at the next CHANGES read.
+     */
+    private void renewLiveBookmarks(TableState t) {
+        if (ttlMs <= 0 || t.effectiveTtlMs == 0) {
+            return;
+        }
+        long lease = t.effectiveTtlMs > 0 ? t.effectiveTtlMs : ttlMs;
+        long now = currentTimeMillis();
+        if (t.lastRenewMs >= 0 && now - t.lastRenewMs < lease / 3) {
+            return;
+        }
+        List<Long> held;
+        synchronized (t.liveBookmarks) {
+            held = new ArrayList<>(t.liveBookmarks); // copy: commit() wants this monitor back
+        }
+        if (held.isEmpty()) {
+            // The first poll runs before bootstrap opens a bookmark; starting the clock on an empty
+            // set would push the first real round out by a whole interval.
+            return;
+        }
+        t.lastRenewMs = now;
+        for (Long id : held) {
+            try {
+                long granted = client.bookmarkRenew(db, t.table, id, holder, ttlMs);
+                t.effectiveTtlMs = granted < 0 ? 0 : granted;
+            } catch (Exception e) {
+                LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); the next round retries",
+                        id, db, t.table, holder, e);
+            }
         }
     }
 

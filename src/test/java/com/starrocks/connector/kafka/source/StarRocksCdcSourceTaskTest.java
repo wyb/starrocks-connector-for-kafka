@@ -26,6 +26,7 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Before;
 import org.junit.Test;
 
+import java.sql.SQLException;
 import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -68,11 +69,18 @@ public class StarRocksCdcSourceTaskTest {
         task = newTask(fake);
     }
 
+    private long fakeNowMs;
+
     private StarRocksCdcSourceTask newTask(final FakeCdcClient fake) {
         return new StarRocksCdcSourceTask() {
             @Override
             protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
                 return fake;
+            }
+
+            @Override
+            long currentTimeMillis() {
+                return fakeNowMs;
             }
         };
     }
@@ -542,6 +550,134 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(1, out3.size());
         Struct value = (Struct) out3.get(0).value();
         assertEquals("r", value.getString("op"));
+    }
+
+    // ------------------------------------------------------------------
+    // Lease renewal: an idle table must not lose its position to TTL expiry.
+    // ------------------------------------------------------------------
+
+    private int renewCountOf(long bookmarkId) {
+        int count = 0;
+        for (String renewed : fake.renewedBookmarks) {
+            if (renewed.contains(":" + bookmarkId + ":")) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /** Older windows stay pinned while acks lag, and their leases run down just like the newest. */
+    @Test
+    public void testRenewCoversEveryLiveBookmarkNotJustCommitted() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        // Two more windows, none acked, so all three stay live.
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        task.poll();
+        fake.enqueueHead("orders", 102L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
+        task.poll();
+        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 900000L / 3;
+        task.poll();
+
+        assertEquals(1, renewCountOf(100L));
+        assertEquals(1, renewCountOf(101L));
+        assertEquals(1, renewCountOf(102L));
+    }
+
+    /** A ceiling can cap the lease well below what was asked for, and is readable nowhere else. */
+    @Test
+    public void testRenewIntervalFollowsServerReportedTtlNotConfiguredTtl() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 30000L; // the cluster caps every lease at 30s
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap; nothing held yet, so nothing renewed
+        fakeNowMs += 1;
+        task.poll(); // first renewal: learns the granted lease
+
+        // Past a third of the granted lease (10s), nowhere near a third of the configured one
+        // (300s): only one of the two pacings renews here.
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 30000L / 3 + 1;
+        task.poll();
+        assertEquals("must pace off the granted lease, not the configured one", 1, renewCountOf(100L));
+
+        // And not more often than that lease calls for.
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 30000L / 3 - 1;
+        task.poll();
+        assertEquals(0, renewCountOf(100L));
+    }
+
+    /** A non-expiring lease has nothing to outrun; renewing it forever would be pure noise. */
+    @Test
+    public void testNoRenewalWhenTheLeaseNeverExpires() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "0");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fakeNowMs += 100000000L;
+        task.poll();
+        assertTrue("configured ttl<=0 must never renew: " + fake.renewedBookmarks,
+                fake.renewedBookmarks.isEmpty());
+
+        // Same once the server itself reports "no expiry".
+        FakeCdcClient uncapped = new FakeCdcClient();
+        uncapped.setColumns("orders", ORDERS_COLS);
+        uncapped.setPrimaryKeys("orders", ORDERS_PKS);
+        uncapped.grantedTtlMs = -1L;
+        StarRocksCdcSourceTask other = newTask(uncapped);
+        uncapped.enqueueHead("orders", 200L);
+        other.start(baseProps());
+        other.poll();
+        fakeNowMs += 1;
+        other.poll();  // the server answers "no expiry"
+        int afterLearning = uncapped.renewedBookmarks.size();
+        assertEquals(1, afterLearning);
+
+        fakeNowMs += 100000000L;
+        other.poll();
+        assertEquals("a lease that never expires needs no further renewal",
+                afterLearning, uncapped.renewedBookmarks.size());
+        other.stop();
+    }
+
+    /** Renewal must not decide a position is lost: that belongs to the CHANGES read alone. */
+    @Test
+    public void testRenewFailureLeavesStateUntouched() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fakeNowMs += 900000L / 3;
+        task.poll();
+
+        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
+        assertEquals(100L, task.tables.get(0).committedBookmark);
+        assertTrue(task.tables.get(0).snapshotDone);
+
+        // And the stream keeps working once the failure clears.
+        fake.bookmarkRenewFailure = null;
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        List<SourceRecord> out = task.poll();
+        assertNotNull(out);
+        assertEquals(1, out.size());
     }
 
     // ------------------------------------------------------------------

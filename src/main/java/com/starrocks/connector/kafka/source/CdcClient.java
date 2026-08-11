@@ -34,6 +34,16 @@ public interface CdcClient extends AutoCloseable {
 
     long bookmarkCreate(String db, String table, String holder, long ttlMs) throws SQLException;
 
+    /**
+     * Refreshes the lease on a bookmark this holder already has. {@link #bookmarkCreate} cannot:
+     * on an unchanged table it hands back the same id without touching the reference.
+     *
+     * @return the granted TTL in ms ({@code -1} for no expiry), which a cluster-side ceiling may
+     *         have capped below what was asked for. Pace the next renewal against this, not the
+     *         request.
+     */
+    long bookmarkRenew(String db, String table, long bookmarkId, String holder, long ttlMs) throws SQLException;
+
     void bookmarkRelease(String db, String table, long bookmarkId, String holder) throws SQLException;
 
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException;

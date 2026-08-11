@@ -67,10 +67,15 @@ final class FakeCdcClient implements CdcClient {
     private final Set<String> failNextChangesAfterEmittingTables = new HashSet<>();
     /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
     SQLException bookmarkCreateFailure;
+    /** When set, every bookmarkRenew fails with it. */
+    SQLException bookmarkRenewFailure;
+    /** The TTL renewal reports back; null means "whatever was asked for", as an uncapped FE does. */
+    Long grantedTtlMs;
 
     // -- recorded calls --
     final List<String> createdBookmarks = new ArrayList<>();
     final List<String> releasedBookmarks = new ArrayList<>();
+    final List<String> renewedBookmarks = new ArrayList<>();
     /** Holder ids, verbatim, as handed to bookmarkCreate / bookmarkRelease. */
     final List<String> createHolders = new ArrayList<>();
     final List<String> releaseHolders = new ArrayList<>();
@@ -127,6 +132,16 @@ final class FakeCdcClient implements CdcClient {
         }
         lastHeadByTable.put(table, value);
         return value;
+    }
+
+    @Override
+    public long bookmarkRenew(String db, String table, long bookmarkId, String holder, long ttlMs)
+            throws SQLException {
+        renewedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
+        if (bookmarkRenewFailure != null) {
+            throw bookmarkRenewFailure;
+        }
+        return grantedTtlMs != null ? grantedTtlMs : ttlMs;
     }
 
     @Override

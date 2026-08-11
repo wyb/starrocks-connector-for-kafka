@@ -74,6 +74,23 @@ public class StarRocksJdbcClient implements CdcClient {
     }
 
     @Override
+    public long bookmarkRenew(String db, String table, long bookmarkId, String holder, long ttlMs)
+            throws SQLException {
+        String sql = SqlBuilder.bookmarkRenewSql(db, table, bookmarkId, holder, ttlMs);
+        String result = connection.executeOnLeader(sql);
+        if (result == null) {
+            throw new SQLException("bookmark_renew returned no effective ttl for " + db + "." + table
+                    + " bookmark " + bookmarkId);
+        }
+        try {
+            return Long.parseLong(result.trim());
+        } catch (NumberFormatException e) {
+            throw new SQLException("bookmark_renew returned a non-numeric effective ttl for " + db + "." + table
+                    + " bookmark " + bookmarkId + ": " + result, e);
+        }
+    }
+
+    @Override
     public void bookmarkRelease(String db, String table, long bookmarkId, String holder) throws SQLException {
         connection.executeOnLeader(SqlBuilder.bookmarkReleaseSql(db, table, bookmarkId, holder));
     }

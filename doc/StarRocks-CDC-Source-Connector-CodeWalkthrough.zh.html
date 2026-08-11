@@ -89,8 +89,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector-refactor</b></span>
-    <span>主代码<b>15 个类 / 约 2400 行</b></span>
-    <span>测试<b>108 个</b></span>
+    <span>主代码<b>15 个类 / 约 2500 行</b></span>
+    <span>测试<b>123 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -166,8 +166,8 @@ Connector.taskConfigs() 表按 round-robin 切给 task
 Task.start()           每表 fetchColumns + fetchPrimaryKeys，建 ChangeRecordMapper，
                        从 offset store 恢复位点（restoreOffset）
   ↓
-Task.poll()            drainPendingReleases → bookmarkCreate → 若 head==committed 则跳过
-                       → streamChanges(base, head)
+Task.poll()            drainPendingReleases → renewLiveBookmarks → bookmarkCreate
+                       → 若 head==committed 则跳过 → streamChanges(base, head)
   ↓  StarRocksJdbcClient.streamChanges
      SqlBuilder.changesSql   拼 SQL（含强制 ORDER BY）
      FeConnection.get()      拿连接 + applyStreamingFetchSize
@@ -181,7 +181,7 @@ Connect 运行时发往 Kafka → commitRecord() 记 ack 水位 → commit() 授
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">208 行</span></h3>
+<h3><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">207 行</span></h3>
 <p class="role">Connect 创建的第一个对象。只做两件事：启动期校验，和把表分配给 task。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -207,7 +207,7 @@ for (int i = 0; i &lt; tables.size(); i++)
     groupTables.get(i % groups).add(tables.get(i));</code></pre>
 <p>每组拷一份完整 props，只多塞一个内部键 <code>task.tables</code>。这个键不在 <code>CONFIG_DEF</code> 里，是 Connector 与 Task 之间的私有通道，不对用户暴露。</p>
 
-<h3><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">241 行</span></h3>
+<h3><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">235 行</span></h3>
 <p class="role">一个 <code>AbstractConfig</code>：14 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
 
 <p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>
@@ -227,7 +227,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3><span class="fn">StarRocksCdcSourceTask</span><span class="sz">353 行 · 正确性核心</span></h3>
+<h3><span class="fn">StarRocksCdcSourceTask</span><span class="sz">420 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
@@ -241,9 +241,11 @@ for (int i = 0; i &lt; tables.size(); i++)
   <tr><td><code>releaseFenceBookmark</code></td><td>上一轮 <code>commit()</code> 时的 ack 水位。释放围栏</td></tr>
   <tr><td><code>liveBookmarks</code></td><td><code>ArrayDeque</code>，已创建未释放，最旧在前。<strong>真并发</strong></td></tr>
   <tr><td><code>pendingReleases</code></td><td><code>ConcurrentLinkedQueue</code>，commit 授权、poll 执行</td></tr>
+  <tr><td><code>lastRenewMs</code></td><td>上次续租时刻。<code>-1</code> = 从未续过，首轮无条件续一次</td></tr>
+  <tr><td><code>effectiveTtlMs</code></td><td>服务端<strong>授予</strong>的租约。<code>-1</code> = 尚未得知，<code>0</code> = 服务端答"永不过期"</td></tr>
 </table>
 </div>
-<p>前三个字段只在 poll 线程上动，无需同步；中间三个由 <code>synchronized (liveBookmarks)</code> 统一保护——注意<strong>两个 long 水位也用这把锁</strong>，不是各自独立的；最后一个自带线程安全。</p>
+<p>前三个字段只在 poll 线程上动，无需同步；中间三个由 <code>synchronized (liveBookmarks)</code> 统一保护——注意<strong>两个 long 水位也用这把锁</strong>，不是各自独立的；<code>pendingReleases</code> 自带线程安全；最后两个续租字段同样只在 poll 线程上动。</p>
 
 <h4>start(props)</h4>
 <p>读配置 → 建 client → 解析 <code>task.tables</code> → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、<code>fetchPrimaryKeys</code>、建 mapper）→ 从 <code>context.offsetStorageReader()</code> 读回位点交给 <code>restoreOffset</code>。</p>
@@ -262,6 +264,7 @@ if (state.snapshotDone) {
 <h4>poll() —— 每次调用遍历本 task 的所有表</h4>
 <ol>
   <li><code>drainPendingReleases(t)</code>——把上一轮 <code>commit()</code> 授权的释放真正发出去。放在开头是因为<strong>所有 JDBC 必须在 poll 线程</strong>。</li>
+  <li><code>renewLiveBookmarks(t)</code>——到点则给该表持有的每个 bookmark 续租。同样因为 JDBC 只能在这条线程上。</li>
   <li><code>!snapshotDone</code> → 走 <code>bootstrap(t, out)</code> 然后 <code>continue</code>。</li>
   <li><code>head = bookmarkCreate(...)</code>；<code>head == committedBookmark</code> → 本轮无新版本，<code>continue</code>（idle dedup）。</li>
   <li>否则 <code>head</code> 入 <code>liveBookmarks</code>，<code>streamChanges(base, head)</code>，回调里逐行 <code>toChangeRecord</code>；<code>tombstones</code> 开启且是 DELETE 时追加一条墓碑。</li>
@@ -272,6 +275,21 @@ if (state.snapshotDone) {
 
 <h4>bootstrap(t, out)</h4>
 <p>创建 <code>b0</code> 并入队；<code>snapshot.mode=initial</code> 时 <code>streamSnapshot</code> 把全表读出来（每行 <code>toSnapshotRecord(row, b0)</code>），否则只记一条日志。无论哪种，最后都设 <code>committedBookmark = b0; snapshotDone = true;</code>。</p>
+
+<h4>renewLiveBookmarks(t) —— 让空闲表不丢位点</h4>
+<p>没有它，一张长期没有新版本的表会在 <code>source.bookmark.ttlms</code> 之后丢掉 base bookmark：<code>bookmarkCreate</code> 在表未变化时返回同一个 id，<strong>但不刷新那个引用的租约</strong>，所以连接器每轮看起来都成功，租约却一直在倒计时。<code>bookmark_renew</code> 是唯一能移动这个时钟的入口。</p>
+<ol>
+  <li>配置 <code>ttlms &lt;= 0</code>，或服务端已答"永不过期"（<code>effectiveTtlMs == 0</code>）→ 直接返回。</li>
+  <li>未到 <strong>生效租约 / 3</strong> → 返回。<code>lastRenewMs == -1</code>（从未续过）则无条件放行。</li>
+  <li>锁内只<strong>拷贝</strong> <code>liveBookmarks</code>，出锁再发 SQL——<code>commit()</code> 在另一条线程上等这把锁，跨网络持锁会把它一起堵住。</li>
+  <li>拷贝为空则<strong>不推进计时器</strong>：首轮 poll 跑在 <code>bootstrap</code> 之前，那时还没有 bookmark，此时启动时钟会把第一次真正的续租推迟整整一个周期。</li>
+  <li>逐个 <code>bookmarkRenew</code>，用返回值更新 <code>effectiveTtlMs</code>（<code>-1</code> 记为 <code>0</code>）。</li>
+</ol>
+<div class="note warn"><span class="tag">两个容易写错的地方</span>
+<p><strong>节奏必须用服务端授予的租约，不能用自己配的。</strong>真正决定过期的是 <code>min(配置值, bookmark_reference_max_ttl_ms)</code>，后者是 FE 配置、客户端读不到。集群上限设成 1 小时而连接器配 7 天时，按自配值算出的节奏是 56 小时一次——<strong>租约照样过期，而此时文档已经宣称问题修好了</strong>。</p>
+<p><strong>续租失败不触发 <code>nontrackable.policy</code>。</strong>要提前判定"位点已丢"就只能匹配 FE 的异常文案，还会让恢复入口从一处变成两处。续租的职责是<em>阻止过期</em>，不是<em>检测过期</em>；真丢了仍由下一次 CHANGES 读经 <code>classify</code> 走既有策略。</p>
+</div>
+<p>覆盖整个 <code>liveBookmarks</code> 而不只是 <code>committedBookmark</code>：消费端停滞时旧窗口的 bookmark 会长期滞留在保留集里，它们的租约同样在跑。</p>
 
 <h4>applyPolicy(t, e)</h4>
 <p><code>policy=resnapshot</code> → 记 WARN，把表打回 fresh（<code>snapshotDone=false</code>、<code>committedBookmark=-1</code>），下次 poll 重做快照。<strong>不动 <code>liveBookmarks</code></strong>——刚才那次失败的窗口所开的 bookmark 在服务端是真实存在的，仍归 <code>commit()</code> 的规则和 TTL 管。<br><code>policy=fail</code> → 记 ERROR 并抛 <code>ConnectException</code>。</p>
@@ -288,7 +306,7 @@ if (fence &lt; 0) continue;                  // 首次 commit 什么都不释放
 <p>注意<strong>先推进围栏再使用旧值</strong>，所以本轮用的永远是一个 commit 周期之前的水位。这个滞后就是全部机制：<code>commitRecord</code> 跑在 producer 发送回调里，而 offset 落盘要等下一次 flush，所以 ack 水位可能领先持久位点；按当前水位释放，会正好删掉那次 flush 刚刚变成持久的那个 bookmark。</p>
 <p><strong>这个方法不发任何 SQL</strong>，只入队。</p>
 
-<h3><span class="fn">OffsetState</span><span class="sz">79 行</span></h3>
+<h3><span class="fn">OffsetState</span><span class="sz">72 行</span></h3>
 <p class="role">Connect offset 的编解码。四个 key 常量 + 两个静态构造 + 一个容错的解析。</p>
 <pre><code>sourcePartition = {"db": db, "table": table}
 sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;}</code></pre>
@@ -310,18 +328,20 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="access"><span class="no">4</span>数据访问层</h2>
 
-<h3><span class="fn">CdcClient</span><span class="sz">52 行</span></h3>
-<p class="role">9 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
-<p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchPrimaryKeys</code>/<code>streamSnapshot</code>/<code>streamChanges</code> 只有 Task 用，其余三个两边都用。</p>
+<h3><span class="fn">CdcClient</span><span class="sz">61 行</span></h3>
+<p class="role">10 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
+<p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchPrimaryKeys</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余三个两边都用。</p>
+<p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而那个上限客户端读不到。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
-<h3><span class="fn">StarRocksJdbcClient</span><span class="sz">220 行</span></h3>
+<h3><span class="fn">StarRocksJdbcClient</span><span class="sz">238 行</span></h3>
 <p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
 
 <div class="tablewrap">
 <table>
   <tr><th>方法</th><th>做什么</th></tr>
   <tr><td><code>bookmarkCreate</code></td><td><code>executeOnLeader</code> 拿回字符串结果。<strong>null 和非数字都转成 <code>SQLException</code></strong>——直接 <code>parseLong</code> 会抛非受检的 <code>NumberFormatException</code>，逃过 poll 的 <code>catch (SQLException)</code> 直接杀掉 task</td></tr>
+  <tr><td><code>bookmarkRenew</code></td><td>同样走 <code>executeOnLeader</code>，把返回的生效 TTL 解析成 long；null/非数字同 <code>bookmarkCreate</code> 转 <code>SQLException</code></td></tr>
   <tr><td><code>bookmarkRelease</code></td><td>一行转发</td></tr>
   <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetadataReader</code></td></tr>
   <tr><td><code>fetchPrimaryKeys</code></td><td>读 <code>tables_config.PRIMARY_KEY</code>，逗号切分，逐个 <code>stripBackticksAndWhitespace</code></td></tr>
@@ -333,7 +353,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </div>
 <p>每个查询方法都以 <code>catch (SQLException e) { connection.closeIfBroken(e); throw e; }</code> 收尾——连接坏了就丢掉，下次 <code>get()</code> 会重建。</p>
 
-<h3><span class="fn">FeConnection</span><span class="sz">227 行</span></h3>
+<h3><span class="fn">FeConnection</span><span class="sz">221 行</span></h3>
 <p class="role">连接的一切：URL 扇出、传输判定、复用、leader 轮转、有界重试。</p>
 
 <h4>静态初始化块</h4>
@@ -351,7 +371,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <p><code>MIN_VALUE</code> 是 MySQL Connector/J 的流式习惯用法。MariaDB 驱动对任何负值都抛 <code>SQLException("invalid fetch size")</code>——查询根本发不出去，一行都读不到。Arrow Flight 本来就流式，直接跳过这个调用。</p>
 </div>
 
-<h3><span class="fn">ColumnMetadataReader</span><span class="sz">285 行</span></h3>
+<h3><span class="fn">ColumnMetadataReader</span><span class="sz">300 行</span></h3>
 <p class="role">权威列清单。两条通道各一套策略，但<strong>产出必须一致</strong>。</p>
 
 <pre><code>fetchColumns()
@@ -375,13 +395,13 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <li><code>hll</code>/<code>bitmap</code>/<code>percentile</code> → <code>OTHER</code>，但 <code>isNonExportable</code> 对它们返回 true，preflight 会直接拒绝整张表。</li>
 </ul>
 
-<h3><span class="fn">RowExtractor</span><span class="sz">106 行</span></h3>
+<h3><span class="fn">RowExtractor</span><span class="sz">105 行</span></h3>
 <p class="role">三个静态方法。看着简单，但类型来源的收敛就发生在这里。</p>
 <p><code>extractValue</code> 的 switch 基于 <strong><code>col.jdbcType</code></strong>，不是 <code>ResultSetMetaData.getColumnType()</code>。后者等于让一条读取路径有两个真相源，而 Arrow 通道上驱动的说法已知不可信。</p>
 <p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会用 JVM 默认时区，本地午夜的 <code>java.sql.Date</code> 会让 converter 在 Connect 的 Date 逻辑类型上抛异常，Timestamp 则静默偏移。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
 <p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
 
-<h3><span class="fn">SqlBuilder</span><span class="sz">100 行</span> · <span class="fn">ColumnMeta</span><span class="sz">58 行</span></h3>
+<h3><span class="fn">SqlBuilder</span><span class="sz">104 行</span> · <span class="fn">ColumnMeta</span><span class="sz">58 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
 <p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
 <p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
@@ -389,7 +409,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="mapper"><span class="no">5</span>记录映射</h2>
 
-<h3><span class="fn">ChangeRecordMapper</span><span class="sz">276 行</span></h3>
+<h3><span class="fn">ChangeRecordMapper</span><span class="sz">286 行</span></h3>
 <p class="role">纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，所以极易测试。</p>
 
 <h4>构造函数：所有 schema 只建一次</h4>
@@ -459,10 +479,10 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </table>
 </div>
 
-<h3><span class="fn">FakeCdcClient</span><span class="sz">178 行 · 无 @Test</span></h3>
+<h3><span class="fn">FakeCdcClient</span><span class="sz">197 行 · 无 @Test</span></h3>
 <p class="role">Connector 与 Task 两套测试共用的可编排替身。</p>
-<p><strong>编排输入</strong>：<code>setColumns</code>/<code>setPrimaryKeys</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>，外加 <code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>bookmarkCreateFailure</code> 三个可直接写的字段。</p>
-<p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>
+<p><strong>编排输入</strong>：<code>setColumns</code>/<code>setPrimaryKeys</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>/<code>failNextChangesAfterEmitting</code>，外加 <code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>bookmarkCreateFailure</code>、<code>bookmarkRenewFailure</code>、<code>grantedTtlMs</code> 五个可直接写的字段。<code>grantedTtlMs</code> 模拟集群上限：留 null 就原样返回请求值，设值就无视请求值——续租节奏是否真的跟着服务端走，靠它来验。</p>
+<p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>renewedBookmarks</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>
 <p><code>bookmarkCreate</code> 的三段逻辑值得留意：队列非空就出队；队列空但见过该表就<strong>重复上次的值</strong>（这就是 idle dedup 的模拟）；从没编排过就用自增计数器（Connector 的 preflight 探针走这条）。</p>
 
 <h2 id="scripts"><span class="no">8</span>集成脚本</h2>

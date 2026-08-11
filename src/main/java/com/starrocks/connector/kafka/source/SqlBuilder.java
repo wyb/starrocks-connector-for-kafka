@@ -65,6 +65,13 @@ public final class SqlBuilder {
                 quoteStr(holder) + "," + quoteStr(Long.toString(ttlMs)) + ")";
     }
 
+    /** The ttl goes in as a decimal string, as for {@link #bookmarkCreateSql}. */
+    public static String bookmarkRenewSql(String db, String table, long bookmarkId, String holder, long ttlMs) {
+        return "SELECT bookmark_renew(" + quoteStr(db) + "," + quoteStr(table) + "," +
+                quoteStr(Long.toString(bookmarkId)) + "," + quoteStr(holder) + "," +
+                quoteStr(Long.toString(ttlMs)) + ")";
+    }
+
     public static String bookmarkReleaseSql(String db, String table, long bookmarkId, String holder) {
         return "SELECT bookmark_release(" + quoteStr(db) + "," + quoteStr(table) + "," +
                 quoteStr(Long.toString(bookmarkId)) + "," + quoteStr(holder) + ")";
