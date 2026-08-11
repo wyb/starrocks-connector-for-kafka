@@ -86,13 +86,14 @@ public final class SqlBuilder {
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
     }
 
+    /**
+     * {@code PROPERTIES} is the table's property map as JSON (FE builds it with
+     * {@code Gson().toJson(table.getProperties())}), which is why the CDC property is read from here
+     * rather than matched in {@code SHOW CREATE TABLE} text.
+     */
     public static String tableConfigSql(String db, String table) {
-        return "SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config WHERE TABLE_SCHEMA = " +
-                quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
-    }
-
-    public static String showCreateTableSql(String db, String table) {
-        return "SHOW CREATE TABLE " + qualifiedTable(db, table);
+        return "SELECT TABLE_MODEL, PRIMARY_KEY, PROPERTIES FROM information_schema.tables_config"
+                + " WHERE TABLE_SCHEMA = " + quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
     }
 
     private static String qualifiedTable(String db, String table) {

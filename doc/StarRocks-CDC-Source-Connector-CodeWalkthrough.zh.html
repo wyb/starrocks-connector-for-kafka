@@ -325,8 +325,8 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>bookmarkRelease</code></td><td>一行转发</td></tr>
   <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetadataReader</code></td></tr>
   <tr><td><code>fetchPrimaryKeys</code></td><td>读 <code>tables_config.PRIMARY_KEY</code>，逗号切分，逐个 <code>stripBackticksAndWhitespace</code></td></tr>
-  <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；两者共用 <code>fetchTableConfigRow</code></td></tr>
-  <tr><td><code>cdcPropertyEnabled</code></td><td><code>SHOW CREATE TABLE</code> 取第 2 列，字符串包含判断</td></tr>
+  <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；三个方法共用 <code>fetchTableConfigRow</code></td></tr>
+  <tr><td><code>cdcPropertyEnabled</code></td><td>同一行的 <code>PROPERTIES</code>——FE 用 <code>Gson().toJson(table.getProperties())</code> 写出，是 JSON 对象，所以按 key 取而不是在 <code>SHOW CREATE TABLE</code> 文本里做子串匹配（那个格式取决于 FE <code>PrintableMap</code> 的引号与空格，变了就静默失配）。<strong>读不出来一律抛</strong>，不能答 false——那会让 preflight 叫运维去开一个已经开着的属性</td></tr>
   <tr><td><code>streamSnapshot</code></td><td>建 statement → <code>applyStreamingFetchSize</code> → 每行 <code>extractRow</code> 回调</td></tr>
   <tr><td><code>streamChanges</code></td><td>同上，另外从 <code>cols.size()+1</code> 和 <code>+2</code> 读出两个伪列；异常先 <code>classify</code></td></tr>
 </table>

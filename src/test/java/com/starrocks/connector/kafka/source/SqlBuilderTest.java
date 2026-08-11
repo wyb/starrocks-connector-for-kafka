@@ -55,12 +55,12 @@ public class SqlBuilderTest {
         assertEquals("'it\\'s \\\\here'", SqlBuilder.quoteStr("it's \\here"));
     }
 
+    /** PROPERTIES rides the row the model and key already come from, so preflight makes one query. */
     @Test
     public void testProbeAndMetadataSql() {
         assertEquals("SELECT * FROM `db1`.`t1` LIMIT 0", SqlBuilder.columnsProbeSql("db1", "t1"));
-        assertEquals("SELECT TABLE_MODEL, PRIMARY_KEY FROM information_schema.tables_config " +
-                "WHERE TABLE_SCHEMA = 'db1' AND TABLE_NAME = 't1'", SqlBuilder.tableConfigSql("db1", "t1"));
-        assertEquals("SHOW CREATE TABLE `db1`.`t1`", SqlBuilder.showCreateTableSql("db1", "t1"));
+        assertEquals("SELECT TABLE_MODEL, PRIMARY_KEY, PROPERTIES FROM information_schema.tables_config"
+                + " WHERE TABLE_SCHEMA = 'db1' AND TABLE_NAME = 't1'", SqlBuilder.tableConfigSql("db1", "t1"));
     }
 
     /**

@@ -20,6 +20,10 @@
 
 package com.starrocks.connector.kafka.source;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
@@ -39,6 +43,9 @@ import java.util.List;
  * <p>Connection behaviour is covered by the integration smoke test, not by unit tests.
  */
 public class StarRocksJdbcClient implements CdcClient {
+
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final String CDC_PROPERTY = "enable_change_data_capture";
 
     private final FeConnection connection;
     private final ColumnMetadataReader columns;
@@ -99,21 +106,32 @@ public class StarRocksJdbcClient implements CdcClient {
 
     @Override
     public boolean cdcPropertyEnabled(String db, String table) throws SQLException {
-        String sql = SqlBuilder.showCreateTableSql(db, table);
-        try {
-            Connection c = connection.get();
-            try (Statement stmt = c.createStatement();
-                 ResultSet rs = stmt.executeQuery(sql)) {
-                if (!rs.next()) {
-                    throw new SQLException("table not found: " + db + "." + table);
-                }
-                String ddl = rs.getString(2);
-                return ddl != null && ddl.contains("\"enable_change_data_capture\" = \"true\"");
-            }
-        } catch (SQLException e) {
-            connection.closeIfBroken(e);
-            throw e;
+        return changeDataCaptureEnabled(db, table, fetchTableConfigRow(db, table).properties);
+    }
+
+    /**
+     * A missing key is false -- FE emits it only for a cloud-native primary-key table, which is the
+     * only kind this is asked about. An unreadable value throws rather than answering false, which
+     * would have preflight tell an operator to switch on a property that is already on.
+     */
+    static boolean changeDataCaptureEnabled(String db, String table, String propertiesJson) throws SQLException {
+        if (propertiesJson == null || propertiesJson.trim().isEmpty()) {
+            throw new SQLException("information_schema.tables_config.PROPERTIES is empty for " + db + "." + table
+                    + ", so it cannot be told whether change data capture is enabled");
         }
+        JsonNode root;
+        try {
+            root = JSON.readTree(propertiesJson);
+        } catch (IOException e) {
+            throw new SQLException("information_schema.tables_config.PROPERTIES for " + db + "." + table
+                    + " is not readable as JSON: " + propertiesJson, e);
+        }
+        if (root == null || !root.isObject()) {
+            throw new SQLException("information_schema.tables_config.PROPERTIES for " + db + "." + table
+                    + " is not a JSON object: " + propertiesJson);
+        }
+        JsonNode value = root.get(CDC_PROPERTY);
+        return value != null && "true".equalsIgnoreCase(value.asText());
     }
 
     @Override
@@ -184,7 +202,8 @@ public class StarRocksJdbcClient implements CdcClient {
                 if (!rs.next()) {
                     throw new SQLException("table not found: " + db + "." + table);
                 }
-                return new TableConfigRow(rs.getString("TABLE_MODEL"), rs.getString("PRIMARY_KEY"));
+                return new TableConfigRow(rs.getString("TABLE_MODEL"), rs.getString("PRIMARY_KEY"),
+                        rs.getString("PROPERTIES"));
             }
         } catch (SQLException e) {
             connection.closeIfBroken(e);
@@ -214,10 +233,12 @@ public class StarRocksJdbcClient implements CdcClient {
     private static final class TableConfigRow {
         final String tableModel;
         final String primaryKey;
+        final String properties;
 
-        TableConfigRow(String tableModel, String primaryKey) {
+        TableConfigRow(String tableModel, String primaryKey, String properties) {
             this.tableModel = tableModel;
             this.primaryKey = primaryKey;
+            this.properties = properties;
         }
     }
 }
