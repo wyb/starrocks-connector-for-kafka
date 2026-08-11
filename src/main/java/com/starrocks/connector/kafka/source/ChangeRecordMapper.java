@@ -52,8 +52,6 @@ import java.util.Map;
  */
 public final class ChangeRecordMapper {
 
-    // changeType contract for toChangeRecord(): 0=INSERT/UPSERT, 1=DELETE. Not exposed as public
-    // constants since the method signature (not this encoding detail) is what Task 5 depends on.
     private static final int CHANGE_TYPE_DELETE = 1;
 
     /** Snapshot rows carry no version; see {@link #toSnapshotRecord} for why not a bookmark id. */
@@ -154,7 +152,6 @@ public final class ChangeRecordMapper {
         return new SourceRecord(sourcePartition, sourceOffset, topic, keySchema, key, envelope.schema(), value);
     }
 
-    /** Shares key/topic/partition/offset with {@code deleteRecord}; value and schema are null. */
     public SourceRecord tombstoneFor(SourceRecord deleteRecord) {
         return new SourceRecord(
                 deleteRecord.sourcePartition(),

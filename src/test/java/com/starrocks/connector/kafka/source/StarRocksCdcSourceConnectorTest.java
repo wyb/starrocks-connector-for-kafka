@@ -303,12 +303,4 @@ public class StarRocksCdcSourceConnectorTest {
         assertTrue("the probe holder should still be derived from the task holder, was: " + probeHolder,
                 probeHolder.startsWith(taskHolder));
     }
-
-    /**
-     * Minimal scriptable {@link CdcClient} test double covering only what {@code
-     * StarRocksCdcSourceConnector}'s preflight calls: {@code fetchTableModel}, {@code
-     * cdcPropertyEnabled}, {@code fetchColumns}, and the {@code bookmarkCreate}/{@code
-     * bookmarkRelease} probe. Every other method is unused by the connector and throws {@link
-     * UnsupportedOperationException} if ever invoked.
-     */
 }
