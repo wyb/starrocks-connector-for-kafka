@@ -184,10 +184,11 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 }
                 // Not fatal -- text preserves the value -- but it means StarRocks grew a type this
                 // connector was never told about, worth saying once at startup.
-                if ("unknown".equals(col.srDataType)) {
-                    LOG.warn("Column {}.{}.{} has a type this connector does not recognise (declared as: {});"
-                                    + " it will be carried as text. This usually means StarRocks added a type.",
-                            db, t, col.name, col.srColumnType);
+                if (ColumnMetadataReader.isUnrecognized(col.srDataType)) {
+                    LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
+                                    + " recognise; it will be carried as text. This usually means StarRocks"
+                                    + " added a type.",
+                            db, t, col.name, col.srDataType, col.srColumnType);
                 }
             }
         } catch (SQLException e) {
@@ -199,8 +200,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     public List<Map<String, String>> taskConfigs(int maxTasks) {
         List<String> tables = new StarRocksCdcSourceConfig(props).tableNames();
         if (tables.isEmpty()) {
-            // Defensive only: TABLE_NAMES is a required config, so StarRocksCdcSourceConfig's
-            // ConfigDef validation already rejects an empty table list before start() completes.
+            // Unreachable: the config constructor above rejects a table list that names nothing,
+            // so this branch only survives a future change that relaxes that.
             return new ArrayList<>();
         }
 

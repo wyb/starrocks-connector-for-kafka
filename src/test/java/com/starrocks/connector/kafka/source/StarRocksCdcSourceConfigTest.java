@@ -70,6 +70,22 @@ public class StarRocksCdcSourceConfigTest {
         new StarRocksCdcSourceConfig(m);
     }
 
+    /** Passes ConfigDef's required check, then names nothing: a healthy, idle, silent connector. */
+    @Test
+    public void testTableListThatNamesNothingRejected() {
+        for (String value : new String[] {",", " ", " , , "}) {
+            Map<String, String> m = base();
+            m.put(StarRocksCdcSourceConfig.TABLE_NAMES, value);
+            try {
+                new StarRocksCdcSourceConfig(m);
+                fail("expected a ConfigException for " + StarRocksCdcSourceConfig.TABLE_NAMES + "='" + value + "'");
+            } catch (ConfigException expected) {
+                assertTrue("message should name the offending config, was: " + expected.getMessage(),
+                        expected.getMessage().contains(StarRocksCdcSourceConfig.TABLE_NAMES));
+            }
+        }
+    }
+
     @Test(expected = ConfigException.class)
     public void testBadSnapshotModeRejected() {
         Map<String, String> m = base();

@@ -64,6 +64,7 @@ final class FakeCdcClient implements CdcClient {
     private final Map<String, List<Object[]>> queuedSnapshotRowsByTable = new HashMap<>();
     private final Map<String, List<ChangeRow>> queuedChangesByTable = new HashMap<>();
     private final Set<String> failNextChangesTables = new HashSet<>();
+    private final Set<String> failNextChangesAfterEmittingTables = new HashSet<>();
     /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
     SQLException bookmarkCreateFailure;
 
@@ -100,6 +101,12 @@ final class FakeCdcClient implements CdcClient {
 
     void failNextChangesWithNonTrackable(String table) {
         failNextChangesTables.add(table);
+    }
+
+    /** Delivers the queued rows, then fails -- what the BE does when it discovers an unreachable
+     *  ancestor partway down the version chain. */
+    void failNextChangesAfterEmitting(String table) {
+        failNextChangesAfterEmittingTables.add(table);
     }
 
     @Override
@@ -170,11 +177,15 @@ final class FakeCdcClient implements CdcClient {
         if (failNextChangesTables.remove(table)) {
             throw new NonTrackableException("synthetic non-trackable window for " + table, null);
         }
+        boolean failAfterEmitting = failNextChangesAfterEmittingTables.remove(table);
         List<ChangeRow> queued = queuedChangesByTable.remove(table);
         if (queued != null) {
             for (ChangeRow row : queued) {
                 consumer.accept(row.row, row.changeType, row.rowVersion);
             }
+        }
+        if (failAfterEmitting) {
+            throw new NonTrackableException("synthetic mid-window non-trackable failure for " + table, null);
         }
     }
 

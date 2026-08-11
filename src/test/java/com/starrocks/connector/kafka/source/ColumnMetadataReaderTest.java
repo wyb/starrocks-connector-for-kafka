@@ -87,6 +87,36 @@ public class ColumnMetadataReaderTest {
         assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("json"));
     }
 
+    /**
+     * Real spellings StarRocks has and this connector does not map. A check for the bare word
+     * "unknown" -- which this once was -- matches none of them, so a type StarRocks added went by
+     * in silence.
+     */
+    @Test
+    public void testTypesStarRocksHasButThisConnectorDoesNotMapAreUnrecognized() {
+        assertTrue(ColumnMetadataReader.isUnrecognized("variant"));
+        assertTrue(ColumnMetadataReader.isUnrecognized("time"));
+        assertTrue(ColumnMetadataReader.isUnrecognized("unknown_type"));
+    }
+
+    /** Every type with a case in toJdbcType, including the ones carried as text on purpose. */
+    @Test
+    public void testMappedTypesAreRecognized() {
+        for (String t : new String[] {"tinyint", "smallint", "int", "bigint", "bigint unsigned",
+                                      "float", "double", "decimal", "char", "varchar", "date",
+                                      "datetime", "binary", "varbinary", "array", "map", "struct",
+                                      "json", "hll", "bitmap", "percentile"}) {
+            assertFalse("expected " + t + " to be recognized", ColumnMetadataReader.isUnrecognized(t));
+        }
+        assertFalse(ColumnMetadataReader.isUnrecognized("  ARRAY "));
+    }
+
+    /** Null means the server was never asked, which is not the same as a type nobody knows. */
+    @Test
+    public void testNullStarRocksTypeIsNotReportedAsUnrecognized() {
+        assertFalse(ColumnMetadataReader.isUnrecognized(null));
+    }
+
     /** A SELECT of a sketch yields nothing usable, so the table is refused rather than streamed. */
     @Test
     public void testAggregateSketchTypesAreNonExportable() {

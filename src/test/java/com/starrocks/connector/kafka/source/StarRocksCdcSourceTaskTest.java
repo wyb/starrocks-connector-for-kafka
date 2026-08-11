@@ -452,6 +452,75 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
     }
 
+    /**
+     * The resnapshot deliberately leaves the failed window's bookmark retained, and the bootstrap
+     * that follows asks for a new one -- but on a table that has not changed since,
+     * {@code bookmark_create} hands back that very id. Retaining it twice makes commit() release it
+     * twice; the second call fails against a real FE and is logged as a bookmark left pinned, which
+     * is the opposite of what happened.
+     */
+    @Test
+    public void testResnapshotReopeningTheSameBookmarkReleasesItOnce() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, "resnapshot");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.failNextChangesWithNonTrackable("orders");
+        task.poll();
+
+        // No head queued, so the fake repeats 101 -- what an unchanged table really does here.
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{9, 900L}));
+        task.poll();
+        assertEquals("101 must be retained once, not once per reopen",
+                Arrays.asList(100L, 101L), liveBookmarksOf(task));
+
+        // Drive 100 and 101 below the fence, then check each was released exactly once.
+        fake.enqueueHead("orders", 102L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        ack(task.poll());
+        task.commit();
+        task.commit();
+        pollToFlushReleases();
+
+        assertEquals("released: " + fake.releasedBookmarks, 1, releaseCountOf(101L));
+        assertEquals("released: " + fake.releasedBookmarks, 1, releaseCountOf(100L));
+    }
+
+    private int releaseCountOf(long bookmarkId) {
+        int count = 0;
+        for (String released : fake.releasedBookmarks) {
+            if (released.contains(":" + bookmarkId + ":")) {
+                count++;
+            }
+        }
+        return count;
+    }
+
+    /**
+     * A window that delivered rows and then failed must emit none of them. Their offsets name this
+     * window's head, so committing them would move the durable position past a window that was
+     * never read to the end, while the resnapshot discards the in-memory position that would have
+     * redone it -- a crash in between then resumes from head and the unread tail is gone.
+     */
+    @Test
+    public void testResnapshotEmitsNothingFromTheWindowThatFailedPartWay() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, "resnapshot");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders",
+                new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L),
+                new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
+        fake.failNextChangesAfterEmitting("orders");
+        assertNull("rows from the failed window must not reach Kafka", task.poll());
+    }
+
     @Test
     public void testNonTrackableWindowResnapshotPolicyResets() throws Exception {
         Map<String, String> props = baseProps();

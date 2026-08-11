@@ -62,7 +62,20 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public StarRocksCdcSourceConfig(Map<String, String> props) {
         super(CONFIG_DEF, props);
         this.table2Topic = parseTable2Topic(getString(TABLE2TOPIC_MAP));
+        rejectEmptyTableList();
         rejectNoSnapshotWithResnapshot();
+    }
+
+    /**
+     * ConfigDef only checks that {@link #TABLE_NAMES} is present, so a value of separators and
+     * whitespace passes and then names nothing: preflight checks no table, no task is started, and
+     * nothing is logged wrong -- a typo reads as a source with nothing to send.
+     */
+    private void rejectEmptyTableList() {
+        if (tableNames().isEmpty()) {
+            throw new ConfigException(TABLE_NAMES, getString(TABLE_NAMES),
+                    "names no table; expected a comma-separated list of at least one table name.");
+        }
     }
 
     /**

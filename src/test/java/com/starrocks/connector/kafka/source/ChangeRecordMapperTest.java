@@ -26,6 +26,7 @@ import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
 
@@ -46,6 +47,26 @@ public class ChangeRecordMapperTest {
                 new ColumnMeta("v", Types.BIGINT, 19, 0, true));
         return new ChangeRecordMapper("db1", "orders", "sr.db1.orders",
                 cols, Collections.singletonList("k"));
+    }
+
+    /**
+     * The primary-key list and the column list come from different queries and can disagree, on
+     * casing for instance. Unboxing the miss threw a bare NPE out of the task's start(), naming
+     * neither column nor table.
+     */
+    @Test
+    public void testPrimaryKeyColumnMissingFromColumnListIsNamed() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("k", Types.INTEGER, 10, 0, false),
+                new ColumnMeta("v", Types.BIGINT, 19, 0, true));
+        try {
+            new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols, Collections.singletonList("K"));
+            fail("expected a ConnectException naming the unmatched primary key column");
+        } catch (ConnectException expected) {
+            String message = expected.getMessage();
+            assertTrue("should name the column, was: " + message, message.contains("'K'"));
+            assertTrue("should name the table, was: " + message, message.contains("db1.orders"));
+        }
     }
 
     @Test

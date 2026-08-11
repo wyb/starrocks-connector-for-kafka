@@ -28,6 +28,7 @@ import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.data.Timestamp;
+import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
 import java.math.BigDecimal;
@@ -188,10 +189,24 @@ public final class ChangeRecordMapper {
         }
         Struct key = new Struct(keySchema);
         for (String pkCol : pkCols) {
-            int idx = colIndexByName.get(pkCol);
+            int idx = indexOf(pkCol);
             putValue(key, cols.get(idx), row[idx]);
         }
         return key;
+    }
+
+    /**
+     * The two lists come from different queries ({@code tables_config.PRIMARY_KEY} and the column
+     * metadata) and can disagree, on casing for instance. Unboxing a miss would leave {@code
+     * start()} throwing a bare NPE that names neither column nor table.
+     */
+    private int indexOf(String pkCol) {
+        Integer idx = colIndexByName.get(pkCol);
+        if (idx == null) {
+            throw new ConnectException("primary key column '" + pkCol + "' of " + db + "." + table
+                    + " is not among the captured columns " + colIndexByName.keySet());
+        }
+        return idx;
     }
 
     private static void putValue(Struct struct, ColumnMeta col, Object value) {
@@ -216,8 +231,7 @@ public final class ChangeRecordMapper {
     private Schema buildKeySchema() {
         SchemaBuilder builder = SchemaBuilder.struct().name(topic + ".Key");
         for (String pkCol : pkCols) {
-            int idx = colIndexByName.get(pkCol);
-            ColumnMeta col = cols.get(idx);
+            ColumnMeta col = cols.get(indexOf(pkCol));
             builder.field(col.name, schemaFor(col));
         }
         return builder.build();

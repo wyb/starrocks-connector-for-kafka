@@ -166,9 +166,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // Not optional: without this the resumed bookmark is never released, leaking one per
             // table per restart until its TTL. Safe, because commit() only releases strictly below
             // the previous cycle's ack watermark, so it survives until a newer window is acked.
-            synchronized (t.liveBookmarks) {
-                t.liveBookmarks.addLast(state.bookmarkId);
-            }
+            retain(t, state.bookmarkId);
         }
     }
 
@@ -177,6 +175,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         List<SourceRecord> out = new ArrayList<>();
         for (TableState t : tables) {
             drainPendingReleases(t);
+            final int emittedBefore = out.size();
             try {
                 if (!t.snapshotDone) {
                     bootstrap(t, out);
@@ -186,11 +185,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 if (head == t.committedBookmark) {
                     continue; // idle dedup: no new version since the last poll
                 }
-                synchronized (t.liveBookmarks) {
-                    t.liveBookmarks.addLast(head);
-                }
+                retain(t, head);
                 final long base = t.committedBookmark;
-                final int emittedBefore = out.size();
                 client.streamChanges(db, t.table, t.cols, base, head, (row, changeType, rowVersion) -> {
                     SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true);
                     out.add(r);
@@ -202,6 +198,11 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 LOG.info("Emitted CDC window for {}.{}: bookmark {} -> {}, {} record(s)",
                         db, t.table, base, head, out.size() - emittedBefore);
             } catch (NonTrackableException e) {
+                // These records carry this window's head, so committing them would advance the
+                // durable position past a window never read to the end. Empty today -- changesSql's
+                // ORDER BY makes the scan blocking -- which is why the rule belongs here and not in
+                // one clause of SqlBuilder.
+                discardFrom(out, emittedBefore);
                 applyPolicy(t, e);
             } catch (SQLException e) {
                 throw new ConnectException("CDC poll failed for table " + t.table, e);
@@ -216,9 +217,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     private void bootstrap(TableState t, List<SourceRecord> out) throws SQLException {
         long b0 = client.bookmarkCreate(db, t.table, holder, ttlMs);
-        synchronized (t.liveBookmarks) {
-            t.liveBookmarks.addLast(b0);
-        }
+        retain(t, b0);
         if (snapshotInitial) {
             LOG.info("Starting snapshot of {}.{} at bookmark {}", db, t.table, b0);
             int rowsBefore = out.size();
@@ -230,6 +229,27 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
         t.committedBookmark = b0;
         t.snapshotDone = true;
+    }
+
+    /**
+     * Retains a bookmark, ignoring one already held. {@code bookmark_create} returns the holder's
+     * existing bookmark on an unchanged table, so after a resnapshot {@link #bootstrap} reopens the
+     * failed window's id. Held twice, it is released twice, and the second failure is logged as a
+     * bookmark left pinned -- the opposite of what happened.
+     */
+    private static void retain(TableState t, long bookmarkId) {
+        synchronized (t.liveBookmarks) {
+            if (!t.liveBookmarks.contains(bookmarkId)) {
+                t.liveBookmarks.addLast(bookmarkId);
+            }
+        }
+    }
+
+    /** Truncates {@code out} back to the size it had before the current table's window. */
+    private static void discardFrom(List<SourceRecord> out, int from) {
+        if (out.size() > from) {
+            out.subList(from, out.size()).clear();
+        }
     }
 
     private void applyPolicy(TableState t, NonTrackableException e) {

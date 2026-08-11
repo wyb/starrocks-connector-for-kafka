@@ -30,6 +30,8 @@ import java.sql.SQLException;
 import java.sql.Statement;
 import java.sql.Types;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -281,6 +283,23 @@ final class ColumnMetadataReader {
             default:
                 return Types.OTHER;
         }
+    }
+
+    /** Mirrors {@link #toJdbcType}'s cases; that switch cannot tell "text on purpose" from
+     *  "never heard of it", since both are {@link Types#OTHER}. Add a case there, add a name here. */
+    private static final Set<String> KNOWN_DATA_TYPES = new HashSet<>(Arrays.asList(
+            "tinyint", "smallint", "int", "bigint", "bigint unsigned", "float", "double", "decimal",
+            "char", "varchar", "date", "datetime", "binary", "varbinary",
+            "array", "map", "struct", "json", "hll", "bitmap", "percentile"));
+
+    /**
+     * True when StarRocks named a type this connector has no mapping for; null means the server was
+     * not asked. Match the set, never a literal: FE renders an unmapped type as its own lowercase
+     * name ("variant", "time") and UNKNOWN_TYPE as "unknown_type", so no spelling is fixed enough
+     * to compare against.
+     */
+    static boolean isUnrecognized(String srDataType) {
+        return srDataType != null && !KNOWN_DATA_TYPES.contains(normalize(srDataType));
     }
 
     /** StarRocks type names whose values cannot be meaningfully exported by a plain SELECT. */
