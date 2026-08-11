@@ -36,7 +36,6 @@ public class OffsetStateTest {
         assertEquals(11955L, s.bookmarkId);
         assertTrue(s.snapshotDone);
 
-        // Test sourcePartition
         Map<String, String> partition = OffsetState.sourcePartition("db1", "t");
         assertEquals(2, partition.size());
         assertEquals("db1", partition.get(OffsetState.KEY_DB));

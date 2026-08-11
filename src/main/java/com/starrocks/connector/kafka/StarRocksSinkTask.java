@@ -213,13 +213,9 @@ public class StarRocksSinkTask extends SinkTask  {
     }
 
     /**
-     * Reads the optional topic-to-table mapping, or an empty map when the property is absent.
-     *
-     * <p>A malformed mapping now propagates the {@link org.apache.kafka.common.config.ConfigException}
-     * from {@link Util#parseTopicToTableMap} and fails the task. It used to be swallowed here and
-     * downgraded to an empty map, which left the task running with every topic routed to a
-     * same-named table -- the one outcome an operator who configured a mapping never wants, arrived
-     * at silently.
+     * The optional topic-to-table mapping, or an empty map when the property is absent. A malformed
+     * value fails the task: {@link Util#parseTopicToTableMap}'s exception is deliberately not caught
+     * here -- see {@link com.starrocks.connector.kafka.common.KeyValueListParser}.
      */
     static Map<String, String> getTopicToTableMap(Map<String, String> config) {
         if (config.containsKey(StarRocksSinkConnectorConfig.STARROCKS_TOPIC2TABLE_MAP)) {

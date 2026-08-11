@@ -109,8 +109,6 @@ final class ColumnMetadataReader {
                     }
                     result.add(new ColumnMeta(name, type, precision, scale, nullable));
                 }
-                // The only record of what the driver actually reported, and the transports differ
-                // enough that it is worth having before anything downstream goes wrong.
                 LOG.info("Resolved {} column(s) for {}.{}: {}", columnCount, db, table, described);
                 return withServerTypes(db, table, result);
             }

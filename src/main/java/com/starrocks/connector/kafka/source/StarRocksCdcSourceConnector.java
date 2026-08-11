@@ -43,9 +43,7 @@ import java.util.Map;
  * CHANGES does not support; a PRIMARY KEY table without {@code enable_change_data_capture} (the
  * message names the exact ALTER); a column colliding with {@code __CHANGE_TYPE__} or
  * {@code __ROW_VERSION__}; a column whose type cannot be exported at all; and bookmark meta
- * functions being disabled, proven by {@link #probeBookmarkFunctions}.</p>
- * Any other {@link SQLException} encountered while probing a table (e.g. the table does not
- * exist) is likewise wrapped into a {@link ConnectException} rather than left to propagate raw.
+ * functions being disabled, proven by {@link #probeBookmarkFunctions}.
  */
 public class StarRocksCdcSourceConnector extends SourceConnector {
 

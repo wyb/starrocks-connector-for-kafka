@@ -99,9 +99,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     private boolean tombstones;
     private boolean policyResnapshot;
 
-    // Package-visible (not private) so tests can reach a started task's per-table state directly
-    // via restoreOffset(), the same way start() itself does for the production offset-recovery
-    // path -- see restoreOffset()'s javadoc.
+    // Package-visible so tests can reach a started task's per-table state directly.
     List<TableState> tables;
 
     /** Test injection point: test subclasses override to return a scripted fake. */
@@ -348,7 +346,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /** Resolves the {@link TableState} a record belongs to via its source partition, or null. */
     private TableState tableOf(SourceRecord record) {
         Map<String, ?> partition = record.sourcePartition();
         if (partition == null) {

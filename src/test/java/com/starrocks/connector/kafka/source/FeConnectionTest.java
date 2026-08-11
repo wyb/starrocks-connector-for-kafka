@@ -31,11 +31,6 @@ import static org.junit.Assert.assertEquals;
  * URL fan-out is the whole transport switch: {@code starrocks.jdbc.url} carries no separate
  * transport key, so whichever scheme it names decides which driver runs and whether the
  * MySQL-only streaming knobs apply.
- *
- * <p>These call {@link FeConnection#parseUrls} directly. They used to reach it by reflection,
- * because it was private to a 700-line class that also owned column metadata, row extraction, and
- * every query -- needing reflection to test a pure function was the sign that the boundary was in
- * the wrong place.
  */
 public class FeConnectionTest {
 

@@ -35,11 +35,6 @@ import java.util.Set;
 /**
  * Scripted-and-recording {@link CdcClient} test double, shared by the connector and task tests.
  *
- * <p>There used to be one of these per test class, each implementing all nine interface methods,
- * so every change to {@link CdcClient} had to be made twice -- and one of the two stubbed the
- * streaming methods with {@code UnsupportedOperationException} purely because its own tests never
- * reached them.
- *
  * <p>Scripting:
  * <ul>
  *   <li>{@link #bookmarkCreate} consumes the table's queue of {@link #enqueueHead} values, then

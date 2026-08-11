@@ -76,13 +76,9 @@ public final class SqlBuilder {
     }
 
     /**
-     * The column list as rows, asking the server to describe the table rather than asking the
-     * driver to describe a query -- which on Arrow Flight is unusable (repeated schema, every
-     * column NOT NULL, precision and scale zeroed).
-     *
-     * <p>Both type columns are needed: {@code DATA_TYPE} is StarRocks' type name ("array", "hll"),
-     * the only way to tell a complex or non-exportable column from a VARCHAR, and
-     * {@code COLUMN_TYPE} carries the nesting ("array&lt;int&gt;").
+     * Both type columns are projected: {@code DATA_TYPE} is StarRocks' type name ("array", "hll")
+     * and {@code COLUMN_TYPE} carries the nesting ("array&lt;int&gt;"). Which transport reads this
+     * instead of the driver's own account, and why, is on {@link ColumnMetadataReader}.
      */
     public static String columnsMetadataSql(String db, String table) {
         return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, COLUMN_SIZE, DECIMAL_DIGITS"

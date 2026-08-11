@@ -98,12 +98,10 @@ final class FeConnection implements AutoCloseable {
         this.urlIndex = 0;
     }
 
-    /** True when this connection talks Arrow Flight SQL rather than the MySQL protocol. */
     boolean isArrowFlight() {
         return !urls.isEmpty() && urls.get(0).startsWith(ARROW_FLIGHT_SCHEME_PREFIX);
     }
 
-    /** Lazily opens, and reuses, the connection to the currently selected URL. */
     Connection get() throws SQLException {
         if (conn == null || conn.isClosed()) {
             conn = openConnection(urls.get(urlIndex));
@@ -160,7 +158,6 @@ final class FeConnection implements AutoCloseable {
         throw lastEx;
     }
 
-    /** Drops the pooled connection when the failure indicates it is no longer usable. */
     void closeIfBroken(SQLException e) {
         if (e instanceof SQLNonTransientConnectionException) {
             closeQuietly();
@@ -208,10 +205,6 @@ final class FeConnection implements AutoCloseable {
             throw new SQLException("Interrupted while waiting to retry", ie);
         }
     }
-
-    // ------------------------------------------------------------------
-    // JDBC URL parsing: comma-separated host list -> one URL per host.
-    // ------------------------------------------------------------------
 
     /** Fans a comma-separated host list into one URL per host, copying scheme, path and query. */
     static List<String> parseUrls(String jdbcUrl) {

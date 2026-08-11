@@ -64,9 +64,7 @@ public class SqlBuilderTest {
     }
 
     /**
-     * The Arrow Flight transport's only route to column metadata, and until now the one method in
-     * this class with no test at all -- so the SQL that the less-exercised of the two transports
-     * depends on was also the SQL nothing pinned.
+     * The Arrow Flight transport's only route to column metadata.
      *
      * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
      * matched positionally against the projected result set by {@code RowExtractor}, so any other

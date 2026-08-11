@@ -31,14 +31,10 @@ public class Util {
     static boolean isValidStarrocksTableName(String tableName) {
         return tableName.matches("^([_a-zA-Z]{1}[_$a-zA-Z0-9]+\\.){0,2}[_a-zA-Z]{1}[_$a-zA-Z0-9]+$");
     }
+
     /**
-     * Parses {@code starrocks.topic2table.map} and checks every mapped table name.
-     *
-     * <p>Always throws {@link ConfigException} on a bad value; it never returns {@code null}. The
-     * previous version returned {@code null} for a malformed list, and the caller read that as
-     * "mapping disabled" and routed every topic to a same-named table -- so a typo silently changed
-     * where data landed instead of failing the task. The parsing itself now lives in
-     * {@link KeyValueListParser}, shared with the CDC source connector.
+     * Parses {@code starrocks.topic2table.map} with {@link KeyValueListParser}, then checks every
+     * mapped table name. Throws {@link ConfigException} on a bad value; never returns {@code null}.
      */
     public static Map<String, String> parseTopicToTableMap(String input) {
         Map<String, String> topic2Table =

@@ -60,7 +60,6 @@ final class RowExtractor {
         return row;
     }
 
-    /** Reads one column, using {@code col}'s declared type rather than the driver's opinion. */
     static Object extractValue(ResultSet rs, ColumnMeta col, int index, Calendar utc) throws SQLException {
         Object value;
         switch (col.jdbcType) {

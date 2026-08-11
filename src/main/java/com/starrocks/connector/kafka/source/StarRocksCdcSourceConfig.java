@@ -31,37 +31,24 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Configuration for the StarRocks CDC source connector and its tasks.
+ * Configuration for the StarRocks CDC source connector and its tasks. Each key's user-facing
+ * description lives once, in {@link #newConfigDef()}, which is what Connect surfaces.
  */
 public class StarRocksCdcSourceConfig extends AbstractConfig {
 
-    // JDBC URL of the StarRocks FE MySQL protocol endpoint(s).
     public static final String JDBC_URL = "starrocks.jdbc.url";
-    // The name of the source StarRocks database.
     public static final String DATABASE_NAME = "starrocks.database.name";
-    // The username used to connect to StarRocks.
     public static final String USERNAME = "starrocks.username";
-    // The password used to connect to StarRocks.
     public static final String PASSWORD = "starrocks.password";
-    // Comma-separated list of StarRocks table names to capture changes from.
     public static final String TABLE_NAMES = "starrocks.table.names";
-    // Optional mapping from table name to Kafka topic name, formatted as table:topic,table:topic.
     public static final String TABLE2TOPIC_MAP = "starrocks.table2topic.map";
-    // The prefix used to derive a topic name for tables without an explicit topic mapping.
     public static final String TOPIC_PREFIX = "source.topic.prefix";
-    // Controls whether an initial snapshot of the captured tables is taken before streaming changes.
     public static final String SNAPSHOT_MODE = "source.snapshot.mode";
-    // The interval, in milliseconds, between successive polls for changes.
     public static final String POLL_INTERVALMS = "source.poll.intervalms";
-    // The time-to-live, in milliseconds, for stored bookmarks before they are considered stale.
     public static final String BOOKMARK_TTLMS = "source.bookmark.ttlms";
-    // The action to take when a captured table becomes non-trackable.
     public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
-    // Whether to emit an additional tombstone record (null value) following a delete record.
     public static final String TOMBSTONES_ON_DELETE = "source.tombstones.on.delete";
-    // The number of times to retry a failed source operation before giving up.
     public static final String MAXRETRIES = "source.maxretries";
-    // The period of time, in milliseconds, after which a connection attempt to StarRocks times out.
     public static final String CONNECT_TIMEOUTMS = "connect.timeoutms";
 
     // Internal task-sharding key used only to pass the assigned tables from the Connector to a Task;
@@ -187,11 +174,6 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                 );
     }
 
-    /**
-     * Parses the TABLE2TOPIC_MAP value. Shared with the sink connector's
-     * {@code starrocks.topic2table.map} via {@link KeyValueListParser}; a malformed list, an empty
-     * side, or a repeated table raises a ConfigException.
-     */
     private static Map<String, String> parseTable2Topic(String raw) {
         return KeyValueListParser.parse(TABLE2TOPIC_MAP, raw);
     }

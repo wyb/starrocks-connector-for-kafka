@@ -29,27 +29,14 @@ import java.util.Calendar;
 import java.util.List;
 
 /**
- * {@link CdcClient} implementation talking to a StarRocks FE over JDBC.
+ * {@link CdcClient} implementation talking to a StarRocks FE over JDBC. The query layer only:
+ * {@link FeConnection}, {@link ColumnMetadataReader} and {@link RowExtractor} sit underneath it,
+ * each documented on itself.
  *
- * <p>This class is the query layer only. The pieces underneath it live separately, because each
- * had its own reasons to be testable on its own:
- * <ul>
- *   <li>{@link FeConnection} -- URL fan-out, transport selection, connection reuse, FE-leader
- *       rotation, bounded retry.</li>
- *   <li>{@link ColumnMetadataReader} -- the authoritative column list, resolved differently per
- *       transport.</li>
- *   <li>{@link RowExtractor} -- result-set row to {@code Object[]}, typed by that same column
- *       list.</li>
- * </ul>
+ * <p><b>Not thread-safe</b>, because {@link FeConnection} is not. Drive one client from a single
+ * thread; {@code StarRocksCdcSourceTask} keeps all of its JDBC on the poll thread for this reason.
  *
- * <p><b>Not thread-safe</b>, because {@link FeConnection} is not: see its javadoc. Drive one client
- * from a single thread. {@code StarRocksCdcSourceTask} keeps all of its JDBC on the poll thread for
- * exactly this reason (its {@code commit()} callback runs on a different Connect thread and
- * deliberately issues no SQL of its own).
- *
- * <p>Connection behaviour is exercised by the integration smoke test rather than by unit tests; the
- * parts that can be tested without a server -- URL parsing, type mapping -- now live in the classes
- * above and are tested there.
+ * <p>Connection behaviour is covered by the integration smoke test, not by unit tests.
  */
 public class StarRocksJdbcClient implements CdcClient {
 
@@ -187,10 +174,6 @@ public class StarRocksJdbcClient implements CdcClient {
     public void close() {
         connection.close();
     }
-
-    // ------------------------------------------------------------------
-    // information_schema.tables_config lookups shared by fetchPrimaryKeys/fetchTableModel.
-    // ------------------------------------------------------------------
 
     private TableConfigRow fetchTableConfigRow(String db, String table) throws SQLException {
         String sql = SqlBuilder.tableConfigSql(db, table);

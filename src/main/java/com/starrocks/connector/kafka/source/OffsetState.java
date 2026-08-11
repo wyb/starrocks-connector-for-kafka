@@ -41,9 +41,6 @@ public final class OffsetState {
         return new OffsetState(-1L, false);
     }
 
-    /**
-     * Connect 的 sourcePartition：{"db": db, "table": table}
-     */
     public static Map<String, String> sourcePartition(String db, String table) {
         Map<String, String> partition = new HashMap<>();
         partition.put(KEY_DB, db);
@@ -51,9 +48,6 @@ public final class OffsetState {
         return partition;
     }
 
-    /**
-     * Connect 的 sourceOffset：{"bookmark_id": Long, "snapshot_done": Boolean}
-     */
     public static Map<String, Object> sourceOffset(long bookmarkId, boolean snapshotDone) {
         Map<String, Object> offset = new HashMap<>();
         offset.put(KEY_BOOKMARK_ID, bookmarkId);
@@ -62,10 +56,9 @@ public final class OffsetState {
     }
 
     /**
-     * 从 offsetStorageReader 读回的 raw map 恢复。
-     * raw == null 或缺 bookmark_id → fresh()。
-     * bookmark_id 可能反序列化成 Integer/Long，统一 ((Number) v).longValue()。
-     * snapshot_done 缺失或非 Boolean.TRUE → false。
+     * Restores what {@code offsetStorageReader} handed back. Read as {@link Number}, not cast to
+     * {@code Long}: the offset store round-trips through JSON, so a bookmark id small enough to fit
+     * an int comes back as an {@code Integer}.
      */
     public static OffsetState fromMap(Map<String, Object> raw) {
         if (raw == null || !raw.containsKey(KEY_BOOKMARK_ID)) {

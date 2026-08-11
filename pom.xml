@@ -40,10 +40,8 @@
                                     <include>com.starrocks:starrocks-stream-load-sdk</include>
                                     <include>org.mariadb.jdbc:mariadb-java-client</include>
                                     <!-- Envelope's class-init also pulls TransactionMonitor and
-                                         SchemaNameAdjuster. Unit tests run on the full compile
-                                         classpath and cannot catch a missing include; it surfaces
-                                         only as a NoClassDefFoundError in a real worker, which is
-                                         what common.sh's verify_plugin_jar checks for. -->
+                                         SchemaNameAdjuster; common.sh's verify_plugin_jar is what
+                                         catches a missing one. -->
                                     <include>io.debezium:debezium-core</include>
                                     <!-- ~42MB uber-jar, bundled deliberately: needing a second
                                          manual jar drop to switch transports is a deployment trap,
