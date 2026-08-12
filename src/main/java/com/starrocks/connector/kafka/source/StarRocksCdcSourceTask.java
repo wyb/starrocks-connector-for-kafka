@@ -82,11 +82,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // Authorized by commit(), released by poll(). commit() must issue no SQL: the JDBC client is
         // single-threaded and the poll thread may be mid-scan on it.
         final Queue<Long> pendingReleases = new ConcurrentLinkedQueue<>();
-        // -1 = never renewed, so the first round runs whatever the clock reads. A sentinel rather
-        // than 0, which would depend on the clock's origin being far from zero.
+        // -1 = no successful round yet, so the first runs whatever the clock reads. A sentinel
+        // rather than 0, which would depend on the clock's origin being far from zero.
         long lastRenewMs = -1L;
         // The lease the server granted: -1 until one is known, 0 once it answers "no expiry".
         long effectiveTtlMs = -1L;
+        // Failure backoff, so a cluster without bookmark_renew is not retried on every poll:
+        // executeOnLeader's retries would put ~1s of sleep per bookmark per poll on this thread.
+        long lastRenewAttemptMs = -1L;
+        long renewBackoffMs = 0L;
 
         TableState(String table, String topic) {
             this.table = table;
@@ -215,7 +219,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
         }
         if (out.isEmpty()) {
-            Thread.sleep(pollIntervalMs);
+            idleSleep(pollIntervalMs);
             return null;
         }
         return out;
@@ -261,8 +265,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
     private void applyPolicy(TableState t, NonTrackableException e) {
         if (policyResnapshot) {
             // Leave liveBookmarks untouched: the bookmark just opened for this failed window was
-            // still really created server-side, so it is real and commit()'s release rule (plus
-            // TTL as a backstop) still owns cleaning it up.
+            // still really created server-side, and commit()'s release rule owns cleaning it up.
+            // (Renewal keeps it alive meanwhile, so the TTL backstop only matters once the task
+            // itself stops.)
             LOG.warn("CHANGES window not trackable for {}.{} from base bookmark {}; {}=resnapshot, so this table's "
                             + "position is discarded and the whole table is re-read on the next poll. Cause: {}",
                     db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, e.getMessage());
@@ -279,6 +284,11 @@ public class StarRocksCdcSourceTask extends SourceTask {
     /** Overridden in tests to drive the renewal schedule without waiting out a real TTL. */
     long currentTimeMillis() {
         return System.currentTimeMillis();
+    }
+
+    /** Overridden in tests so idle polls do not really sleep. */
+    void idleSleep(long ms) throws InterruptedException {
+        Thread.sleep(ms);
     }
 
     /**
@@ -303,6 +313,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (t.lastRenewMs >= 0 && now - t.lastRenewMs < lease / 3) {
             return;
         }
+        if (t.renewBackoffMs > 0 && now - t.lastRenewAttemptMs < t.renewBackoffMs) {
+            return;
+        }
         List<Long> held;
         synchronized (t.liveBookmarks) {
             held = new ArrayList<>(t.liveBookmarks); // copy: commit() wants this monitor back
@@ -312,6 +325,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // set would push the first real round out by a whole interval.
             return;
         }
+        t.lastRenewAttemptMs = now;
         boolean anyRenewed = false;
         for (Long id : held) {
             try {
@@ -319,15 +333,23 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 t.effectiveTtlMs = granted < 0 ? 0 : granted;
                 anyRenewed = true;
             } catch (Exception e) {
-                LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); the next poll retries",
+                LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); a later round retries",
                         id, db, t.table, holder, e);
             }
         }
-        // Only a round that renewed something starts the clock. A wholly failed round must retry on
-        // the next poll: until one succeeds the pacing above is off the configured TTL, which a
-        // cluster ceiling may have capped far below -- waiting a third of it would outlast the lease.
+        // Only a round that renewed something starts the pacing clock: until one succeeds the
+        // pacing is off the configured TTL, which a cluster ceiling may have capped far below --
+        // waiting a third of it would outlast the lease. A wholly failed round instead backs off
+        // from one poll interval, doubling up to lease/3, so a transient failure retries within
+        // seconds while a cluster without bookmark_renew converges to the pre-renewal cadence.
         if (anyRenewed) {
             t.lastRenewMs = now;
+            t.renewBackoffMs = 0;
+        } else {
+            // Before any grant, `lease` is only the configured guess, so cap the backoff at a
+            // minute; a third of a 7-day guess would outwait a ceiling-capped lease entirely.
+            long cap = t.effectiveTtlMs > 0 ? lease / 3 : Math.min(lease / 3, 60_000L);
+            t.renewBackoffMs = Math.min(Math.max(Math.max(1L, pollIntervalMs), t.renewBackoffMs * 2), cap);
         }
     }
 

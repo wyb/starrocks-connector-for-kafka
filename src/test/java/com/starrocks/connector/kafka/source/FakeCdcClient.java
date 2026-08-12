@@ -69,6 +69,8 @@ final class FakeCdcClient implements CdcClient {
     SQLException bookmarkCreateFailure;
     /** When set, every bookmarkRenew fails with it. */
     SQLException bookmarkRenewFailure;
+    /** Renewals of these ids fail; others succeed -- a partial round. */
+    final Set<Long> failRenewOfBookmarks = new HashSet<>();
     /** The TTL renewal reports back; null means "whatever was asked for", as an uncapped FE does. */
     Long grantedTtlMs;
 
@@ -143,6 +145,9 @@ final class FakeCdcClient implements CdcClient {
         requestedTtls.add(ttlMs);
         if (bookmarkRenewFailure != null) {
             throw bookmarkRenewFailure;
+        }
+        if (failRenewOfBookmarks.contains(bookmarkId)) {
+            throw new SQLException("synthetic renew failure for bookmark " + bookmarkId);
         }
         return grantedTtlMs != null ? grantedTtlMs : ttlMs;
     }

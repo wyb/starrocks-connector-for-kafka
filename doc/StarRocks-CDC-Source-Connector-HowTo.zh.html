@@ -185,7 +185,7 @@
 
 <h2 id="what-it-does"><span class="no">1</span>What It Does</h2>
 <p>StarRocks CDC source connector 是一个 Kafka Connect <strong>source</strong>（源）连接器——方向与本仓库中已有的 StarRocks sink connector 相反。它会把变更数据捕获（CDC）事件从 StarRocks 的<strong>存算分离（云原生）</strong>表持续流出到 Kafka topic，每个被捕获的表对应一个 topic。</p>
-<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium envelope（<code>before</code>/<code>after</code>/<code>source</code>/<code>op</code>/<code>ts_ms</code>/<code>transaction</code>，由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
+<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_renew</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium envelope（<code>before</code>/<code>after</code>/<code>source</code>/<code>op</code>/<code>ts_ms</code>/<code>transaction</code>，由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
 
 <h2 id="prerequisites"><span class="no">2</span>前置条件</h2>
 <ul>
@@ -194,7 +194,7 @@
     <pre><code>ADMIN SET FRONTEND CONFIG ("enable_bookmark_meta_functions" = "true");</code></pre>
     同时把这一行也加进 <code>fe.conf</code>，以便在 FE 重启后依然生效。
   </li>
-  <li><strong>连接用户需要系统级 <code>OPERATE</code> 权限。</strong> <code>bookmark_create</code>/<code>bookmark_release</code> 受该权限管控，且只能在当前 FE leader 上执行：
+  <li><strong>连接用户需要系统级 <code>OPERATE</code> 权限。</strong> <code>bookmark_create</code>/<code>bookmark_renew</code>/<code>bookmark_release</code> 受该权限管控，且只能在当前 FE leader 上执行：
     <pre><code>GRANT OPERATE ON SYSTEM TO USER 'cdc_user'@'%';</code></pre>
     你不需要自己把连接器指向 leader——在 <code>starrocks.jdbc.url</code> 中列出每一个 FE endpoint，当某次 bookmark 调用报出 "must run on the FE leader" 时，连接器会自动透明地轮转到 leader。
   </li>
@@ -204,7 +204,7 @@
   </li>
   <li><strong>DUPLICATE KEY 和 AGGREGATE KEY 表不需要修改任何表属性即可使用</strong>，但仅限于只插入（insert-only）的工作负载。对这类表执行 <code>DELETE</code>/<code>TRUNCATE</code>，或者对任意表进行分区 drop/重写、schema 重写型的 <code>ALTER</code>、bucket 数量或 reshard 变更，都会使跨越该操作的 CHANGES 窗口变为不可追踪——参见<a href="#limitations">限制</a>。</li>
   <li><strong>不支持 UNIQUE KEY 表。</strong> <code>CHANGES</code> 无法读取此类表，<code>StarRocksCdcSourceConnector</code> 会在启动时就直接拒绝该配置，而不是留到之后某个 task 运行时才失败。</li>
-  <li><strong>除上述条件外，没有额外的 FE 版本要求。</strong> 连接器只依赖已经发布的能力（<code>bookmark_create</code>/<code>bookmark_release</code>，以及 <code>[_CHANGES_]</code>/<code>[_BOOKMARK_]</code> 查询提示）；代码中没有最低版本检查。</li>
+  <li><strong>除上述条件外，没有额外的 FE 版本要求。</strong> 连接器只依赖已经发布的能力（<code>bookmark_create</code>/<code>bookmark_release</code>，以及 <code>[_CHANGES_]</code>/<code>[_BOOKMARK_]</code> 查询提示）；代码中没有最低版本检查。<code>bookmark_renew</code> 是可选增强：集群没有它时续租失败并记日志，空闲表行为退回无续期语义（见限制第 1 条）。</li>
 </ul>
 
 <h2 id="full-configuration-example"><span class="no">3</span>完整配置示例</h2>
@@ -222,7 +222,7 @@
   <tr><td><code>source.topic.prefix</code></td><td>String</td><td><code>sr</code></td><td>用于为没有在 <code>starrocks.table2topic.map</code> 中显式配置映射的表派生 topic 名称的前缀：topic 名称为 <code>&lt;prefix&gt;.&lt;database&gt;.&lt;table&gt;</code>。</td></tr>
   <tr><td><code>source.snapshot.mode</code></td><td>String</td><td><code>initial</code></td><td>是否在开始流式传输变更之前先进行一次初始快照。取值为 <code>initial</code>、<code>no_snapshot</code> 之一。<strong><code>no_snapshot</code> 不能与 <code>source.nontrackable.policy=resnapshot</code> 组合使用</strong>——这一组合会在启动时被 <code>ConfigException</code> 直接拒绝，因为 <code>resnapshot</code> 依赖一次全新快照来重建表的位置，而在快照被禁用的情况下它只会静默丢失变更。</td></tr>
   <tr><td><code>source.poll.intervalms</code></td><td>Long</td><td><code>5000</code></td><td>在一次未产生任何记录的轮询之后，到下一次轮询之间的休眠毫秒数。</td></tr>
-  <tr><td><code>source.bookmark.ttlms</code></td><td>Long</td><td><code>604800000</code>（7 天）</td><td>支撑每张表位置的 bookmark 的存活时间（time-to-live），单位为毫秒。在当前版本中，这只是租约的兜底手段，而不是一个可续期的租约——参见<a href="#limitations">限制</a>。</td></tr>
+  <tr><td><code>source.bookmark.ttlms</code></td><td>Long</td><td><code>604800000</code>（7 天）</td><td>支撑每张表位置的 bookmark 的存活时间（time-to-live），单位为毫秒。task 轮询期间会按服务端实际授予的租约自动续租；TTL 是连接器停止轮询后的兜底——参见<a href="#limitations">限制</a>。</td></tr>
   <tr><td><code>source.nontrackable.policy</code></td><td>String</td><td><code>fail</code></td><td>当某张表的 CHANGES 窗口变为不可追踪时应采取的动作。取值为 <code>fail</code>、<code>resnapshot</code> 之一。<strong><code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code></strong>（即默认值）：与 <code>source.snapshot.mode=no_snapshot</code> 组合时会在启动时被 <code>ConfigException</code> 拒绝，因为此时没有任何快照可用于重建该表的位置。</td></tr>
   <tr><td><code>source.tombstones.on.delete</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会在每条删除记录之后立即发出一条额外的 tombstone 记录（value 为 null，key 相同）。</td></tr>
   <tr><td><code>source.maxretries</code></td><td>Int</td><td><code>3</code></td><td>一次 bookmark 调用在放弃前的尝试次数（对应 sink 连接器的 <code>sink.maxretries</code>）。</td></tr>
@@ -433,7 +433,7 @@ connect.timeoutms=1000</code></pre>
 
 <h2 id="limitations"><span class="no">6</span>限制</h2>
 <ol>
-  <li><strong>只要还在轮询就会自动续租；轮询之间的长间隔仍会丢位点。</strong> 每一轮 poll 都会为该 task 仍持有的每一个 bookmark 续租，因此只要 task 还在轮询，一张长期没有新版本的表也能保住自己的位置。续租节奏取的是<strong>服务端授予</strong>的租约的三分之一——而不是配置值，后者可能被集群侧的上限 <code>bookmark_reference_max_ttl_ms</code> 压低——单次续租失败只会等下一轮重试，不会被当作位置丢失处理。续租唯一覆盖不到的是<strong>没有在轮询的 task</strong>：Kafka Connect 的 pause 会停止调用 <code>poll()</code>，而本连接器的全部 JDBC 都跑在这条线程上，所以连接器被暂停（或停止、或删除）超过 <code>source.bookmark.ttlms</code> 之后，bookmark 仍会失效，随后的 CHANGES 读取会判定为不可追踪并触发 <code>fail</code>/<code>resnapshot</code>。<strong>单次 poll 跑得比租约还长同样保不住</strong>——例如大表的初始快照——因为本连接器的全部 JDBC 共用 poll 线程，poll 进行中无法续租。存在长时间暂停、或快照耗时超过租约的部署，应调大 <code>source.bookmark.ttlms</code>，或把 <code>source.nontrackable.policy</code> 设为 <code>resnapshot</code>；注意 <code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code>（默认值），它与 <code>no_snapshot</code> 的组合会在启动时被 <code>ConfigException</code> 拒绝——没有快照可供重建，该表会静默跳过从已过期的 base bookmark 到新 bookmark 之间的全部变更。续租依赖集群提供 <code>bookmark_renew</code>；对不具备该函数的 StarRocks，每次续租都会失败并记录日志，空闲表的行为与此前一致。</li>
+  <li><strong>只要还在轮询就会自动续租；轮询之间的长间隔仍会丢位点。</strong> 每一轮 poll 都会执行续租检查；一次续租轮（覆盖该 task 仍持有的每一个 bookmark）每授予租约的三分之一触发一次，因此只要 task 还在轮询，一张长期没有新版本的表也能保住自己的位置。续租节奏取的是<strong>服务端授予</strong>的租约的三分之一——而不是配置值，后者可能被集群侧的上限 <code>bookmark_reference_max_ttl_ms</code> 压低——续租失败不会被当作位置丢失处理：整轮全失败时指数退避重试——从一个 poll 间隔起步，租约未知阶段封顶一分钟，已知后封顶租约的三分之一。续租唯一覆盖不到的是<strong>没有在轮询的 task</strong>：Kafka Connect 的 pause 会停止调用 <code>poll()</code>，而本连接器的全部 JDBC 都跑在这条线程上，所以连接器被暂停（或停止、或删除）超过<strong>授予租约</strong>——<code>source.bookmark.ttlms</code> 与集群 <code>bookmark_reference_max_ttl_ms</code> 中较小者——之后，bookmark 仍会失效，随后的 CHANGES 读取会判定为不可追踪并触发 <code>fail</code>/<code>resnapshot</code>。<strong>单次 poll 跑得比租约还长同样保不住</strong>——例如大表的初始快照——因为本连接器的全部 JDBC 共用 poll 线程，poll 进行中无法续租。存在长时间暂停、或快照耗时超过租约的部署，应调大 <code>source.bookmark.ttlms</code>，或把 <code>source.nontrackable.policy</code> 设为 <code>resnapshot</code>；注意 <code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code>（默认值），它与 <code>no_snapshot</code> 的组合会在启动时被 <code>ConfigException</code> 拒绝——没有快照可供重建，该表会静默跳过从已过期的 base bookmark 到新 bookmark 之间的全部变更。续租依赖集群提供 <code>bookmark_renew</code>；对不具备该函数的 StarRocks，每次续租都会失败并记录日志，空闲表的行为与此前一致。</li>
   <li><strong><code>ts_ms</code> 是处理时间，而不是提交时间。</strong> 它是连接器构建该记录时的墙钟时间（wall-clock time），并不是该变更在 StarRocks 中被提交的时间。</li>
   <li><strong>DUPLICATE KEY / AGGREGATE KEY 表没有 key，且只支持插入工作负载。</strong> 它们的记录携带的 Kafka key 为 <code>null</code>，因此 Kafka 默认的分区器（partitioner）在为它们分配分区时不提供任何跨分区的顺序保证。这类表也只有在纯插入（insert-only）工作负载下才是可追踪的：举例来说，对一张 DUPLICATE KEY 表执行 <code>DELETE</code>，会使对应的 CHANGES 窗口变为不可追踪（StarRocks 会报告 <code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE): CDC for DUP_KEYS does not support delete</code>）。AGGREGATE KEY 表报告的是（依据该表自身聚合函数计算出的）预聚合值，而不是原始插入的行。</li>
   <li><strong>空表的快照在重启后会被无害地重复执行。</strong> 依据上文所述的快照崩溃不变式，只要重启发生在 <code>snapshot_done</code> 被持久化为 <code>true</code> 之前，就会重做整个快照；对于一张目前还没有任何行的表，这只是一次没有实际效果的空查询，唯一代价是一次多余的往返请求。</li>

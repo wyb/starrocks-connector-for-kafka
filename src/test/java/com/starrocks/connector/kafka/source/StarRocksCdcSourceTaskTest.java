@@ -82,6 +82,11 @@ public class StarRocksCdcSourceTaskTest {
             long currentTimeMillis() {
                 return fakeNowMs;
             }
+
+            @Override
+            void idleSleep(long ms) {
+                // the fake clock drives the schedule; real sleeping only slows the suite
+            }
         };
     }
 
@@ -683,6 +688,153 @@ public class StarRocksCdcSourceTaskTest {
         fakeNowMs += 30000L / 3 + 1;
         task.poll();
         assertEquals("must re-pace onto the shortened lease", 1, renewCountOf(100L));
+    }
+
+    /**
+     * The headline scenario of the clock rule: a round that succeeded, then a wholly failed one --
+     * the failed round must not restart the lease/3 wait. Kills the mutant that also stamps the
+     * clock whenever a grant was ever learned.
+     */
+    @Test
+    public void testWhollyFailedRoundAfterASuccessRetriesPromptly() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 30000L;
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+        fakeNowMs += 1;
+        task.poll(); // successful round, learns the 30s lease
+
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fakeNowMs += 30000L / 3;
+        task.poll(); // wholly failed round
+        fake.renewedBookmarks.clear();
+
+        fakeNowMs += 1; // one poll interval (baseProps sets 1ms)
+        task.poll();
+        assertEquals("the failed round must not have restarted the lease/3 wait", 1, renewCountOf(100L));
+    }
+
+    /** Consecutive wholly failed rounds back off instead of hammering every poll. */
+    @Test
+    public void testRepeatedFailuresBackOff() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "1000");
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.bookmarkRenewFailure = new SQLException("no bookmark_renew on this cluster");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap; nothing held yet
+
+        fakeNowMs += 1;
+        task.poll(); // first attempt fails -> backoff = 1000
+        assertEquals(1, renewCountOf(100L));
+
+        fakeNowMs += 999;
+        task.poll();
+        assertEquals("inside the backoff window, no retry", 1, renewCountOf(100L));
+
+        fakeNowMs += 1;
+        task.poll(); // second attempt -> backoff = 2000
+        assertEquals(2, renewCountOf(100L));
+
+        fakeNowMs += 1999;
+        task.poll();
+        assertEquals("the backoff doubles", 2, renewCountOf(100L));
+
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(3, renewCountOf(100L));
+    }
+
+    /** A success must clear backoff built under the old lease, or it outgates the new one. */
+    @Test
+    public void testSuccessClearsStaleBackoff() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "20000");
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll(); // fail -> backoff 20000
+        fakeNowMs += 20000;
+        task.poll(); // fail -> backoff 40000
+
+        fake.bookmarkRenewFailure = null;
+        fake.grantedTtlMs = 30000L;
+        fakeNowMs += 40000;
+        task.poll(); // success: learns a 30s lease, must also reset the 40s backoff
+        fake.renewedBookmarks.clear();
+
+        fakeNowMs += 30000L / 3 + 1;
+        task.poll();
+        assertEquals("stale backoff must not outgate the granted lease's schedule", 1, renewCountOf(100L));
+    }
+
+    /** Backoff is capped: at a minute before any grant, at lease/3 after one. */
+    @Test
+    public void testBackoffCaps() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "40000");
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll(); // fail -> backoff 40000
+        fakeNowMs += 40000;
+        task.poll(); // fail -> backoff would double to 80000, но unknown-phase cap is 60000
+        assertEquals(2, renewCountOf(100L));
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 59999;
+        task.poll();
+        assertEquals("capped at one minute while the lease is unknown", 0, renewCountOf(100L));
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+
+        // Learn a lease, then rebuild backoff: the cap becomes lease/3.
+        fake.bookmarkRenewFailure = null;
+        fake.grantedTtlMs = 9000L;
+        fakeNowMs += 60000;
+        task.poll(); // success, lease 9000
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 3000;
+        task.poll(); // fail -> backoff 40000 -> capped to 3000
+        assertEquals(1, renewCountOf(100L));
+        fakeNowMs += 3000;
+        task.poll();
+        assertEquals("granted-phase cap is lease/3", 2, renewCountOf(100L));
+    }
+
+    /** A partial round stamps the clock: the failed id waits for the next scheduled round. */
+    @Test
+    public void testPartialRoundStampsTheClock() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        task.poll(); // two live bookmarks, none acked
+
+        fake.failRenewOfBookmarks.add(100L);
+        fakeNowMs += 900000L / 3;
+        task.poll(); // 101 renews, 100 fails -> clock stamped
+        fake.renewedBookmarks.clear();
+
+        fakeNowMs += 1;
+        task.poll();
+        assertTrue("a partial round schedules the next one normally", fake.renewedBookmarks.isEmpty());
     }
 
     /** A non-expiring lease has nothing to outrun; renewing it forever would be pure noise. */
