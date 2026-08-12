@@ -76,6 +76,8 @@ final class FakeCdcClient implements CdcClient {
     final List<String> createdBookmarks = new ArrayList<>();
     final List<String> releasedBookmarks = new ArrayList<>();
     final List<String> renewedBookmarks = new ArrayList<>();
+    /** The ttl each renewal asked for, to catch a client that echoes the grant back. */
+    final List<Long> requestedTtls = new ArrayList<>();
     /** Holder ids, verbatim, as handed to bookmarkCreate / bookmarkRelease. */
     final List<String> createHolders = new ArrayList<>();
     final List<String> releaseHolders = new ArrayList<>();
@@ -138,6 +140,7 @@ final class FakeCdcClient implements CdcClient {
     public long bookmarkRenew(String db, String table, long bookmarkId, String holder, long ttlMs)
             throws SQLException {
         renewedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
+        requestedTtls.add(ttlMs);
         if (bookmarkRenewFailure != null) {
             throw bookmarkRenewFailure;
         }

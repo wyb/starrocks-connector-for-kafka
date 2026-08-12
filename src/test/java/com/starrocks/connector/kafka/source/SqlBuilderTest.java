@@ -47,6 +47,11 @@ public class SqlBuilderTest {
                 SqlBuilder.bookmarkCreateSql("db1", "orders", "kc:c1", 604800000L));
         assertEquals("SELECT bookmark_release('db1','orders','7','kc:c1')",
                 SqlBuilder.bookmarkReleaseSql("db1", "orders", 7L, "kc:c1"));
+        // Argument order matters more here than for its siblings: bookmark_id and holder are both
+        // quoted strings, so transposing them compiles, and the renewal path swallows the resulting
+        // server-side error into a WARN -- the feature would go silently inert.
+        assertEquals("SELECT bookmark_renew('db1','orders','7','kc:c1','604800000')",
+                SqlBuilder.bookmarkRenewSql("db1", "orders", 7L, "kc:c1", 604800000L));
     }
 
     @Test

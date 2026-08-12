@@ -619,6 +619,72 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(0, renewCountOf(100L));
     }
 
+    /**
+     * A round where every renewal failed must retry on the next poll, not a third of the configured
+     * TTL later: until one succeeds the pacing is off the configured value, which the cluster may
+     * have capped far below.
+     */
+    @Test
+    public void testFailedRoundRetriesOnTheNextPoll() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals("a wholly failed round must not start the clock", 1, renewCountOf(100L));
+    }
+
+    /** The request always carries the configured TTL; sending the granted one ratchets it down. */
+    @Test
+    public void testRenewAlwaysRequestsTheConfiguredTtl() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 30000L;
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+        fakeNowMs += 1;
+        task.poll();
+
+        fake.requestedTtls.clear();
+        fakeNowMs += 30000L / 3 + 1;
+        task.poll();
+        assertEquals(Collections.singletonList(900000L), fake.requestedTtls);
+    }
+
+    /** A lease shortened server-side mid-run must re-pace; latching the first grant misses it. */
+    @Test
+    public void testRenewRepacesWhenTheGrantChanges() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 600000L;
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+        fakeNowMs += 1;
+        task.poll(); // learns 600000
+
+        fake.grantedTtlMs = 30000L;
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 600000L / 3;
+        task.poll(); // renews on the old pace, learns 30000
+        assertEquals(1, renewCountOf(100L));
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 30000L / 3 + 1;
+        task.poll();
+        assertEquals("must re-pace onto the shortened lease", 1, renewCountOf(100L));
+    }
+
     /** A non-expiring lease has nothing to outrun; renewing it forever would be pure noise. */
     @Test
     public void testNoRenewalWhenTheLeaseNeverExpires() throws Exception {

@@ -312,15 +312,22 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // set would push the first real round out by a whole interval.
             return;
         }
-        t.lastRenewMs = now;
+        boolean anyRenewed = false;
         for (Long id : held) {
             try {
                 long granted = client.bookmarkRenew(db, t.table, id, holder, ttlMs);
                 t.effectiveTtlMs = granted < 0 ? 0 : granted;
+                anyRenewed = true;
             } catch (Exception e) {
-                LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); the next round retries",
+                LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); the next poll retries",
                         id, db, t.table, holder, e);
             }
+        }
+        // Only a round that renewed something starts the clock. A wholly failed round must retry on
+        // the next poll: until one succeeds the pacing above is off the configured TTL, which a
+        // cluster ceiling may have capped far below -- waiting a third of it would outlast the lease.
+        if (anyRenewed) {
+            t.lastRenewMs = now;
         }
     }
 
