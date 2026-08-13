@@ -289,7 +289,7 @@ if (state.snapshotDone) {
   <li><strong>只有续成了至少一个才推进 <code>lastRenewMs</code></strong>；全失败的轮次设退避后由后续 poll 重试。</li>
 </ol>
 <div class="note warn"><span class="tag">三个容易写错的地方</span>
-<p><strong>节奏必须用服务端授予的租约，不能用自己配的。</strong>真正决定过期的是 <code>min(配置值, bookmark_reference_max_ttl_ms)</code>，后者是 FE 配置、客户端读不到。集群上限设成 1 小时而连接器配 7 天时，按自配值算出的节奏是 56 小时一次——<strong>租约照样过期，而此时文档已经宣称问题修好了</strong>。</p>
+<p><strong>节奏必须用服务端授予的租约，不能用自己配的。</strong>真正决定过期的是配置值与 <code>bookmark_reference_max_ttl_ms</code> 中较小的一个，任一侧 <code>&lt;= 0</code> 按不限处理；该上限是 <code>mutable=true</code> 的 FE 配置，随时可变，因此只能以每次返回值为准。集群上限设成 1 小时而连接器配 7 天时，按自配值算出的节奏是 56 小时一次——<strong>租约照样过期，而此时文档已经宣称问题修好了</strong>。</p>
 <p><strong>全失败的轮次不能推进节奏时钟。</strong>推进了，就等于按配置 TTL 的三分之一再试——集群上限压到 1 小时而配置 7 天时，一次瞬时失败换 56 小时的空窗，引用早被清扫了。退避负责限制重试频率，时钟只认成功。</p>
 <p><strong>续租失败不触发 <code>nontrackable.policy</code>。</strong>要提前判定"位点已丢"就只能匹配 FE 的异常文案，还会让恢复入口从一处变成两处。续租的职责是<em>阻止过期</em>，不是<em>检测过期</em>；真丢了仍由下一次 CHANGES 读经 <code>classify</code> 走既有策略。</p>
 </div>
@@ -335,7 +335,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <h3><span class="fn">CdcClient</span><span class="sz">61 行</span></h3>
 <p class="role">10 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
 <p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchPrimaryKeys</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余三个两边都用。</p>
-<p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而那个上限客户端读不到。</p>
+<p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
 <h3><span class="fn">StarRocksJdbcClient</span><span class="sz">238 行</span></h3>

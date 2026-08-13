@@ -855,6 +855,18 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals("a zero cap would hammer renewal every poll", 1, renewCountOf(100L));
     }
 
+    /** nanoTime's origin may be negative, which would sink lastRenewMs below its -1 sentinel. */
+    @Test
+    public void testMonotonicClockIsNonNegativeFromAnyOrigin() {
+        StarRocksCdcSourceTask real = new StarRocksCdcSourceTask() {
+            @Override
+            long nanoTime() {
+                return Long.MIN_VALUE / 2;
+            }
+        };
+        assertTrue("a negative clock disables the pacing gate", real.monotonicMs() >= 0);
+    }
+
     /** {@code poll.intervalms=0} is a legal max-throughput setting; the backoff floor outlives it. */
     @Test
     public void testZeroPollIntervalStillBacksOff() throws Exception {
@@ -947,11 +959,12 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     /**
-     * Only the server may end renewal. A non-positive {@code source.bookmark.ttlms} drops the
-     * per-reference limit, not the cluster ceiling that outlives it, so the connector has to ask.
+     * A non-positive {@code source.bookmark.ttlms} drops the per-reference limit, not the cluster
+     * ceiling that outlives it, so the connector has to ask -- and keep asking, since that ceiling
+     * is a mutable config that can appear after the first answer.
      */
     @Test
-    public void testNonPositiveTtlStillRenewsUntilTheServerReportsNoExpiry() throws Exception {
+    public void testNonPositiveTtlRenewsAndKeepsReProbingNoExpiry() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "0");
         fake.grantedTtlMs = 3600000L; // the cluster ceiling the connector cannot see
@@ -970,7 +983,7 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
         assertEquals(2, renewCountOf(100L));
 
-        // Renewal stops only once the server itself reports "no expiry".
+        // A -1 answer is only true of the ceiling as it stands, so re-probing continues.
         FakeCdcClient uncapped = new FakeCdcClient();
         uncapped.setColumns("orders", ORDERS_COLS);
         uncapped.setPrimaryKeys("orders", ORDERS_PKS);
@@ -984,10 +997,14 @@ public class StarRocksCdcSourceTaskTest {
         int afterLearning = uncapped.renewedBookmarks.size();
         assertEquals(1, afterLearning);
 
-        fakeNowMs += 100000000L;
+        fakeNowMs += 900000L / 3 - 1;
         other.poll();
-        assertEquals("a lease that never expires needs no further renewal",
+        assertEquals("the re-probe is paced, not run on every poll",
                 afterLearning, uncapped.renewedBookmarks.size());
+        fakeNowMs += 1;
+        other.poll();
+        assertEquals("a mutable ceiling means \"no expiry\" has to be re-probed",
+                afterLearning + 1, uncapped.renewedBookmarks.size());
         other.stop();
     }
 

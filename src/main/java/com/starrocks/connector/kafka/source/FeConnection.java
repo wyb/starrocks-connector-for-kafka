@@ -86,7 +86,9 @@ final class FeConnection implements AutoCloseable {
     private final StarRocksCdcSourceConfig config;
     private final List<String> urls;
     private int urlIndex;
-    private Connection conn;
+    /** Volatile because {@code close()} is the one call the runtime may make off the poll thread. */
+    private volatile Connection conn;
+    private volatile boolean closed;
 
     FeConnection(StarRocksCdcSourceConfig config) {
         this.config = config;
@@ -103,10 +105,21 @@ final class FeConnection implements AutoCloseable {
     }
 
     Connection get() throws SQLException {
-        if (conn == null || conn.isClosed()) {
-            conn = openConnection(urls.get(urlIndex));
+        if (closed) {
+            throw new SQLException("FE connection is closed");
         }
-        return conn;
+        Connection c = conn; // one read: a concurrent close() nulling the field must not NPE here
+        if (c == null || c.isClosed()) {
+            c = openConnection(urls.get(urlIndex));
+            conn = c;
+            if (closed) {
+                // close() ran while we were connecting; without this the new connection is
+                // unreachable and never closed -- one leaked FE connection per stop-during-poll.
+                closeQuietly();
+                throw new SQLException("FE connection is closed");
+            }
+        }
+        return c;
     }
 
     /** Arrow Flight already streams RecordBatches, and its contract here is not ours to assume. */
@@ -165,9 +178,10 @@ final class FeConnection implements AutoCloseable {
     }
 
     void closeQuietly() {
-        if (conn != null) {
+        Connection c = conn;
+        if (c != null) {
             try {
-                conn.close();
+                c.close();
             } catch (SQLException ignored) {
                 // close() contract is silent per the interface
             }
@@ -175,8 +189,10 @@ final class FeConnection implements AutoCloseable {
         }
     }
 
+    /** Terminal, unlike {@link #closeQuietly}: rotation and broken-connection recovery reopen. */
     @Override
     public void close() {
+        closed = true;
         closeQuietly();
     }
 

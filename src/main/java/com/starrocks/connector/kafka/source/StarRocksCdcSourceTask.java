@@ -58,6 +58,9 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class StarRocksCdcSourceTask extends SourceTask {
 
+    /** Stand-in lease when the server answers "no expiry", so renewal re-probes every third of it. */
+    private static final long NO_EXPIRY_REPROBE_LEASE_MS = 900_000L;
+
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceTask.class);
 
     static final class TableState {
@@ -85,7 +88,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // -1 = no successful round yet, so the first runs whatever the clock reads. A sentinel
         // rather than 0, which would depend on the clock's origin being far from zero.
         long lastRenewMs = -1L;
-        // The lease the server granted: -1 until one is known, 0 once it answers "no expiry".
+        // The lease the server granted: -1 until one is known, then always positive.
         long effectiveTtlMs = -1L;
         // Failure backoff, so a cluster without bookmark_renew is not retried on every poll:
         // executeOnLeader's retries would put ~1s of sleep per bookmark per poll on this thread.
@@ -103,6 +106,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     private String db;
     private String holder;
     private long ttlMs;
+    private long monotonicOriginNanos = Long.MIN_VALUE;
     private long pollIntervalMs;
     private boolean snapshotInitial;
     private boolean tombstones;
@@ -284,10 +288,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
     /**
      * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
      * a real TTL. Wall time would let a backward clock step stretch an interval past the very lease
-     * it paces, and the server enforces that lease on its own clock regardless.
+     * it paces, and the server enforces that lease on its own clock regardless. Measured from the
+     * first reading, because nanoTime's origin is arbitrary and may be negative -- which would sink
+     * {@code lastRenewMs} below the {@code -1} sentinel and disable the pacing gate outright.
      */
     long monotonicMs() {
-        return System.nanoTime() / 1_000_000L;
+        long n = nanoTime();
+        if (monotonicOriginNanos == Long.MIN_VALUE) {
+            monotonicOriginNanos = n;
+        }
+        return (n - monotonicOriginNanos) / 1_000_000L;
+    }
+
+    /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
+    long nanoTime() {
+        return System.nanoTime();
     }
 
     /** Overridden in tests so idle polls do not really sleep. */
@@ -315,9 +330,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * a bookmark that is really gone still surfaces at the next CHANGES read.
      */
     private void renewLiveBookmarks(TableState t) {
-        if (t.effectiveTtlMs == 0) {
-            return;
-        }
         long lease = t.effectiveTtlMs > 0 ? t.effectiveTtlMs : ttlMs;
         long now = monotonicMs();
         if (t.lastRenewMs >= 0 && now - t.lastRenewMs < lease / 3) {
@@ -364,7 +376,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // seconds while a cluster without bookmark_renew converges to the pre-renewal cadence.
         if (anyRenewed) {
             // The ceiling is mutable, so one round's grants need not agree; the shortest binds.
-            t.effectiveTtlMs = roundLease > 0 ? roundLease : 0;
+            // A -1 grant means the ceiling is unset *right now*, and that config is mutable: latching
+            // renewal off would lose every position the moment an operator sets one. Re-probe slowly.
+            t.effectiveTtlMs = roundLease > 0 ? roundLease : NO_EXPIRY_REPROBE_LEASE_MS;
             t.lastRenewMs = now;
             t.renewBackoffMs = 0;
         } else {

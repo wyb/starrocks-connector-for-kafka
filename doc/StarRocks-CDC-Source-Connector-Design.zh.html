@@ -721,7 +721,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <code>committedBookmark</code>——ack 滞后时旧窗口的引用同样在计时）调 <code>bookmark_renew</code>。</p>
 <ul>
   <li><strong>节奏取服务端授予的租约的 1/3</strong>，不是配置值：真正决定过期的是
-      <code>min(配置值, bookmark_reference_max_ttl_ms)</code>，而集群上限对客户端不可见，
+      两者中较小的一个（任一侧 <code>&lt;= 0</code> 按不限处理），而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变，
       <code>bookmark_renew</code> 因此把生效值作为返回值带回。</li>
   <li><strong>只有成功的轮次推进节奏时钟</strong>；全失败的轮次从一个 poll 间隔起步指数退避（租约未知时封顶一分钟，已知后封顶租约/3），
       瞬时故障秒级重试，没有 <code>bookmark_renew</code> 的旧集群渐近回到无续期时的节奏。</li>

@@ -22,10 +22,15 @@ package com.starrocks.connector.kafka.source;
 
 import org.junit.Test;
 
+import java.sql.SQLException;
 import java.util.Arrays;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertTrue;
+import static org.junit.Assert.fail;
 
 /**
  * URL fan-out is the whole transport switch: {@code starrocks.jdbc.url} carries no separate
@@ -33,6 +38,31 @@ import static org.junit.Assert.assertEquals;
  * MySQL-only streaming knobs apply.
  */
 public class FeConnectionTest {
+
+    /**
+     * {@code stop()} is the one call the Connect runtime may make off the poll thread, and it lands
+     * on {@code close()}. A later {@code get()} must refuse rather than open a connection that the
+     * already-finished {@code stop()} can no longer close.
+     */
+    @Test
+    public void testCloseIsTerminalAndDoesNotReopen() {
+        Map<String, String> props = new HashMap<>();
+        props.put(StarRocksCdcSourceConfig.JDBC_URL, "jdbc:mysql://127.0.0.1:1");
+        props.put(StarRocksCdcSourceConfig.DATABASE_NAME, "db1");
+        props.put(StarRocksCdcSourceConfig.USERNAME, "root");
+        props.put(StarRocksCdcSourceConfig.PASSWORD, "");
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders");
+        props.put("name", "c1");
+        FeConnection fe = new FeConnection(new StarRocksCdcSourceConfig(props));
+        fe.close();
+        try {
+            fe.get();
+            fail("get() after close() must not hand back a connection");
+        } catch (SQLException e) {
+            assertTrue("expected a closed-state refusal, not a driver dial-out: " + e.getMessage(),
+                    e.getMessage().contains("closed"));
+        }
+    }
 
     /** jdbc:mysql is rewritten to jdbc:mariadb, because that is the driver actually bundled. */
     @Test
