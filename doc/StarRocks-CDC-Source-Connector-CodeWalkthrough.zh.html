@@ -293,7 +293,7 @@ if (state.snapshotDone) {
 <p><strong>全失败的轮次不能推进节奏时钟。</strong>推进了，就等于按配置 TTL 的三分之一再试——集群上限压到 1 小时而配置 7 天时，一次瞬时失败换 56 小时的空窗，引用早被清扫了。退避负责限制重试频率，时钟只认成功。</p>
 <p><strong>续租失败不触发 <code>nontrackable.policy</code>。</strong>要提前判定"位点已丢"就只能匹配 FE 的异常文案，还会让恢复入口从一处变成两处。续租的职责是<em>阻止过期</em>，不是<em>检测过期</em>；真丢了仍由下一次 CHANGES 读经 <code>classify</code> 走既有策略。</p>
 </div>
-<p>覆盖整个 <code>liveBookmarks</code> 而不只是 <code>committedBookmark</code>：消费端停滞时旧窗口的 bookmark 会长期滞留在保留集里，它们的租约同样在跑。</p>
+<p>只续<strong>最老</strong>和<strong>最新</strong>两个，而不是整个 <code>liveBookmarks</code>：最老的定住 vacuum 地板（fence 升序遍历取第一个命中，更新的版本靠传递性保留）并且是重启恢复点，最新的是下一次 CHANGES 读的 base。中间那些 ack 水位可能永远够不到，全续会把它们钉住到 task 结束——而续租出现之前，正是 TTL 在回收它们。</p>
 
 <h4>applyPolicy(t, e)</h4>
 <p><code>policy=resnapshot</code> → 记 WARN，把表打回 fresh（<code>snapshotDone=false</code>、<code>committedBookmark=-1</code>），下次 poll 重做快照。<strong>不动 <code>liveBookmarks</code></strong>——刚才那次失败的窗口所开的 bookmark 在服务端是真实存在的，仍归 <code>commit()</code> 的规则和 TTL 管。<br><code>policy=fail</code> → 记 ERROR 并抛 <code>ConnectException</code>。</p>

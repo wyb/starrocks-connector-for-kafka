@@ -311,9 +311,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Refreshes every bookmark the table holds -- not only {@code committedBookmark}, since the
-     * others stay pinned and ageing while acks lag. Without this an idle table loses its position:
-     * {@code bookmarkCreate} returns the same id on an unchanged table without moving the lease.
+     * Refreshes the oldest and newest bookmark the table holds -- not only {@code committedBookmark},
+     * since the oldest is both the vacuum floor and the restart point and ages while acks lag.
+     * Without this an idle table loses its position: {@code bookmarkCreate} returns the same id on
+     * an unchanged table without moving the lease.
      *
      * <p>Paced off the lease the server granted, never {@code source.bookmark.ttlms}: a
      * cluster-side ceiling can cap it, and a non-positive ttlms drops only the per-reference
@@ -338,9 +339,22 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (t.renewBackoffMs > 0 && now - t.lastRenewAttemptMs < t.renewBackoffMs) {
             return;
         }
-        List<Long> held;
-        synchronized (t.liveBookmarks) {
-            held = new ArrayList<>(t.liveBookmarks); // copy: commit() wants this monitor back
+        List<Long> held = new ArrayList<>(2);
+        synchronized (t.liveBookmarks) { // brief: commit() wants this monitor back
+            // Two ids carry the whole guarantee. The oldest sets the vacuum floor -- the fence walks
+            // bookmarks ascending and stops at the first match, so every newer version is retained
+            // behind it -- and it is also where a restart resumes. The newest is the base of the next
+            // CHANGES read. Renewing the ids between them would pin them for the life of the task:
+            // the ack fence may never reach them, and before renewal existed the TTL was what
+            // eventually reclaimed those.
+            Long oldest = t.liveBookmarks.peekFirst();
+            Long newest = t.liveBookmarks.peekLast();
+            if (oldest != null) {
+                held.add(oldest);
+            }
+            if (newest != null && !newest.equals(oldest)) {
+                held.add(newest);
+            }
         }
         if (held.isEmpty()) {
             // The first poll runs before bootstrap opens a bookmark; starting the clock on an empty

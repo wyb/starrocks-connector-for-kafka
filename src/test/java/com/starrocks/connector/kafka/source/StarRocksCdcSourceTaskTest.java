@@ -573,7 +573,7 @@ public class StarRocksCdcSourceTaskTest {
 
     /** Older windows stay pinned while acks lag, and their leases run down just like the newest. */
     @Test
-    public void testRenewCoversEveryLiveBookmarkNotJustCommitted() throws Exception {
+    public void testRenewCoversTheOldestAndNewestNotJustCommitted() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
         fake.enqueueHead("orders", 100L);
@@ -593,9 +593,10 @@ public class StarRocksCdcSourceTaskTest {
         fakeNowMs += 900000L / 3;
         task.poll();
 
-        assertEquals(1, renewCountOf(100L));
-        assertEquals(1, renewCountOf(101L));
-        assertEquals(1, renewCountOf(102L));
+        assertEquals("the oldest is the vacuum floor and the restart point", 1, renewCountOf(100L));
+        assertEquals("the newest is the base of the next CHANGES read", 1, renewCountOf(102L));
+        assertEquals("an id the ack fence may never reach must be left to the TTL, not pinned "
+                + "for the life of the task", 0, renewCountOf(101L));
     }
 
     /** A ceiling can cap the lease well below what was asked for, and is readable nowhere else. */
@@ -813,6 +814,27 @@ public class StarRocksCdcSourceTaskTest {
         fakeNowMs += 3000;
         task.poll();
         assertEquals("granted-phase cap is lease/3", 2, renewCountOf(100L));
+    }
+
+    /** The round is O(1) in held bookmarks: an unbounded deque must not become an unbounded round. */
+    @Test
+    public void testRoundSizeDoesNotGrowWithHeldBookmarks() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+        for (long id = 101L; id <= 130L; id++) {
+            fake.enqueueHead("orders", id);
+            fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, id}, 0, 5000L + id));
+            task.poll();
+        }
+        assertEquals(31, liveBookmarksOf(task).size());
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 900000L;
+        task.poll();
+        assertEquals("31 held, 2 renewed: " + fake.renewedBookmarks, 2, fake.renewedBookmarks.size());
     }
 
     /** A partial round stamps the clock: the failed id waits for the next scheduled round. */
