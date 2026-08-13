@@ -79,7 +79,7 @@ public class StarRocksCdcSourceTaskTest {
             }
 
             @Override
-            long currentTimeMillis() {
+            long monotonicMs() {
                 return fakeNowMs;
             }
 
@@ -789,7 +789,7 @@ public class StarRocksCdcSourceTaskTest {
         fakeNowMs += 1;
         task.poll(); // fail -> backoff 40000
         fakeNowMs += 40000;
-        task.poll(); // fail -> backoff would double to 80000, но unknown-phase cap is 60000
+        task.poll(); // fail -> backoff would double to 80000, but the unknown-phase cap is 60000
         assertEquals(2, renewCountOf(100L));
 
         fake.renewedBookmarks.clear();
@@ -837,21 +837,140 @@ public class StarRocksCdcSourceTaskTest {
         assertTrue("a partial round schedules the next one normally", fake.renewedBookmarks.isEmpty());
     }
 
-    /** A non-expiring lease has nothing to outrun; renewing it forever would be pure noise. */
+    /** A 1-2ms lease truncates its own third to zero; the cap floor keeps the gate alive. */
     @Test
-    public void testNoRenewalWhenTheLeaseNeverExpires() throws Exception {
+    public void testSubThreeMillisecondLeaseStillBacksOff() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "2");
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "0");
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+        task.poll(); // same millisecond
+        assertEquals("a zero cap would hammer renewal every poll", 1, renewCountOf(100L));
+    }
+
+    /** {@code poll.intervalms=0} is a legal max-throughput setting; the backoff floor outlives it. */
+    @Test
+    public void testZeroPollIntervalStillBacksOff() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "0");
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+        task.poll(); // same millisecond
+        assertEquals("a zero floor would hammer renewal every poll", 1, renewCountOf(100L));
+    }
+
+    /** Only -1 means "no expiry"; a 0 must not latch renewal off for the life of the task. */
+    @Test
+    public void testZeroGrantIsNotReadAsNoExpiry() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 0L;
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+        fakeNowMs += 60000L;
+        task.poll();
+        assertEquals("a 0 answer must leave renewal running", 2, renewCountOf(100L));
+    }
+
+    /** Grants within a round need not agree -- the shortest one has to set the pace. */
+    @Test
+    public void testRoundPacesOffItsShortestGrant() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        task.poll();
+        assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
+
+        // The longer grant is last, so last-write-wins would pick it and pace 120x too slowly.
+        fake.grantedTtlByBookmark.put(100L, 30000L);
+        fake.grantedTtlByBookmark.put(101L, 3600000L);
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 900000L;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+        assertEquals(1, renewCountOf(101L));
+
+        fake.renewedBookmarks.clear();
+        fakeNowMs += 30000L / 3 - 1;
+        task.poll();
+        assertTrue("the 1h grant must not set the pace", fake.renewedBookmarks.isEmpty());
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals("the shortest grant of the round binds", 1, renewCountOf(100L));
+    }
+
+    /** A non-positive ttl leaves the lease unknown, so the cap must not collapse to zero. */
+    @Test
+    public void testNonPositiveTtlStillBacksOffOnFailure() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "0");
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "1000");
+        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll(); // bootstrap
+
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(1, renewCountOf(100L));
+
+        fakeNowMs += 999;
+        task.poll();
+        assertEquals("a zero cap would retry every poll", 1, renewCountOf(100L));
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(2, renewCountOf(100L));
+    }
+
+    /**
+     * Only the server may end renewal. A non-positive {@code source.bookmark.ttlms} drops the
+     * per-reference limit, not the cluster ceiling that outlives it, so the connector has to ask.
+     */
+    @Test
+    public void testNonPositiveTtlStillRenewsUntilTheServerReportsNoExpiry() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "0");
+        fake.grantedTtlMs = 3600000L; // the cluster ceiling the connector cannot see
         fake.enqueueHead("orders", 100L);
         task.start(props);
         task.poll();
 
-        fakeNowMs += 100000000L;
+        fakeNowMs += 1;
         task.poll();
-        assertTrue("configured ttl<=0 must never renew: " + fake.renewedBookmarks,
-                fake.renewedBookmarks.isEmpty());
+        assertEquals("ttl<=0 leaves the ceiling in force, so renewal must still run", 1, renewCountOf(100L));
 
-        // Same once the server itself reports "no expiry".
+        fakeNowMs += 3600000L / 3 - 1;
+        task.poll();
+        assertEquals("and is then paced off the granted ceiling", 1, renewCountOf(100L));
+        fakeNowMs += 1;
+        task.poll();
+        assertEquals(2, renewCountOf(100L));
+
+        // Renewal stops only once the server itself reports "no expiry".
         FakeCdcClient uncapped = new FakeCdcClient();
         uncapped.setColumns("orders", ORDERS_COLS);
         uncapped.setPrimaryKeys("orders", ORDERS_PKS);

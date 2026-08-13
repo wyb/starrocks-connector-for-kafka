@@ -90,7 +90,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector-refactor</b></span>
     <span>主代码<b>15 个类 / 约 2500 行</b></span>
-    <span>测试<b>131 个</b></span>
+    <span>测试<b>136 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -227,7 +227,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3><span class="fn">StarRocksCdcSourceTask</span><span class="sz">448 行 · 正确性核心</span></h3>
+<h3><span class="fn">StarRocksCdcSourceTask</span><span class="sz">477 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
@@ -243,7 +243,7 @@ for (int i = 0; i &lt; tables.size(); i++)
   <tr><td><code>pendingReleases</code></td><td><code>ConcurrentLinkedQueue</code>，commit 授权、poll 执行</td></tr>
   <tr><td><code>lastRenewMs</code></td><td>上次<strong>成功</strong>续租的时刻。<code>-1</code> = 尚无成功轮次；全失败的轮次不推进它</td></tr>
   <tr><td><code>lastRenewAttemptMs</code> / <code>renewBackoffMs</code></td><td>失败退避：全失败轮次从一个 poll 间隔起步翻倍，租约未知时封顶一分钟、已知后封顶租约/3，成功清零——没有 <code>bookmark_renew</code> 的集群不会被每 poll 热重试</td></tr>
-  <tr><td><code>effectiveTtlMs</code></td><td>服务端<strong>授予</strong>的租约。<code>-1</code> = 尚未得知，<code>0</code> = 服务端答"永不过期"</td></tr>
+  <tr><td><code>effectiveTtlMs</code></td><td>服务端<strong>授予</strong>的租约。<code>-1</code> = 尚未得知，<code>0</code> = 服务端答"永不过期"（仅由 <code>-1</code> 的授予值产生）</td></tr>
 </table>
 </div>
 <p>前三个字段只在 poll 线程上动，无需同步；中间三个由 <code>synchronized (liveBookmarks)</code> 统一保护——注意<strong>两个 long 水位也用这把锁</strong>，不是各自独立的；<code>pendingReleases</code> 自带线程安全；最后两个续租字段同样只在 poll 线程上动。</p>
@@ -280,12 +280,12 @@ if (state.snapshotDone) {
 <h4>renewLiveBookmarks(t) —— 让空闲表不丢位点</h4>
 <p>没有它，一张长期没有新版本的表会在 <code>source.bookmark.ttlms</code> 之后丢掉 base bookmark：<code>bookmarkCreate</code> 在表未变化时返回同一个 id，<strong>但不刷新那个引用的租约</strong>，所以连接器每轮看起来都成功，租约却一直在倒计时。<code>bookmark_renew</code> 是唯一能移动这个时钟的入口。</p>
 <ol>
-  <li>配置 <code>ttlms &lt;= 0</code>，或服务端已答"永不过期"（<code>effectiveTtlMs == 0</code>）→ 直接返回。</li>
+  <li>服务端已答"永不过期"（<code>effectiveTtlMs == 0</code>）→ 直接返回。配置 <code>ttlms &lt;= 0</code> <strong>不</strong>跳过：那只是不设引用级上限，集群上限照样让引用过期。</li>
   <li>未到 <strong>生效租约 / 3</strong> → 返回。<code>lastRenewMs == -1</code>（尚无成功轮次）不受此门限制。</li>
-  <li>处于失败退避窗口内（<code>now - lastRenewAttemptMs &lt; renewBackoffMs</code>）→ 返回。</li>
+  <li>处于失败退避窗口内（<code>now - lastRenewAttemptMs &lt; renewBackoffMs</code>）→ 返回。三个时刻都取自 <code>monotonicMs()</code>，墙钟回拨不会把间隔撑过它所守护的租约。</li>
   <li>锁内只<strong>拷贝</strong> <code>liveBookmarks</code>，出锁再发 SQL——<code>commit()</code> 在另一条线程上等这把锁，跨网络持锁会把它一起堵住。</li>
   <li>拷贝为空则<strong>不推进计时器</strong>：首轮 poll 跑在 <code>bootstrap</code> 之前，那时还没有 bookmark，此时启动时钟会把第一次真正的续租推迟整整一个周期。</li>
-  <li>记下尝试时刻（<code>lastRenewAttemptMs = now</code>），逐个 <code>bookmarkRenew</code>，用返回值更新 <code>effectiveTtlMs</code>（<code>-1</code> 记为 <code>0</code>）。</li>
+  <li>记下尝试时刻（<code>lastRenewAttemptMs = now</code>），逐个 <code>bookmarkRenew</code>。<code>-1</code> 记为 <code>0</code>；<code>0</code> 是契约外的答复，按该次失败处理而不是当成"永不过期"。轮内取<strong>最短</strong>的有限授予值写入 <code>effectiveTtlMs</code>（上限 mutable，同一轮的授予值未必一致）。</li>
   <li><strong>只有续成了至少一个才推进 <code>lastRenewMs</code></strong>；全失败的轮次设退避后由后续 poll 重试。</li>
 </ol>
 <div class="note warn"><span class="tag">三个容易写错的地方</span>
@@ -469,7 +469,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <div class="tablewrap">
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
-  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>27</td><td>三条不变式（释放滞后一个周期、快照崩溃语义、idle dedup）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读与孤儿 bookmark 回归</td></tr>
+  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>32</td><td>三条不变式（释放滞后一个周期、快照崩溃语义、idle dedup）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读与孤儿 bookmark 回归</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>13</td><td>envelope 字段顺序、d/c 拆分、快照 row_version、BINARY 走 BYTES、逻辑类型名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>10</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表</td></tr>
   <tr><td><code>ColumnMetadataReaderTest</code></td><td>13</td><td>类型映射封闭集、LARGEINT 不截断、不可导出类型判定</td></tr>
@@ -483,7 +483,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </table>
 </div>
 
-<h3><span class="fn">FakeCdcClient</span><span class="sz">205 行 · 无 @Test</span></h3>
+<h3><span class="fn">FakeCdcClient</span><span class="sz">211 行 · 无 @Test</span></h3>
 <p class="role">Connector 与 Task 两套测试共用的可编排替身。</p>
 <p><strong>编排输入</strong>：<code>setColumns</code>/<code>setPrimaryKeys</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>/<code>failNextChangesAfterEmitting</code>，外加 <code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>bookmarkCreateFailure</code>、<code>bookmarkRenewFailure</code>、<code>failRenewOfBookmarks</code>、<code>grantedTtlMs</code> 六个可直接写的字段。<code>grantedTtlMs</code> 模拟集群上限：留 null 就原样返回请求值，设值就无视请求值——续租节奏是否真的跟着服务端走，靠它来验。</p>
 <p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>renewedBookmarks</code>、<code>requestedTtls</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>

@@ -281,9 +281,13 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /** Overridden in tests to drive the renewal schedule without waiting out a real TTL. */
-    long currentTimeMillis() {
-        return System.currentTimeMillis();
+    /**
+     * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
+     * a real TTL. Wall time would let a backward clock step stretch an interval past the very lease
+     * it paces, and the server enforces that lease on its own clock regardless.
+     */
+    long monotonicMs() {
+        return System.nanoTime() / 1_000_000L;
     }
 
     /** Overridden in tests so idle polls do not really sleep. */
@@ -297,19 +301,25 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * {@code bookmarkCreate} returns the same id on an unchanged table without moving the lease.
      *
      * <p>Paced off the lease the server granted, never {@code source.bookmark.ttlms}: a
-     * cluster-side ceiling can cap it and is readable nowhere else. A third of it leaves room for
-     * two failed rounds, which is why a failure here only waits for the next.
+     * cluster-side ceiling can cap it, and a non-positive ttlms drops only the per-reference
+     * limit -- the ceiling still expires the bookmark, so renewal runs whatever the config says
+     * and only the grant may stop it. A third of the lease leaves room for two failed rounds:
+     * the first retries on the next poll, and further ones back off.
+     *
+     * <p>A round that renews anything counts as a success, so an id failing beside healthy siblings
+     * retries at lease/3 instead of backing off from a poll interval; fixing that needs per-bookmark
+     * scheduling, and one transient error sparing the siblings on the same connection is unlikely.
      *
      * <p>Never triggers {@code source.nontrackable.policy}. Reading a lost position out of a failed
      * renewal would mean matching FE's exception text and would give recovery a second entry point;
      * a bookmark that is really gone still surfaces at the next CHANGES read.
      */
     private void renewLiveBookmarks(TableState t) {
-        if (ttlMs <= 0 || t.effectiveTtlMs == 0) {
+        if (t.effectiveTtlMs == 0) {
             return;
         }
         long lease = t.effectiveTtlMs > 0 ? t.effectiveTtlMs : ttlMs;
-        long now = currentTimeMillis();
+        long now = monotonicMs();
         if (t.lastRenewMs >= 0 && now - t.lastRenewMs < lease / 3) {
             return;
         }
@@ -327,10 +337,20 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
         t.lastRenewAttemptMs = now;
         boolean anyRenewed = false;
+        long roundLease = -1; // shortest finite grant of this round; -1 until one arrives
         for (Long id : held) {
             try {
                 long granted = client.bookmarkRenew(db, t.table, id, holder, ttlMs);
-                t.effectiveTtlMs = granted < 0 ? 0 : granted;
+                if (granted == 0) {
+                    // -1 is the only "no expiry" the contract defines. Reading a 0 that way would
+                    // stop renewal for the life of the task, silently, so call this one failed.
+                    LOG.warn("Renewal of bookmark {} for {}.{} answered 0, which is not a lease; "
+                            + "a later round retries", id, db, t.table);
+                    continue;
+                }
+                if (granted > 0) {
+                    roundLease = roundLease > 0 ? Math.min(roundLease, granted) : granted;
+                }
                 anyRenewed = true;
             } catch (Exception e) {
                 LOG.warn("Failed to renew bookmark {} for {}.{} (holder {}); a later round retries",
@@ -343,12 +363,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // from one poll interval, doubling up to lease/3, so a transient failure retries within
         // seconds while a cluster without bookmark_renew converges to the pre-renewal cadence.
         if (anyRenewed) {
+            // The ceiling is mutable, so one round's grants need not agree; the shortest binds.
+            t.effectiveTtlMs = roundLease > 0 ? roundLease : 0;
             t.lastRenewMs = now;
             t.renewBackoffMs = 0;
         } else {
-            // Before any grant, `lease` is only the configured guess, so cap the backoff at a
+            // Before any grant, `lease` is only the configured guess -- and a non-positive one
+            // says nothing at all, since the ceiling that will bound it is server-side. Cap at a
             // minute; a third of a 7-day guess would outwait a ceiling-capped lease entirely.
-            long cap = t.effectiveTtlMs > 0 ? lease / 3 : Math.min(lease / 3, 60_000L);
+            long cap = 60_000L;
+            if (t.effectiveTtlMs > 0) {
+                cap = lease / 3;
+            } else if (lease > 0) {
+                cap = Math.min(lease / 3, 60_000L);
+            }
+            cap = Math.max(1L, cap); // a sub-3ms lease truncates to 0 and would disable the gate
             t.renewBackoffMs = Math.min(Math.max(Math.max(1L, pollIntervalMs), t.renewBackoffMs * 2), cap);
         }
     }
