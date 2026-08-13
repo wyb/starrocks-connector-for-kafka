@@ -573,7 +573,7 @@ public class StarRocksCdcSourceTaskTest {
 
     /** Older windows stay pinned while acks lag, and their leases run down just like the newest. */
     @Test
-    public void testRenewCoversTheOldestAndNewestNotJustCommitted() throws Exception {
+    public void testRenewCoversEveryLiveBookmarkNotJustCommitted() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
         fake.enqueueHead("orders", 100L);
@@ -593,10 +593,11 @@ public class StarRocksCdcSourceTaskTest {
         fakeNowMs += 900000L / 3;
         task.poll();
 
-        assertEquals("the oldest is the vacuum floor and the restart point", 1, renewCountOf(100L));
-        assertEquals("the newest is the base of the next CHANGES read", 1, renewCountOf(102L));
-        assertEquals("an id the ack fence may never reach must be left to the TTL, not pinned "
-                + "for the life of the task", 0, renewCountOf(101L));
+        // Any of the three can still become the offset Connect flushes, so any of them can be the
+        // id a restart resumes from; renewing only the ends loses whichever one that turns out to be.
+        assertEquals(1, renewCountOf(100L));
+        assertEquals(1, renewCountOf(101L));
+        assertEquals(1, renewCountOf(102L));
     }
 
     /** A ceiling can cap the lease well below what was asked for, and is readable nowhere else. */
@@ -816,27 +817,6 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals("granted-phase cap is lease/3", 2, renewCountOf(100L));
     }
 
-    /** The round is O(1) in held bookmarks: an unbounded deque must not become an unbounded round. */
-    @Test
-    public void testRoundSizeDoesNotGrowWithHeldBookmarks() throws Exception {
-        Map<String, String> props = baseProps();
-        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
-        fake.enqueueHead("orders", 100L);
-        task.start(props);
-        task.poll();
-        for (long id = 101L; id <= 130L; id++) {
-            fake.enqueueHead("orders", id);
-            fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, id}, 0, 5000L + id));
-            task.poll();
-        }
-        assertEquals(31, liveBookmarksOf(task).size());
-
-        fake.renewedBookmarks.clear();
-        fakeNowMs += 900000L;
-        task.poll();
-        assertEquals("31 held, 2 renewed: " + fake.renewedBookmarks, 2, fake.renewedBookmarks.size());
-    }
-
     /** A partial round stamps the clock: the failed id waits for the next scheduled round. */
     @Test
     public void testPartialRoundStampsTheClock() throws Exception {
@@ -998,9 +978,11 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
         assertEquals("ttl<=0 leaves the ceiling in force, so renewal must still run", 1, renewCountOf(100L));
 
-        fakeNowMs += 3600000L / 3 - 1;
+        // A third of this lease is 20 minutes, but the interval ceiling is what binds: an operator
+        // lowering bookmark_reference_max_ttl_ms must not go unnoticed for a third of a stale lease.
+        fakeNowMs += 300000L - 1;
         task.poll();
-        assertEquals("and is then paced off the granted ceiling", 1, renewCountOf(100L));
+        assertEquals("the interval ceiling paces this, not the 20-minute third", 1, renewCountOf(100L));
         fakeNowMs += 1;
         task.poll();
         assertEquals(2, renewCountOf(100L));
@@ -1012,14 +994,16 @@ public class StarRocksCdcSourceTaskTest {
         uncapped.grantedTtlMs = -1L;
         StarRocksCdcSourceTask other = newTask(uncapped);
         uncapped.enqueueHead("orders", 200L);
-        other.start(baseProps());
+        // Same ttl<=0 config: with no lease from either side there is no third to pace off, and
+        // only the interval ceiling stands between this and a renewal on every poll.
+        other.start(props);
         other.poll();
         fakeNowMs += 1;
         other.poll();  // the server answers "no expiry"
         int afterLearning = uncapped.renewedBookmarks.size();
         assertEquals(1, afterLearning);
 
-        fakeNowMs += 900000L / 3 - 1;
+        fakeNowMs += 300000L - 1;
         other.poll();
         assertEquals("the re-probe is paced, not run on every poll",
                 afterLearning, uncapped.renewedBookmarks.size());

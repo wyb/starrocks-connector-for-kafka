@@ -58,8 +58,14 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class StarRocksCdcSourceTask extends SourceTask {
 
-    /** Stand-in lease when the server answers "no expiry", so renewal re-probes every third of it. */
-    private static final long NO_EXPIRY_REPROBE_LEASE_MS = 900_000L;
+    /**
+     * Ceiling on the renewal interval, whatever the lease says. The cluster ceiling is a mutable
+     * config: a lease learned once goes stale the moment an operator lowers it, and the server
+     * measures the new one from a lease start that may be far older. This bounds how stale that
+     * knowledge gets -- and therefore the shortest ceiling that can be introduced under a running
+     * connector without losing positions.
+     */
+    private static final long RENEW_MAX_INTERVAL_MS = 300_000L;
 
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceTask.class);
 
@@ -311,10 +317,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Refreshes the oldest and newest bookmark the table holds -- not only {@code committedBookmark},
-     * since the oldest is both the vacuum floor and the restart point and ages while acks lag.
-     * Without this an idle table loses its position: {@code bookmarkCreate} returns the same id on
-     * an unchanged table without moving the lease.
+     * Refreshes every bookmark the table holds -- not only {@code committedBookmark}, since the
+     * others stay pinned and ageing while acks lag, and any of them can still become the offset a
+     * restart resumes from. Without this an idle table loses its position: {@code bookmarkCreate}
+     * returns the same id on an unchanged table without moving the lease.
      *
      * <p>Paced off the lease the server granted, never {@code source.bookmark.ttlms}: a
      * cluster-side ceiling can cap it, and a non-positive ttlms drops only the per-reference
@@ -332,29 +338,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
      */
     private void renewLiveBookmarks(TableState t) {
         long lease = t.effectiveTtlMs > 0 ? t.effectiveTtlMs : ttlMs;
+        long pace = lease > 0 ? Math.min(lease / 3, RENEW_MAX_INTERVAL_MS) : RENEW_MAX_INTERVAL_MS;
         long now = monotonicMs();
-        if (t.lastRenewMs >= 0 && now - t.lastRenewMs < lease / 3) {
+        if (t.lastRenewMs >= 0 && now - t.lastRenewMs < pace) {
             return;
         }
         if (t.renewBackoffMs > 0 && now - t.lastRenewAttemptMs < t.renewBackoffMs) {
             return;
         }
-        List<Long> held = new ArrayList<>(2);
-        synchronized (t.liveBookmarks) { // brief: commit() wants this monitor back
-            // Two ids carry the whole guarantee. The oldest sets the vacuum floor -- the fence walks
-            // bookmarks ascending and stops at the first match, so every newer version is retained
-            // behind it -- and it is also where a restart resumes. The newest is the base of the next
-            // CHANGES read. Renewing the ids between them would pin them for the life of the task:
-            // the ack fence may never reach them, and before renewal existed the TTL was what
-            // eventually reclaimed those.
-            Long oldest = t.liveBookmarks.peekFirst();
-            Long newest = t.liveBookmarks.peekLast();
-            if (oldest != null) {
-                held.add(oldest);
-            }
-            if (newest != null && !newest.equals(oldest)) {
-                held.add(newest);
-            }
+        List<Long> held;
+        synchronized (t.liveBookmarks) {
+            // The whole deque, not a chosen subset. Any live bookmark can still become the offset
+            // Connect flushes -- records from its window may be acked at any time -- so any of them
+            // can be the id a restart resumes from. Narrowing this to the head and tail was measured
+            // to lose the durable offset whenever offset.flush.interval.ms reaches the granted lease.
+            held = new ArrayList<>(t.liveBookmarks); // copy: commit() wants this monitor back
         }
         if (held.isEmpty()) {
             // The first poll runs before bootstrap opens a bookmark; starting the clock on an empty
@@ -390,9 +388,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // seconds while a cluster without bookmark_renew converges to the pre-renewal cadence.
         if (anyRenewed) {
             // The ceiling is mutable, so one round's grants need not agree; the shortest binds.
-            // A -1 grant means the ceiling is unset *right now*, and that config is mutable: latching
-            // renewal off would lose every position the moment an operator sets one. Re-probe slowly.
-            t.effectiveTtlMs = roundLease > 0 ? roundLease : NO_EXPIRY_REPROBE_LEASE_MS;
+            // A -1 grant leaves the lease unbounded rather than known, so it stays -1 and the pacing
+            // ceiling above decides the interval -- latching renewal off on it would lose every
+            // position the moment an operator sets a real ceiling.
+            t.effectiveTtlMs = roundLease;
             t.lastRenewMs = now;
             t.renewBackoffMs = 0;
         } else {

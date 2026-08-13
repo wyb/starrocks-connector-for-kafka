@@ -717,10 +717,10 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <h3>3.4 租约续期</h3>
 <p><code>bookmark_create</code> 在表未变化时返回既有 id 但<strong>不刷新其租约</strong>，所以没有续期时，
 空闲超过 <code>source.bookmark.ttlms</code> 的表会丢失位点。每轮 poll 在 <code>drainPendingReleases</code>
-之后调 <code>renewLiveBookmarks(t)</code>：对该表持有的<strong>最老</strong>与<strong>最新</strong>两个
-bookmark 调 <code>bookmark_renew</code>。最老的定住 vacuum 地板（fence 升序取第一个命中，更新的版本靠传递性
-保留）且是重启恢复点；最新的是下一次 CHANGES 读的 base。中间那些不续：ack 水位可能永远够不到它们，全续等于
-把它们钉住到 task 结束，而续租出现之前正是 TTL 在回收它们。</p>
+之后调 <code>renewLiveBookmarks(t)</code>：对该表持有的<strong>每一个</strong> bookmark（不只
+<code>committedBookmark</code>——ack 滞后时旧窗口的引用同样在计时，且其中任何一个都可能成为重启恢复点）调
+<code>bookmark_renew</code>。排期取<strong>授予租约的三分之一与五分钟中较小者</strong>：集群上限是 mutable 配置，
+只按租约排期会让一个已经过时的租约最长 56 小时不被复查。</p>
 <ul>
   <li><strong>节奏取服务端授予的租约的 1/3</strong>，不是配置值：真正决定过期的是
       两者中较小的一个（任一侧 <code>&lt;= 0</code> 按不限处理），而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变，
@@ -729,7 +729,7 @@ bookmark 调 <code>bookmark_renew</code>。最老的定住 vacuum 地板（fence
       瞬时故障秒级重试，没有 <code>bookmark_renew</code> 的旧集群渐近回到无续期时的节奏。</li>
   <li>续租失败不触发 <code>source.nontrackable.policy</code>：位点是否真丢了由下一次 CHANGES 读判定，
       恢复入口保持唯一。</li>
-  <li>续租只在 poll 线程发 SQL；锁内仅取 <code>liveBookmarks</code> 的首尾两个 id。单次 poll 长于租约
+  <li>续租只在 poll 线程发 SQL；锁内仅拷贝 <code>liveBookmarks</code>。单次 poll 长于租约
       （如大表初始快照）时无法续租——见使用指南限制第 1 条。</li>
 </ul>
 
