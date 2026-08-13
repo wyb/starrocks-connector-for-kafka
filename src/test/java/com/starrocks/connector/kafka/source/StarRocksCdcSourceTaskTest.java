@@ -217,6 +217,80 @@ public class StarRocksCdcSourceTaskTest {
     // commit cycle behind, so the fence can never be ahead of what the last flush made durable.
     // ------------------------------------------------------------------
 
+    private static long bookmarkOf(SourceRecord r) {
+        return ((Number) r.sourceOffset().get(OffsetState.KEY_BOOKMARK_ID)).longValue();
+    }
+
+    /**
+     * Connect commits the offset of the longest <em>acked prefix</em> of a source partition, not of
+     * the poll batch. If every record of a window named head, acking the first alone would make the
+     * whole window durable; a crash before the rest were acked dropped them silently -- measured at
+     * 4999 lost rows in a 5000-row window. Only the last record may name head.
+     */
+    @Test
+    public void testOnlyTheLastRecordOfAWindowCarriesHead() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(baseProps());
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders",
+                new FakeCdcClient.ChangeRow(new Object[]{1, 10L}, 0, 5001L),
+                new FakeCdcClient.ChangeRow(new Object[]{2, 20L}, 0, 5002L),
+                new FakeCdcClient.ChangeRow(new Object[]{3, 30L}, 0, 5003L));
+        List<SourceRecord> out = task.poll();
+
+        assertEquals(3, out.size());
+        assertEquals("a partial ack must resume at the window's start", 100L, bookmarkOf(out.get(0)));
+        assertEquals(100L, bookmarkOf(out.get(1)));
+        assertEquals("only the last record proves the window complete", 101L, bookmarkOf(out.get(2)));
+    }
+
+    /** A one-record window has nothing to demote: its only record is also its last. */
+    @Test
+    public void testSingleRecordWindowStillCarriesHead() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(baseProps());
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 10L}, 0, 5001L));
+        List<SourceRecord> out = task.poll();
+        assertEquals(1, out.size());
+        assertEquals(101L, bookmarkOf(out.get(0)));
+    }
+
+    /**
+     * commitRecord takes the max, not the latest. Connect's send callbacks complete out of order,
+     * and with tombstones one delete produces two of them on a single bookmark; taking the latest
+     * would walk the release fence backwards and release a bookmark the durable offset still names.
+     */
+    @Test
+    public void testAckWatermarkTakesTheMaxNotTheLatest() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(baseProps());
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 10L}, 0, 5001L));
+        List<SourceRecord> first = task.poll();
+        fake.enqueueHead("orders", 102L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 20L}, 0, 5002L));
+        List<SourceRecord> second = task.poll();
+        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
+
+        // The later window's callback lands first -- entirely ordinary for a Kafka producer.
+        ack(second);
+        ack(first);
+
+        task.commit();
+        pollToFlushReleases();
+        task.commit();
+        pollToFlushReleases();
+        assertEquals("the watermark must not retreat to the older ack",
+                Collections.singletonList(102L), liveBookmarksOf(task));
+    }
+
     /** Acks every record as Kafka Connect would once its producer send completed. */
     private void ack(List<SourceRecord> records) throws Exception {
         for (SourceRecord r : records) {

@@ -211,6 +211,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 }
                 retain(t, head);
                 final long base = t.committedBookmark;
+                final int windowStart = out.size();
                 client.streamChanges(db, t.table, t.cols, base, head, (row, changeType, rowVersion) -> {
                     SourceRecord r = t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true);
                     out.add(r);
@@ -218,6 +219,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                         out.add(t.mapper.tombstoneFor(r));
                     }
                 });
+                demoteAllButLast(out, windowStart, base);
                 t.committedBookmark = head;
                 LOG.info("Emitted CDC window for {}.{}: bookmark {} -> {}, {} record(s)",
                         db, t.table, base, head, out.size() - emittedBefore);
@@ -313,6 +315,26 @@ public class StarRocksCdcSourceTask extends SourceTask {
     /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
     long nanoTime() {
         return System.nanoTime();
+    }
+
+    /**
+     * Leaves only the window's last record carrying {@code head}; the rest carry {@code base}.
+     *
+     * <p>Connect commits the offset of the longest <em>acked prefix</em> of a source partition, not
+     * of the poll batch, so with every record naming {@code head} an ack of the first alone made the
+     * window durable and a crash dropped the rest -- 4999 of 5000, measured. Naming {@code base}
+     * costs a re-read of the acked prefix instead, bounded by one window.
+     */
+    private static void demoteAllButLast(List<SourceRecord> out, int windowStart, long base) {
+        if (out.size() - windowStart < 2) {
+            return;
+        }
+        Map<String, Object> baseOffset = OffsetState.sourceOffset(base, true);
+        for (int i = windowStart; i < out.size() - 1; i++) {
+            SourceRecord r = out.get(i);
+            out.set(i, new SourceRecord(r.sourcePartition(), baseOffset, r.topic(),
+                    r.keySchema(), r.key(), r.valueSchema(), r.value()));
+        }
     }
 
     /** Overridden in tests so idle polls do not really sleep. */
