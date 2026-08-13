@@ -38,6 +38,22 @@ public class StarRocksCdcSourceConfigTest {
         return m;
     }
 
+    /** 0 hot-loops the FE leader and a negative reaches Thread.sleep; neither may be configurable. */
+    @Test
+    public void testPollIntervalMustBePositive() {
+        for (String bad : new String[] {"0", "-1"}) {
+            Map<String, String> m = base();
+            m.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, bad);
+            try {
+                new StarRocksCdcSourceConfig(m);
+                fail("source.poll.intervalms=" + bad + " must be rejected at startup");
+            } catch (ConfigException expected) {
+                assertTrue(expected.getMessage(), expected.getMessage().contains(
+                        StarRocksCdcSourceConfig.POLL_INTERVALMS));
+            }
+        }
+    }
+
     @Test
     public void testDefaultsApplied() {
         StarRocksCdcSourceConfig c = new StarRocksCdcSourceConfig(base());

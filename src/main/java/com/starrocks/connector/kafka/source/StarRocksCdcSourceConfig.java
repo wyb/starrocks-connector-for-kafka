@@ -151,6 +151,11 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         POLL_INTERVALMS,
                         ConfigDef.Type.LONG,
                         5000L,
+                        // Rejected rather than clamped: 0 turns the poll loop into an unthrottled
+                        // stream of leader-only meta functions, and a negative reaches Thread.sleep,
+                        // whose IllegalArgumentException escapes poll()'s SQLException catch and
+                        // fails the task with a message naming neither the key nor the value.
+                        ConfigDef.Range.atLeast(1L),
                         ConfigDef.Importance.MEDIUM,
                         "The interval, in milliseconds, between successive polls for changes."
                 ).define(

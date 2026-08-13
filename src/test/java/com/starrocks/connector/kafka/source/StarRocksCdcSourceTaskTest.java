@@ -232,6 +232,15 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
     }
 
+    private static boolean warnedPollOutpacesLeaseOf(StarRocksCdcSourceTask task) throws Exception {
+        java.lang.reflect.Field tablesField = StarRocksCdcSourceTask.class.getDeclaredField("tables");
+        tablesField.setAccessible(true);
+        Object state = ((List<?>) tablesField.get(task)).get(0);
+        java.lang.reflect.Field f = state.getClass().getDeclaredField("warnedPollOutpacesLease");
+        f.setAccessible(true);
+        return f.getBoolean(state);
+    }
+
     private static List<Long> liveBookmarksOf(StarRocksCdcSourceTask task) {
         return new ArrayList<>(task.tables.get(0).liveBookmarks);
     }
@@ -817,6 +826,32 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals("granted-phase cap is lease/3", 2, renewCountOf(100L));
     }
 
+    /**
+     * A poll interval at or near the granted lease guarantees a lapse whatever the pacing says,
+     * because a round only runs at the top of a poll. Simulation put the exact boundary at
+     * poll &gt;= lease; warn from a third of it, while attempts still fit.
+     */
+    @Test
+    public void testWarnsOncePerTableWhenPollOutpacesTheLease() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "20000");
+        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
+        fake.grantedTtlMs = 30000L; // 3 * 20000 >= 30000: the poll cannot service this lease
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fakeNowMs += 1;
+        task.poll();
+        assertTrue("the first grant must set the flag", warnedPollOutpacesLeaseOf(task));
+
+        // A grant the poll interval can service leaves the flag alone -- it is one-shot per table.
+        fake.grantedTtlMs = 900000L;
+        fakeNowMs += 300000L;
+        task.poll();
+        assertTrue(warnedPollOutpacesLeaseOf(task));
+    }
+
     /** A partial round stamps the clock: the failed id waits for the next scheduled round. */
     @Test
     public void testPartialRoundStampsTheClock() throws Exception {
@@ -844,7 +879,7 @@ public class StarRocksCdcSourceTaskTest {
     public void testSubThreeMillisecondLeaseStillBacksOff() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "2");
-        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "0");
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "1"); // the smallest the validator allows
         fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
         fake.enqueueHead("orders", 100L);
         task.start(props);
@@ -867,24 +902,6 @@ public class StarRocksCdcSourceTaskTest {
             }
         };
         assertTrue("a negative clock disables the pacing gate", real.monotonicMs() >= 0);
-    }
-
-    /** {@code poll.intervalms=0} is a legal max-throughput setting; the backoff floor outlives it. */
-    @Test
-    public void testZeroPollIntervalStillBacksOff() throws Exception {
-        Map<String, String> props = baseProps();
-        props.put(StarRocksCdcSourceConfig.POLL_INTERVALMS, "0");
-        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTLMS, "900000");
-        fake.bookmarkRenewFailure = new SQLException("synthetic renew failure");
-        fake.enqueueHead("orders", 100L);
-        task.start(props);
-        task.poll(); // bootstrap
-
-        fakeNowMs += 1;
-        task.poll();
-        assertEquals(1, renewCountOf(100L));
-        task.poll(); // same millisecond
-        assertEquals("a zero floor would hammer renewal every poll", 1, renewCountOf(100L));
     }
 
     /** Only -1 means "no expiry"; a 0 must not latch renewal off for the life of the task. */

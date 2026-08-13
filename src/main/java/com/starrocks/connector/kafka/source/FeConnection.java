@@ -46,7 +46,9 @@ import java.util.Properties;
  *
  * <p><b>Not thread-safe.</b> The reused {@link Connection}, the rotation index and any open
  * streaming {@link ResultSet} are plain mutable state, and the MariaDB driver serializes access on
- * one lock. {@code StarRocksCdcSourceTask} keeps all JDBC on the poll thread for this reason.
+ * one lock. {@code StarRocksCdcSourceTask} keeps all JDBC on the poll thread for this reason --
+ * all but {@link #close}, which the runtime may call concurrently; see {@link #get}'s
+ * post-open re-check.
  */
 final class FeConnection implements AutoCloseable {
 

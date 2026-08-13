@@ -62,8 +62,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * Ceiling on the renewal interval, whatever the lease says. The cluster ceiling is a mutable
      * config: a lease learned once goes stale the moment an operator lowers it, and the server
      * measures the new one from a lease start that may be far older. This bounds how stale that
-     * knowledge gets -- and therefore the shortest ceiling that can be introduced under a running
-     * connector without losing positions.
+     * knowledge gets. It is not a safe floor for the ceiling itself: renewal only runs at the top of
+     * a poll, so the largest ceiling still lost after a mid-flight drop measures exactly
+     * {@code poll * ceil(this / poll)} -- 300s aliases to itself only when the poll interval divides
+     * it. A ceiling must clear this interval by at least one poll plus a round trip.
      */
     private static final long RENEW_MAX_INTERVAL_MS = 300_000L;
 
@@ -94,11 +96,13 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // -1 = no successful round yet, so the first runs whatever the clock reads. A sentinel
         // rather than 0, which would depend on the clock's origin being far from zero.
         long lastRenewMs = -1L;
-        // The lease the server granted: -1 until one is known, then always positive.
+        // The lease the server granted, or -1 when unknown or unbounded; a later round may return it to -1.
         long effectiveTtlMs = -1L;
         // Failure backoff, so a cluster without bookmark_renew is not retried on every poll:
         // executeOnLeader's retries would put ~1s of sleep per bookmark per poll on this thread.
         long lastRenewAttemptMs = -1L;
+        // One warning per table, not one per round, when the poll interval cannot service the lease.
+        boolean warnedPollOutpacesLease = false;
         long renewBackoffMs = 0L;
 
         TableState(String table, String topic) {
@@ -322,11 +326,17 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * restart resumes from. Without this an idle table loses its position: {@code bookmarkCreate}
      * returns the same id on an unchanged table without moving the lease.
      *
-     * <p>Paced off the lease the server granted, never {@code source.bookmark.ttlms}: a
-     * cluster-side ceiling can cap it, and a non-positive ttlms drops only the per-reference
-     * limit -- the ceiling still expires the bookmark, so renewal runs whatever the config says
-     * and only the grant may stop it. A third of the lease leaves room for two failed rounds:
-     * the first retries on the next poll, and further ones back off.
+     * <p>Paced off the lease the server granted once one is known, and off
+     * {@code source.bookmark.ttlms} only until then -- a cluster-side ceiling may have capped that
+     * far below, which is what the interval ceiling above guards. A non-positive ttlms drops only
+     * the per-reference limit; the ceiling still expires the bookmark. Nothing stops renewal, not
+     * even a "no expiry" answer, since that ceiling is mutable. A third of the lease leaves room
+     * for two failed rounds: the first retries on the next poll, and further ones back off.
+     *
+     * <p>All of that assumes the poll interval is well under the lease. Renewal runs only at the
+     * top of a poll, so a poll interval at or above the granted lease guarantees a lapse however
+     * the pacing is computed, and so does any single blocking call -- an initial snapshot, a wide
+     * CHANGES window -- that outlasts it.
      *
      * <p>A round that renews anything counts as a success, so an id failing beside healthy siblings
      * retries at lease/3 instead of backing off from a poll interval; fixing that needs per-bookmark
@@ -348,15 +358,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
         List<Long> held;
         synchronized (t.liveBookmarks) {
-            // The whole deque, not a chosen subset. Any live bookmark can still become the offset
-            // Connect flushes -- records from its window may be acked at any time -- so any of them
-            // can be the id a restart resumes from. Narrowing this to the head and tail was measured
-            // to lose the durable offset whenever offset.flush.interval.ms reaches the granted lease.
+            // The whole deque, not a positional subset: commit() releases below the *previous*
+            // cycle's ack watermark, so the durable offset frequently names neither end. A subset
+            // chosen by provenance would be sound -- only a window that returned records can ever
+            // reach the offset store -- but head-and-tail is not that, and it loses the position.
             held = new ArrayList<>(t.liveBookmarks); // copy: commit() wants this monitor back
         }
         if (held.isEmpty()) {
-            // The first poll runs before bootstrap opens a bookmark; starting the clock on an empty
-            // set would push the first real round out by a whole interval.
+            // Nothing to renew before bootstrap opens the first bookmark. Returning here keeps the
+            // attempt clock and the failure backoff from treating "nothing held" as a failed round.
             return;
         }
         t.lastRenewAttemptMs = now;
@@ -387,6 +397,16 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // from one poll interval, doubling up to lease/3, so a transient failure retries within
         // seconds while a cluster without bookmark_renew converges to the pre-renewal cadence.
         if (anyRenewed) {
+            if (roundLease > 0 && !t.warnedPollOutpacesLease && pollIntervalMs * 3 >= roundLease) {
+                // Nothing else reports this: pacing is computed correctly and still cannot run,
+                // because a round only happens at the top of a poll. The lease then lapses with no
+                // signal until the next CHANGES read fails as non-trackable.
+                t.warnedPollOutpacesLease = true;
+                LOG.warn("source.poll.intervalms={} cannot service the {} ms lease granted for {}.{}: "
+                        + "renewal runs only once per poll, so fewer than three attempts fit in a "
+                        + "lease. Lower the poll interval or raise bookmark_reference_max_ttl_ms.",
+                        pollIntervalMs, roundLease, db, t.table);
+            }
             // The ceiling is mutable, so one round's grants need not agree; the shortest binds.
             // A -1 grant leaves the lease unbounded rather than known, so it stays -1 and the pacing
             // ceiling above decides the interval -- latching renewal off on it would lose every
