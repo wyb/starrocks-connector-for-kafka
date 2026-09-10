@@ -19,6 +19,13 @@
                 <exclude>org.apache.kafka.connect.*</exclude>
                 <exclude>org.apache.kafka:connect-api</exclude>
                 <exclude>com.starrocks:starrocks-stream-load-sdk</exclude>
+                <!-- Shaded into the plugin jar already (see the primary shade execution in
+                     pom.xml). Shipping them beside it too puts the same packages in two jars of
+                     one plugin directory, and Connect loads every jar there into one classloader,
+                     so which copy wins is arbitrary. -->
+                <exclude>org.mariadb.jdbc:mariadb-java-client</exclude>
+                <exclude>io.debezium:debezium-core</exclude>
+                <exclude>org.apache.arrow:flight-sql-jdbc-driver</exclude>
             </excludes>
         </dependencySet>
     </dependencySets>
