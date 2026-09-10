@@ -97,20 +97,32 @@ public class StarRocksJdbcClient implements CdcClient {
         return columns.fetchColumns(db, table);
     }
 
+    /**
+     * The key columns of the table, whatever its model. AGG and DUP tables have key columns too --
+     * FE just does not publish them through {@code tables_config.PRIMARY_KEY} -- and using them
+     * puts every row of one key in one Kafka partition, which is what per-key ordering needs. A DUP
+     * key is not unique; the preflight warning says so, because log compaction then is not safe.
+     */
     @Override
-    public List<String> fetchPrimaryKeys(String db, String table) throws SQLException {
-        String raw = fetchTableConfigRow(db, table).primaryKey;
-        List<String> result = new ArrayList<>();
-        if (raw == null || raw.trim().isEmpty()) {
-            return result;
-        }
-        for (String part : raw.split(",")) {
-            String cleaned = stripBackticksAndWhitespace(part);
-            if (!cleaned.isEmpty()) {
-                result.add(cleaned);
+    public List<String> fetchKeyColumns(String db, String table) throws SQLException {
+        String sql = SqlBuilder.keyColumnsSql(db, table);
+        try {
+            Connection c = connection.get();
+            try (Statement stmt = c.createStatement();
+                 ResultSet rs = stmt.executeQuery(sql)) {
+                List<String> result = new ArrayList<>();
+                while (rs.next()) {
+                    String name = rs.getString("COLUMN_NAME");
+                    if (name != null && !name.isEmpty()) {
+                        result.add(name);
+                    }
+                }
+                return result;
             }
+        } catch (SQLException e) {
+            connection.closeIfBroken(e);
+            throw e;
         }
-        return result;
     }
 
     @Override
@@ -223,7 +235,7 @@ public class StarRocksJdbcClient implements CdcClient {
                 if (!rs.next()) {
                     throw new SQLException("table not found: " + db + "." + table);
                 }
-                return new TableConfigRow(rs.getString("TABLE_MODEL"), rs.getString("PRIMARY_KEY"),
+                return new TableConfigRow(rs.getString("TABLE_MODEL"),
                         rs.getString("PROPERTIES"));
             }
         } catch (SQLException e) {
@@ -240,25 +252,12 @@ public class StarRocksJdbcClient implements CdcClient {
         return names;
     }
 
-    private static String stripBackticksAndWhitespace(String s) {
-        StringBuilder sb = new StringBuilder();
-        for (int i = 0; i < s.length(); i++) {
-            char ch = s.charAt(i);
-            if (ch != '`' && !Character.isWhitespace(ch)) {
-                sb.append(ch);
-            }
-        }
-        return sb.toString();
-    }
-
     private static final class TableConfigRow {
         final String tableModel;
-        final String primaryKey;
         final String properties;
 
-        TableConfigRow(String tableModel, String primaryKey, String properties) {
+        TableConfigRow(String tableModel, String properties) {
             this.tableModel = tableModel;
-            this.primaryKey = primaryKey;
             this.properties = properties;
         }
     }

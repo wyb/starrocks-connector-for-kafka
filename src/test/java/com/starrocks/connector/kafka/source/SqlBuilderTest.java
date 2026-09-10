@@ -60,11 +60,28 @@ public class SqlBuilderTest {
         assertEquals("'it\\'s \\\\here'", SqlBuilder.quoteStr("it's \\here"));
     }
 
-    /** PROPERTIES rides the row the model and key already come from, so preflight makes one query. */
+    /** PROPERTIES rides the row the model comes from, so preflight makes one query for both. */
     @Test
     public void testMetadataSql() {
-        assertEquals("SELECT TABLE_MODEL, PRIMARY_KEY, PROPERTIES FROM information_schema.tables_config"
+        assertEquals("SELECT TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = 'db1' AND TABLE_NAME = 't1'", SqlBuilder.tableConfigSql("db1", "t1"));
+    }
+
+    /**
+     * Key columns come from COLUMN_KEY, not from {@code tables_config.PRIMARY_KEY}: FE computes the
+     * key columns of every model but publishes them only for PRIMARY_KEYS and UNIQUE_KEYS, so an AGG
+     * or DUP table would otherwise yield no key and every record would carry a null Kafka key.
+     */
+    @Test
+    public void testKeyColumnsSqlSelectsEveryModelsKeyColumns() {
+        assertEquals("SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
+                + " AND TABLE_NAME = 't1' AND COLUMN_KEY <> '' ORDER BY ORDINAL_POSITION",
+                SqlBuilder.keyColumnsSql("db1", "t1"));
+    }
+
+    @Test
+    public void testKeyColumnsSqlEscapesStringLiterals() {
+        assertTrue(SqlBuilder.keyColumnsSql("d'b", "t1").contains("'d\\'b'"));
     }
 
     /**

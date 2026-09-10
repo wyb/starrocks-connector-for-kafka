@@ -55,13 +55,13 @@ public class ChangeRecordMapperTest {
      * neither column nor table.
      */
     @Test
-    public void testPrimaryKeyColumnMissingFromColumnListIsNamed() {
+    public void testKeyColumnMissingFromColumnListIsNamed() {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("k", Types.INTEGER, 10, 0, false),
                 new ColumnMeta("v", Types.BIGINT, 19, 0, true));
         try {
             new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols, Collections.singletonList("K"));
-            fail("expected a ConnectException naming the unmatched primary key column");
+            fail("expected a ConnectException naming the unmatched key column");
         } catch (ConnectException expected) {
             String message = expected.getMessage();
             assertTrue("should name the column, was: " + message, message.contains("'K'"));
@@ -174,12 +174,13 @@ public class ChangeRecordMapperTest {
     }
 
     /**
-     * A DUP or AGG table has no primary key, so records carry a null Kafka key: round-robin
-     * partitioning, no per-row ordering, and no log compaction. That is the only thing the mapper
-     * can do with no key columns -- the connector warns about it at preflight instead.
+     * With no key columns the mapper can only emit a null Kafka key: round-robin partitioning, no
+     * per-key ordering, no log compaction. Every capturable model has key columns, so this is
+     * reachable only for a table whose key columns could not be read -- a view or an external
+     * table, which preflight refuses before a task ever sees it.
      */
     @Test
-    public void testNoPkTableHasNullKey() {
+    public void testTableWithoutKeyColumnsHasNullKey() {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("k", Types.INTEGER, 10, 0, false),
                 new ColumnMeta("v", Types.BIGINT, 19, 0, true));

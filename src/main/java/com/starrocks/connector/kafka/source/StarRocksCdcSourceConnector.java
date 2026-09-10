@@ -184,13 +184,16 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             }
             // "PRIMARY" itself contains "PRI", so the shorter test alone covers both spellings.
             // UNIQUE above needs two because "UNIQUE_KEYS" does not contain "UNQ".
-            if (!model.contains("PRI")) {
-                // FE fills tables_config.PRIMARY_KEY only for PRIMARY_KEYS and UNIQUE_KEYS, so a
-                // DUP or AGG table yields no key columns and every record goes to Kafka with a null
-                // key: round-robin partitioning, no per-row ordering, and log compaction impossible.
-                LOG.warn("Table {}.{} uses the {} model, which has no primary key, so its records "
-                        + "carry a null Kafka key. Partitioning is round-robin, per-row ordering is "
-                        + "not preserved, and log compaction cannot identify a row.", db, t, model);
+            // AGG needs no warning: rows sharing an aggregate key are folded into one, so the key
+            // identifies a row exactly as a primary key does. DUP's key is a sort key and admits
+            // duplicates, which is fine for partitioning but not for compaction.
+            if (model.contains("DUP")) {
+                LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
+                        + "and are not unique, so several rows can share one Kafka key. Partitioning "
+                        + "and per-key ordering still hold; log compaction does not -- it would drop "
+                        + "rows that are not duplicates, and with {}=true a tombstone would delete "
+                        + "every row sharing the deleted row's key.",
+                        db, t, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
             }
             if (model.contains("PRI")) {
                 if (!client.cdcPropertyEnabled(db, t)) {

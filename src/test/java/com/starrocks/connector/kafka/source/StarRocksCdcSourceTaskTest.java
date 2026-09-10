@@ -61,7 +61,7 @@ public class StarRocksCdcSourceTaskTest {
     private static final List<ColumnMeta> ORDERS_COLS = Arrays.asList(
             new ColumnMeta("id", Types.INTEGER, 10, 0, false),
             new ColumnMeta("amount", Types.BIGINT, 19, 0, true));
-    private static final List<String> ORDERS_PKS = Collections.singletonList("id");
+    private static final List<String> ORDERS_KEYS = Collections.singletonList("id");
 
     private FakeCdcClient fake;
     private StarRocksCdcSourceTask task;
@@ -70,7 +70,7 @@ public class StarRocksCdcSourceTaskTest {
     public void setUp() {
         fake = new FakeCdcClient();
         fake.setColumns("orders", ORDERS_COLS);
-        fake.setPrimaryKeys("orders", ORDERS_PKS);
+        fake.setKeyColumns("orders", ORDERS_KEYS);
         task = newTask(fake);
     }
 
@@ -473,7 +473,7 @@ public class StarRocksCdcSourceTaskTest {
         // oldest live one, must survive: releasing "all but the newest" here would release it.
         FakeCdcClient zeroRowFake = new FakeCdcClient();
         zeroRowFake.setColumns("orders", ORDERS_COLS);
-        zeroRowFake.setPrimaryKeys("orders", ORDERS_PKS);
+        zeroRowFake.setKeyColumns("orders", ORDERS_KEYS);
         Map<Map<String, String>, Map<String, Object>> zeroRowOffsets = new HashMap<>();
         StarRocksCdcSourceTask zeroRowTask = newBareTask(zeroRowFake);
         zeroRowTask.initialize(contextReading(zeroRowOffsets));
@@ -564,7 +564,7 @@ public class StarRocksCdcSourceTaskTest {
     /** A tombstone names its row by key, so a keyless one deletes nothing and is only noise. */
     @Test
     public void testKeylessTableGetsNoTombstone() throws Exception {
-        fake.setPrimaryKeys("orders", Collections.<String>emptyList());
+        fake.setKeyColumns("orders", Collections.<String>emptyList());
         fake.enqueueHead("orders", 100L);
         task.start(tombstoneProps());
         task.poll();
@@ -1232,7 +1232,7 @@ public class StarRocksCdcSourceTaskTest {
         // A -1 answer is only true of the ceiling as it stands, so re-probing continues.
         FakeCdcClient uncapped = new FakeCdcClient();
         uncapped.setColumns("orders", ORDERS_COLS);
-        uncapped.setPrimaryKeys("orders", ORDERS_PKS);
+        uncapped.setKeyColumns("orders", ORDERS_KEYS);
         uncapped.grantedTtlMs = -1L;
         StarRocksCdcSourceTask other = newTask(uncapped);
         uncapped.enqueueHead("orders", 200L);
@@ -1291,7 +1291,7 @@ public class StarRocksCdcSourceTaskTest {
     /** Registers a second table on the shared fake so a two-table task can start. */
     private void addItemsTable() {
         fake.setColumns("items", ORDERS_COLS);
-        fake.setPrimaryKeys("items", ORDERS_PKS);
+        fake.setKeyColumns("items", ORDERS_KEYS);
     }
 
     /** Both tables bootstrapped at their first bookmark, emitting nothing. */
@@ -1400,7 +1400,7 @@ public class StarRocksCdcSourceTaskTest {
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders,items");
         props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders,items");
         fake.setColumns("items", ORDERS_COLS);
-        fake.setPrimaryKeys("items", ORDERS_PKS);
+        fake.setKeyColumns("items", ORDERS_KEYS);
         fake.enqueueHead("orders", 100L);
         fake.enqueueHead("items", 500L);
         task.start(props);
@@ -1504,7 +1504,7 @@ public class StarRocksCdcSourceTaskTest {
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders,items");
         props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders,items");
         fake.setColumns("items", ORDERS_COLS);
-        fake.setPrimaryKeys("items", ORDERS_PKS);
+        fake.setKeyColumns("items", ORDERS_KEYS);
         fake.enqueueHead("orders", 100L);
         fake.enqueueHead("items", 500L);
         task.start(props);

@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>15 个类 / 约 3000 行</b></span>
-    <span>测试<b>178 个</b></span>
+    <span>测试<b>180 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -194,7 +194,7 @@
 <pre><code>Connector.start()      preflight，每张表查表模型/CDC 属性/列，探测 bookmark 函数
 Connector.taskConfigs() 表按 round-robin 切给 task
   ↓
-Task.start()           每表 fetchColumns + fetchPrimaryKeys，建 ChangeRecordMapper，
+Task.start()           每表 fetchColumns + fetchKeyColumns，建 ChangeRecordMapper，
                        从 offset store 恢复位点（restoreOffset）
   ↓
 Task.poll()            drainPendingReleases → renewLiveBookmarks → bookmarkCreate
@@ -212,7 +212,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">318 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">321 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -223,9 +223,17 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
     <li><code>fetchTableModel</code> 为空（<code>null</code> 或空串）→ <strong>直接拒绝</strong>。视图、物化视图、外表不是 <code>OlapTable</code>，<code>InformationSchemaDataSource</code> 不会给它们设 <code>table_model</code>，BE 把未设置的 thrift 字段填成 <code>""</code>——所以"未知"长得像空串而不是 null。把它当放行会让后面每一项检查都通过，表最终死在 <code>bookmark_create</code>。</li>
 <li><code>fetchTableModel</code> → 含 <code>UNQ</code> 或 <code>UNIQUE</code> 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。两种拼写都匹配，因为 FE 实际发 <code>UNIQUE_KEYS</code>，而文档里写的是 <code>UNQ_KEYS</code>；主键那一侧只需一个子串——<code>"PRIMARY"</code> 本身就含 <code>"PRI"</code>。</li>
   <li>含 <code>PRI</code> → 再查 <code>cdcPropertyEnabled</code>，未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
+  <li>含 <code>DUP</code> → 记一条 WARN，见下。<code>AGG</code> 与 <code>PRI</code> 都不警告。</li>
   <li><code>fetchColumns</code> 遍历每列，三项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；<code>isUnrecognized</code> 为真（类型名不在 <code>KNOWN_DATA_TYPES</code> 封闭集里）则记 WARN 但放行——文本能保住值，只是说明 StarRocks 长出了本连接器没听说过的类型。</li>
 </ol>
 <p>整段包在 <code>try/catch (SQLException)</code> 里，任何 SQL 异常都包成 <code>ConnectException</code> 并带上表名——包括"表不存在"。</p>
+
+<div class="note warn">
+  <span class="tag">四种模型的 key 列都用得上，但只有 DUP 的不唯一</span>
+  <p>Kafka key 决定分区，所以<strong>同 key 的行进同一分区</strong>是保住每个 key 内部顺序的前提。四种模型都有 key 列，FE 也都算了出来，只是 <code>tables_config.PRIMARY_KEY</code> 只对 PRI/UNI 发布；<code>information_schema.columns.COLUMN_KEY</code> 则对每个 key 列填上模型标签（<code>PRI</code>/<code>AGG</code>/<code>DUP</code>/<code>UNI</code>），所以连接器改从那里取。</p>
+  <p>语义上分三档：<strong>PRI</strong> 主键唯一；<strong>AGG</strong> 同 key 的行被聚合成一行，key 同样唯一，因此不警告；<strong>DUP</strong> 的 key 是排序键、<strong>明确允许重复</strong>，多行可以共用一个 Kafka key。分区和每 key 顺序不受影响，但<strong>日志压缩会删掉本不是重复的行</strong>，而且开了 <code>source.tombstones.on.delete</code> 时一条墓碑会连带删掉所有同 key 的行。所以 DUP 记 WARN，不拒绝。</p>
+  <p><code>UNIQUE</code> 模型在更早一步就被拒了——CHANGES 读不了它。</p>
+</div>
 
 <div class="note warn">
   <span class="tag">probeBookmarkFunctions 的 holder 必须独立</span>
@@ -296,7 +304,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 <p>只有 <code>liveBookmarks</code> 在监视器下：commit 线程在里面挑出低于围栏的 id，poll 线程在里面追加、并为续租取快照。<code>committedBookmark</code> 用 <code>volatile</code> 而不进监视器，因为读它的那一步（<code>Math.min</code>）不需要与 deque 的修改原子。<code>pendingReleases</code> 自带线程安全，其余字段只在 poll 线程上动。</p>
 
 <h4>start(props)</h4>
-<p>读配置 → 建 client → 解析 <code>task.tables</code> → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、<code>fetchPrimaryKeys</code>、建 mapper）→ 从 <code>context.offsetStorageReader()</code> 读回位点交给 <code>restoreOffset</code>。</p>
+<p>读配置 → 建 client → 解析 <code>task.tables</code> → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、<code>fetchKeyColumns</code>、建 mapper）→ 从 <code>context.offsetStorageReader()</code> 读回位点交给 <code>restoreOffset</code>。</p>
 <p><code>context</code> 为 null 时（单测直接 new 一个 task）每张表都按首次运行处理，这是刻意留的口子。</p>
 
 <h4>restoreOffset(t, raw)</h4>
@@ -326,7 +334,7 @@ if (state.snapshotDone) {
   <span class="tag">墓碑只跟真删除，不跟 UPDATE 的前半截</span>
   <p>BE 的契约是：<code>__CHANGE_TYPE__</code> 的 <code>1</code> 表示<em>行的 before 值</em>——删除给一条 <code>1</code>，而<strong>更新给的是同一个 <code>__ROW_VERSION__</code> 上的 <code>1</code>（before）加 <code>0</code>（after）</strong>。所以"是 DELETE 就发墓碑"会给每一次 UPDATE 也发一条，而墓碑是<strong>破坏性信号</strong>：compacted topic 据此丢 key，KTable 据此删条目，开了 <code>delete.enabled</code> 的 JDBC sink 据此发 DELETE。后面的 <code>c</code> 会把状态修回来，但中间存在一个所有下游都看得见的假删除。</p>
   <p>判据是<strong>同一 key 在同一 row version 上有没有对应的 insert</strong>：有就是更新的一半，不发。同一次 publish 内删了又插，BE 只暴露两个端点，语义上也是更新，同样不发；跨版本的删除后重插是真删过，照发。</p>
-  <p><code>key</code> 为 null（无主键表）一律不发：墓碑靠 key 认行，没有 key 就删不掉任何东西，只是噪音。</p>
+  <p><code>key</code> 为 null 一律不发：墓碑靠 key 认行，没有 key 就删不掉任何东西，只是噪音。</p>
 </div>
 
 <div class="note warn">
@@ -400,11 +408,11 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h3 id="CdcClient"><span class="fn">CdcClient</span><span class="sz">87 行</span></h3>
 <p class="role">10 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
-<p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchPrimaryKeys</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余四个（<code>bookmarkCreate</code>、<code>bookmarkRelease</code>、<code>fetchColumns</code>、<code>close</code>）两边都用。</p>
+<p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchKeyColumns</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余四个（<code>bookmarkCreate</code>、<code>bookmarkRelease</code>、<code>fetchColumns</code>、<code>close</code>）两边都用。</p>
 <p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
-<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">265 行</span></h3>
+<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">264 行</span></h3>
 <p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
 
 <div class="tablewrap">
@@ -414,7 +422,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>bookmarkRenew</code></td><td>同样走 <code>executeOnLeader</code>，把返回的生效 TTL 解析成 long；null/非数字同 <code>bookmarkCreate</code> 转 <code>SQLException</code></td></tr>
   <tr><td><code>bookmarkRelease</code></td><td>一行转发</td></tr>
   <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetadataReader</code></td></tr>
-  <tr><td><code>fetchPrimaryKeys</code></td><td>读 <code>tables_config.PRIMARY_KEY</code>，逗号切分，逐个 <code>stripBackticksAndWhitespace</code></td></tr>
+  <tr><td><code>fetchKeyColumns</code></td><td>读 <code>information_schema.columns</code> 里 <code>COLUMN_KEY &lt;&gt; ''</code> 的列，按 <code>ORDINAL_POSITION</code> 排序。<strong>不读 <code>tables_config.PRIMARY_KEY</code></strong>——FE 算出了每种模型的 key 列却只对 PRI/UNI 发出来（<code>InformationSchemaDataSource:343-351</code>），AGG 和 DUP 会拿到空串</td></tr>
   <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；三个方法共用 <code>fetchTableConfigRow</code></td></tr>
   <tr><td><code>cdcPropertyEnabled</code></td><td>同一行的 <code>PROPERTIES</code>——FE 用 <code>new Gson().toJson(genProps(table))</code> 写出（<code>InformationSchemaDataSource</code>），是 JSON 对象，所以按 key 取而不是在 <code>SHOW CREATE TABLE</code> 文本里做子串匹配（那个格式取决于 FE <code>PrintableMap</code> 的引号与空格，变了就静默失配）。<strong>读不出来一律抛</strong>，不能答 false——那会让 preflight 叫运维去开一个已经开着的属性</td></tr>
   <tr><td><code>streamSnapshot</code></td><td>建 statement → <code>applyStreamingFetchSize</code> → 每行 <code>extractRow</code> 回调；异常先 <code>classify</code>——快照钉住的 bookmark 在长扫描中同样会被 drop/重写/reshard，原样抛出会让 <code>policy=resnapshot</code> 对整个快照阶段失效</td></tr>
@@ -475,7 +483,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会用 JVM 默认时区，本地午夜的 <code>java.sql.Date</code> 会让 converter 在 Connect 的 Date 逻辑类型上抛异常，Timestamp 则静默偏移。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
 <p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
 
-<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">118 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">61 行</span></h3>
+<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">130 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">61 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
 <p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
 <p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
@@ -483,7 +491,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="mapper"><span class="no">5</span>记录映射</h2>
 
-<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">314 行</span></h3>
+<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">315 行</span></h3>
 <p class="role">纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，所以极易测试。</p>
 
 <h4>构造函数：所有 schema 只建一次</h4>
@@ -539,12 +547,12 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>49</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
-  <tr><td><code>ChangeRecordMapperTest</code></td><td>13</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、结构化文本的逻辑类型名、无主键表 key 为 null、墓碑复用 key 与 offset、主键列不在列清单时点名</td></tr>
+  <tr><td><code>ChangeRecordMapperTest</code></td><td>13</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、结构化文本的逻辑类型名、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>ColumnMetadataReaderTest</code></td><td>13</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 不截断、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>11</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
-  <tr><td><code>SqlBuilderTest</code></td><td>8</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
+  <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>RowExtractorTest</code></td><td>7</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列</td></tr>
   <tr><td><code>StarRocksJdbcClientTest</code></td><td>4</td><td>全部四条都在 <code>changeDataCaptureEnabled</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
@@ -556,7 +564,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h3 id="FakeCdcClient"><span class="fn">FakeCdcClient</span><span class="sz">256 行 · 无 @Test</span></h3>
 <p class="role">Connector 与 Task 两套测试共用的可编排替身。</p>
-<p><strong>编排输入</strong>：七个方法——<code>setColumns</code>/<code>setPrimaryKeys</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>/<code>failNextChangesAfterEmitting</code>；外加可直接写的字段：<code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>colsByTable</code>，全局的 <code>bookmarkCreateFailure</code>/<code>bookmarkRenewFailure</code>，按表的 <code>changesFailureByTable</code>/<code>snapshotFailureByTable</code>（在回放完排好的行<em>之后</em>抛一次 <code>SQLException</code>，所以能编排出真正的半截窗口，让一张坏表挨着健康的表），<code>nonTrackableMessage</code>，以及续租那一组 <code>failRenewOfBookmarks</code>/<code>grantedTtlMs</code>/<code>grantedTtlByBookmark</code>。<code>grantedTtlMs</code> 模拟集群上限：留 null 就原样返回请求值，设值就无视请求值——续租节奏是否真的跟着服务端走，靠它来验；<code>grantedTtlByBookmark</code> 让同一轮里不同 id 拿到不同租约。</p>
+<p><strong>编排输入</strong>：七个方法——<code>setColumns</code>/<code>setKeyColumns</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>/<code>failNextChangesAfterEmitting</code>；外加可直接写的字段：<code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>colsByTable</code>，全局的 <code>bookmarkCreateFailure</code>/<code>bookmarkRenewFailure</code>，按表的 <code>changesFailureByTable</code>/<code>snapshotFailureByTable</code>（在回放完排好的行<em>之后</em>抛一次 <code>SQLException</code>，所以能编排出真正的半截窗口，让一张坏表挨着健康的表），<code>nonTrackableMessage</code>，以及续租那一组 <code>failRenewOfBookmarks</code>/<code>grantedTtlMs</code>/<code>grantedTtlByBookmark</code>。<code>grantedTtlMs</code> 模拟集群上限：留 null 就原样返回请求值，设值就无视请求值——续租节奏是否真的跟着服务端走，靠它来验；<code>grantedTtlByBookmark</code> 让同一轮里不同 id 拿到不同租约。</p>
 <p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>renewedBookmarks</code>、<code>requestedTtls</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>
 <p><code>bookmarkCreate</code> 的三段逻辑值得留意：队列非空就出队；队列空但见过该表就<strong>重复上次的值</strong>（这就是 idle dedup 的模拟）；从没编排过就用自增计数器（Connector 的 preflight 探针走这条）。</p>
 

@@ -96,8 +96,20 @@ public final class SqlBuilder {
      * {@code Gson().toJson(table.getProperties())}), which is why the CDC property is read from here
      * rather than matched in {@code SHOW CREATE TABLE} text.
      */
+    /**
+     * The key columns of any table model, in declaration order. {@code tables_config.PRIMARY_KEY} is
+     * not usable here: FE computes the key columns for every model but publishes them only for
+     * PRIMARY_KEYS and UNIQUE_KEYS, leaving AGG and DUP tables with an empty string. {@code
+     * COLUMN_KEY} carries the model's own tag (PRI/AGG/DUP/UNI) on each key column instead.
+     */
+    public static String keyColumnsSql(String db, String table) {
+        return "SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
+                + " AND TABLE_NAME = " + quoteStr(table) + " AND COLUMN_KEY <> ''"
+                + " ORDER BY ORDINAL_POSITION";
+    }
+
     public static String tableConfigSql(String db, String table) {
-        return "SELECT TABLE_MODEL, PRIMARY_KEY, PROPERTIES FROM information_schema.tables_config"
+        return "SELECT TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = " + quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
     }
 

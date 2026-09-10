@@ -68,22 +68,22 @@ public final class ChangeRecordMapper {
     private final String table;
     private final String topic;
     private final List<ColumnMeta> cols;
-    private final List<String> pkCols;
+    private final List<String> keyCols;
     private final Map<String, Integer> colIndexByName;
 
     private final Schema rowSchema;
-    private final Schema keySchema; // null when pkCols is empty
+    private final Schema keySchema; // null when keyCols is empty
     private final Schema bookmarkSchema;
     private final Schema sourceSchema;
     private final Envelope envelope;
 
     public ChangeRecordMapper(String db, String table, String topic,
-                              List<ColumnMeta> cols, List<String> pkCols) {
+                              List<ColumnMeta> cols, List<String> keyCols) {
         this.db = db;
         this.table = table;
         this.topic = topic;
         this.cols = cols;
-        this.pkCols = pkCols;
+        this.keyCols = keyCols;
 
         this.colIndexByName = new HashMap<>();
         for (int i = 0; i < cols.size(); i++) {
@@ -91,7 +91,7 @@ public final class ChangeRecordMapper {
         }
 
         this.rowSchema = buildRowSchema();
-        this.keySchema = pkCols.isEmpty() ? null : buildKeySchema();
+        this.keySchema = keyCols.isEmpty() ? null : buildKeySchema();
         this.bookmarkSchema = SchemaBuilder.struct()
                 .name(topic + ".Bookmark")
                 .field(FIELD_BASE, Schema.INT64_SCHEMA)
@@ -185,22 +185,23 @@ public final class ChangeRecordMapper {
             return null;
         }
         Struct key = new Struct(keySchema);
-        for (String pkCol : pkCols) {
-            int idx = indexOf(pkCol);
+        for (String keyCol : keyCols) {
+            int idx = indexOf(keyCol);
             putValue(key, cols.get(idx), row[idx]);
         }
         return key;
     }
 
     /**
-     * The two lists come from different queries ({@code tables_config.PRIMARY_KEY} and the column
-     * metadata) and can disagree, on casing for instance. Unboxing a miss would leave {@code
-     * start()} throwing a bare NPE that names neither column nor table.
+     * The key list and the column list come from two queries against
+     * {@code information_schema.columns} and can still disagree if the table is altered between
+     * them. Unboxing a miss would leave {@code start()} throwing a bare NPE that names neither
+     * column nor table.
      */
-    private int indexOf(String pkCol) {
-        Integer idx = colIndexByName.get(pkCol);
+    private int indexOf(String keyCol) {
+        Integer idx = colIndexByName.get(keyCol);
         if (idx == null) {
-            throw new ConnectException("primary key column '" + pkCol + "' of " + db + "." + table
+            throw new ConnectException("key column '" + keyCol + "' of " + db + "." + table
                     + " is not among the captured columns " + colIndexByName.keySet());
         }
         return idx;
@@ -227,8 +228,8 @@ public final class ChangeRecordMapper {
 
     private Schema buildKeySchema() {
         SchemaBuilder builder = SchemaBuilder.struct().name(topic + ".Key");
-        for (String pkCol : pkCols) {
-            ColumnMeta col = cols.get(indexOf(pkCol));
+        for (String keyCol : keyCols) {
+            ColumnMeta col = cols.get(indexOf(keyCol));
             builder.field(col.name, schemaFor(col));
         }
         return builder.build();

@@ -53,7 +53,7 @@ public interface CdcClient extends AutoCloseable {
 
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException;
 
-    List<String> fetchPrimaryKeys(String db, String table) throws SQLException;
+    List<String> fetchKeyColumns(String db, String table) throws SQLException;
 
     String fetchTableModel(String db, String table) throws SQLException;
 

@@ -44,8 +44,8 @@ import java.util.Set;
  *       {@link #failNextChangesWithNonTrackable} -- then it throws once and leaves them queued.</li>
  *   <li>{@link #changesFailureByTable} and {@link #snapshotFailureByTable} fail one named table
  *       once, leaving the others healthy.</li>
- *   <li>{@link #fetchColumns} and {@link #fetchPrimaryKeys} fall back to a two-column table with no
- *       primary key.</li>
+ *   <li>{@link #fetchColumns} and {@link #fetchKeyColumns} fall back to a two-column table with no
+ *       key columns.</li>
  * </ul>
  */
 final class FakeCdcClient implements CdcClient {
@@ -58,7 +58,7 @@ final class FakeCdcClient implements CdcClient {
     final Map<String, String> modelByTable = new HashMap<>();
     final Map<String, Boolean> cdcEnabledByTable = new HashMap<>();
     final Map<String, List<ColumnMeta>> colsByTable = new HashMap<>();
-    private final Map<String, List<String>> pksByTable = new HashMap<>();
+    private final Map<String, List<String>> keyColsByTable = new HashMap<>();
     private final Map<String, Deque<Long>> queuedHeadsByTable = new HashMap<>();
     private final Map<String, Long> lastHeadByTable = new HashMap<>();
     private final Map<String, List<Object[]>> queuedSnapshotRowsByTable = new HashMap<>();
@@ -100,8 +100,8 @@ final class FakeCdcClient implements CdcClient {
         colsByTable.put(table, cols);
     }
 
-    void setPrimaryKeys(String table, List<String> pks) {
-        pksByTable.put(table, pks);
+    void setKeyColumns(String table, List<String> keyCols) {
+        keyColsByTable.put(table, keyCols);
     }
 
     void enqueueHead(String table, long id) {
@@ -177,9 +177,9 @@ final class FakeCdcClient implements CdcClient {
     }
 
     @Override
-    public List<String> fetchPrimaryKeys(String db, String table) {
-        List<String> pks = pksByTable.get(table);
-        return pks != null ? pks : new ArrayList<>();
+    public List<String> fetchKeyColumns(String db, String table) {
+        List<String> keyCols = keyColsByTable.get(table);
+        return keyCols != null ? keyCols : new ArrayList<>();
     }
 
     @Override

@@ -74,7 +74,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         final String table;
         final String topic;
         List<ColumnMeta> cols;
-        List<String> pks;
+        List<String> keyCols;
         ChangeRecordMapper mapper;
         // volatile: commit() reads it from the offset-committer thread to clamp the fence, while
         // the poll thread writes it. Every other TableState field stays poll-thread-only.
@@ -152,8 +152,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
             for (String t : taskTables) {
                 TableState ts = new TableState(t, config.topicFor(t));
                 ts.cols = client.fetchColumns(db, t);
-                ts.pks = client.fetchPrimaryKeys(db, t);
-                ts.mapper = new ChangeRecordMapper(db, t, ts.topic, ts.cols, ts.pks);
+                ts.keyCols = client.fetchKeyColumns(db, t);
+                ts.mapper = new ChangeRecordMapper(db, t, ts.topic, ts.cols, ts.keyCols);
                 Map<String, Object> raw = reader == null ? null : reader.offset(OffsetState.sourcePartition(db, t));
                 restoreOffset(ts, raw);
                 started.add(ts);
