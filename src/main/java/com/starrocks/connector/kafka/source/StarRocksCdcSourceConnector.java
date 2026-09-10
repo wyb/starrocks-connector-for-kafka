@@ -195,13 +195,12 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                         + "every row sharing the deleted row's key.",
                         db, t, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
             }
-            if (model.contains("PRI")) {
-                if (!client.cdcPropertyEnabled(db, t)) {
-                    throw new ConnectException(
-                            "primary key table " + db + "." + t + " does not have change data capture enabled; "
-                                    + "run: ALTER TABLE " + db + "." + t
-                                    + " SET (\"enable_change_data_capture\" = \"true\")");
-                }
+            // && short-circuits, so cdcPropertyEnabled's query runs only for a primary key table.
+            if (model.contains("PRI") && !client.cdcPropertyEnabled(db, t)) {
+                throw new ConnectException(
+                        "primary key table " + db + "." + t + " does not have change data capture enabled; "
+                                + "run: ALTER TABLE " + db + "." + t
+                                + " SET (\"enable_change_data_capture\" = \"true\")");
             }
             for (ColumnMeta col : client.fetchColumns(db, t)) {
                 // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with

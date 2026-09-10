@@ -92,6 +92,8 @@ final class FakeCdcClient implements CdcClient {
     final List<String> createHolders = new ArrayList<>();
     final List<String> releaseHolders = new ArrayList<>();
     final List<String> streamedWindows = new ArrayList<>();
+    /** Tables whose CDC property was actually probed -- the probe costs one FE round trip. */
+    final List<String> cdcPropertyProbes = new ArrayList<>();
     int snapshotCalls = 0;
 
     private long nextBookmarkId = 1L;
@@ -189,6 +191,7 @@ final class FakeCdcClient implements CdcClient {
 
     @Override
     public boolean cdcPropertyEnabled(String db, String table) {
+        cdcPropertyProbes.add(table);
         Boolean enabled = cdcEnabledByTable.get(table);
         return enabled != null && enabled;
     }

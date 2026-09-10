@@ -264,6 +264,9 @@ public class StarRocksCdcSourceConnectorTest {
 
         assertSame(StarRocksCdcSourceTask.class, connector.taskClass());
         assertSame(StarRocksCdcSourceConfig.CONFIG_DEF, connector.config());
+        // && short-circuits: only a primary key table can lack the CDC property, so probing a DUP
+        // or AGG table would spend an FE round trip per table to learn nothing.
+        assertEquals(Collections.singletonList("t2"), fake.cdcPropertyProbes);
     }
 
     /**
