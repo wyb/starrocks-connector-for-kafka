@@ -175,18 +175,18 @@ step "1. seed StarRocks"
 # cluster confirms the server spells them "array", "map", "struct". 0x0102ff is not valid
 # UTF-8 on purpose -- base64 AQL/.
 sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME,
-                                 flag BOOLEAN, tiny TINYINT,
+                                 flag BOOLEAN, tiny TINYINT, big LARGEINT,
                                  b VARBINARY, j JSON, arr ARRAY<INT>,
                                  m MAP<VARCHAR(10),INT>, s STRUCT<x INT, y VARCHAR(10)>)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
 # Named columns, not positional VALUES: adding a column to the DDL above must not silently
 # shift every literal by one, which is exactly what a positional INSERT does.
-sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, b, j, arr, m, s) VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30],map{'mk':11},row(7,'seven')),
-        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30],map{'mk':22},row(7,'seven')),
-        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30],map{'mk':33},row(7,'seven'));"
-note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/VARBINARY/JSON/ARRAY/MAP/STRUCT (this worker's TZ: $(date +%Z))"
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big, b, j, arr, m, s) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30],map{'mk':11},row(7,'seven')),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30],map{'mk':22},row(7,'seven')),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30],map{'mk':33},row(7,'seven'));"
+note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT/VARBINARY/JSON/ARRAY/MAP/STRUCT (this worker's TZ: $(date +%Z))"
 
 case "$SR_TRANSPORT" in
   mysql)
@@ -225,6 +225,7 @@ key.converter=org.apache.kafka.connect.json.JsonConverter
 value.converter=org.apache.kafka.connect.json.JsonConverter
 key.converter.schemas.enable=false
 value.converter.schemas.enable=false
+value.converter.decimal.format=NUMERIC
 offset.storage.file.filename=$OUT_DIR/offsets
 offset.flush.interval.ms=5000
 plugin.path=$PLUGIN_DIR
@@ -327,6 +328,11 @@ grep -q '"flag":true' "$CONSUMED" \
   || fail "BOOLEAN column did not arrive as a JSON boolean -- it is being carried as int8 (got: $(grep -o '\"flag\":[^,}]*' "$CONSUMED" | head -1))"
 grep -q '"tiny":1[,}]' "$CONSUMED" \
   || fail "TINYINT column did not arrive as a number; BOOLEAN's tinyint(1) rule must not swallow plain TINYINT"
+# LARGEINT is 128-bit: INT64 truncates it and STRING would quote it. The two transports disagree
+# on the wire form -- MYSQL_TYPE_STRING here, Decimal128(38,0) there -- so only this assertion
+# proves both land on the same Connect schema.
+grep -q "\"big\":$BIG_INT[,}]" "$CONSUMED" \
+  || fail "LARGEINT $BIG_INT did not arrive as an unquoted JSON number (got: $(grep -o '\"big\":[^,}]*' "$CONSUMED" | head -1)); quoted means it is carried as text, a shorter number means truncation"
 note "BOOLEAN -> boolean, TINYINT -> int8 OK"
 
 # Only visible once a real converter has serialized the Struct: the envelope comes from

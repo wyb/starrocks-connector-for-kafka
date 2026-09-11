@@ -401,7 +401,7 @@ connect.timeout.ms=1000</code></pre>
 <table>
   <tr><th>StarRocks</th><th>Connect schema</th></tr>
   <tr><td><code>TINYINT</code> / <code>SMALLINT</code> / <code>INT</code> / <code>BIGINT</code></td><td><code>INT8</code> / <code>INT16</code> / <code>INT32</code> / <code>INT64</code></td></tr>
-  <tr><td><code>LARGEINT</code></td><td><code>STRING</code>——128 位，用 <code>INT64</code> 会静默截断</td></tr>
+  <tr><td><code>LARGEINT</code></td><td><code>Decimal</code>，scale 为 0——128 位，用 <code>INT64</code> 会静默截断。JSON 转换器默认把 <code>Decimal</code> 写成 base64，想看到数字请设 <code>value.converter.decimal.format=NUMERIC</code></td></tr>
   <tr><td><code>FLOAT</code> / <code>DOUBLE</code></td><td><code>FLOAT32</code> / <code>FLOAT64</code></td></tr>
   <tr><td><code>DECIMAL</code></td><td><code>Decimal</code>，scale 取自列定义</td></tr>
   <tr><td><code>CHAR</code> / <code>VARCHAR</code></td><td><code>STRING</code></td></tr>

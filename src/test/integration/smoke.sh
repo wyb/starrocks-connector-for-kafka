@@ -70,14 +70,15 @@ sr_sql "ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\"
 sr_sql "CREATE DATABASE IF NOT EXISTS $DB;"
 # One table carries every case. A DATE read in the worker's local zone makes Connect's Date
 # logical type reject the whole record, so the other assertions fail with it -- deliberate.
-sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME, flag BOOLEAN, tiny TINYINT)
+sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME, flag BOOLEAN,
+                                 tiny TINYINT, big LARGEINT)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny) VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1),
-        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1),
-        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1);"
-echo "seeded 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT (container TZ applies to the worker, not this shell)"
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT);"
+echo "seeded 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT (container TZ applies to the worker, not this shell)"
 
 step "3. generate worker config and start connect-standalone"
 cat > "$OUT_DIR/worker.properties" <<EOF
@@ -86,6 +87,7 @@ key.converter=org.apache.kafka.connect.json.JsonConverter
 value.converter=org.apache.kafka.connect.json.JsonConverter
 key.converter.schemas.enable=false
 value.converter.schemas.enable=false
+value.converter.decimal.format=NUMERIC
 offset.storage.file.filename=/tmp/sr-cdc-smoke.offsets
 offset.flush.interval.ms=5000
 plugin.path=/plugins
@@ -182,6 +184,12 @@ grep -q '"flag":true' "$CONSUMED" \
 grep -q '"tiny":1[,}]' "$CONSUMED" \
   || fail "TINYINT column did not arrive as a number; BOOLEAN's tinyint(1) rule must not swallow plain TINYINT"
 echo "BOOLEAN -> boolean, TINYINT -> int8 OK"
+
+# LARGEINT is 128-bit: INT64 truncates it and STRING would quote it. Decimal at scale 0 with
+# decimal.format=NUMERIC is the only mapping that prints these digits back unquoted.
+grep -q "\"big\":$BIG_INT[,}]" "$CONSUMED" \
+  || fail "LARGEINT $BIG_INT did not arrive as an unquoted JSON number (got: $(grep -o '\"big\":[^,}]*' "$CONSUMED" | head -1)); quoted means it is carried as text, a shorter number means truncation"
+echo "LARGEINT -> Decimal(scale 0), full precision OK"
 
 # Only visible once a real converter has serialized the Struct: the envelope comes from
 # io.debezium.data.Envelope, so it must carry Debezium's transaction field even though

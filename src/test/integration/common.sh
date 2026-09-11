@@ -20,6 +20,11 @@ TZ_DATETIME="2026-08-05 12:34:56"
 TZ_EXPECT_DAYS=20670
 TZ_EXPECT_MILLIS=1785933296000
 
+# 38 nines: past INT64 by 19 digits, so a truncating mapping cannot produce it, yet inside
+# Decimal128(38,0) -- which is what BE hands the Arrow Flight transport, and which LARGEINT's
+# real ceiling of 2^127-1 would overflow.
+BIG_INT=99999999999999999999999999999999999999
+
 step() { printf '\n=== %s ===\n' "$1"; }
 fail() { printf '\nFAIL: %s\n' "$1" >&2; exit 1; }
 note() { printf '  %s\n' "$1"; }

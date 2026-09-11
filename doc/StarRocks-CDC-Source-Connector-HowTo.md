@@ -254,7 +254,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 | StarRocks | Connect schema |
 | --- | --- |
 | `TINYINT` / `SMALLINT` / `INT` / `BIGINT` | `INT8` / `INT16` / `INT32` / `INT64` |
-| `LARGEINT` | `STRING` — 128-bit, so `INT64` would silently truncate |
+| `LARGEINT` | `org.apache.kafka.connect.data.Decimal` at scale 0 — 128-bit, so `INT64` would silently truncate. JsonConverter writes Decimal as base64 unless you set `value.converter.decimal.format=NUMERIC` |
 | `FLOAT` / `DOUBLE` | `FLOAT32` / `FLOAT64` |
 | `DECIMAL` | `org.apache.kafka.connect.data.Decimal`, scale from the column |
 | `CHAR` / `VARCHAR` | `STRING` |

@@ -228,6 +228,27 @@ public class ChangeRecordMapperTest {
     }
 
     /**
+     * LARGEINT rides the Decimal path at scale 0. INT64 would truncate it and STRING would ship a
+     * number as text; the value below is 2^127-1, which only a BigDecimal survives.
+     */
+    @Test
+    public void testLargeIntKeepsFullPrecision() {
+        BigDecimal max = new BigDecimal("170141183460469231731687303715884105727");
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta(
+                "big", Types.DECIMAL, 39, 0, true, "bigint unsigned", "bigint(20) unsigned"));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "big", "sr.db1.big",
+                cols, Collections.emptyList());
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{max}, 1L);
+
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema schema = after.schema().field("big").schema();
+        assertEquals(Decimal.LOGICAL_NAME, schema.name());
+        assertEquals("0", schema.parameters().get(Decimal.SCALE_FIELD));
+        assertEquals(max, after.get("big"));
+    }
+
+    /**
      * BINARY/VARBINARY must reach Kafka as BYTES, carrying the exact bytes read.
      *
      * <p>These used to fall through to the STRING default on both sides at once -- schema and read

@@ -63,8 +63,8 @@ final class ColumnMetadataReader {
         List<InfoSchemaColumn> rows = readInformationSchema(db, table);
         List<ColumnMeta> result = new ArrayList<>(rows.size());
         for (InfoSchemaColumn c : rows) {
-            result.add(new ColumnMeta(c.name, toJdbcType(c.dataType, c.columnType), c.precision, c.scale,
-                    c.nullable, c.dataType, c.columnType));
+            result.add(new ColumnMeta(c.name, toJdbcType(c.dataType, c.columnType), c.precision,
+                    scaleFor(c.dataType, c.scale), c.nullable, c.dataType, c.columnType));
         }
         return result;
     }
@@ -164,9 +164,11 @@ final class ColumnMetadataReader {
                 return Types.INTEGER;
             case "bigint":
                 return Types.BIGINT;
-            // LARGEINT. 128-bit, so it does not fit a long; carried as text to stay lossless.
+            // LARGEINT. 128 bits do not fit a long, so it rides the DECIMAL path: Connect's Decimal
+            // is a BigDecimal, which loses nothing. StarRocks sends it as MYSQL_TYPE_STRING on one
+            // transport and Decimal128(38,0) on the other; getBigDecimal reads both.
             case "bigint unsigned":
-                return Types.OTHER;
+                return Types.DECIMAL;
             case "float":
                 return Types.REAL;
             case "double":
@@ -201,6 +203,16 @@ final class ColumnMetadataReader {
             default:
                 return Types.OTHER;
         }
+    }
+
+    /**
+     * {@code NUMERIC_SCALE}, except for LARGEINT: it is integral, so its Decimal schema needs scale
+     * 0. FE leaves NUMERIC_SCALE NULL for LARGEINT ({@code Type.getDecimalDigits} has no case for
+     * it) and {@code getInt} renders that as 0 -- the right answer by accident. Pin it so a future
+     * FE change cannot move the schema.
+     */
+    static int scaleFor(String dataType, int numericScale) {
+        return "bigint unsigned".equals(normalize(dataType)) ? 0 : numericScale;
     }
 
     /** Mirrors {@link #toJdbcType}'s cases; that switch cannot tell "text on purpose" from

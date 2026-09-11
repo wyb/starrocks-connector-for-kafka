@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>15 个类 / 约 3000 行</b></span>
-    <span>测试<b>180 个</b></span>
+    <span>测试<b>183 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -470,7 +470,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>前者是一个封闭集合的 switch，对应 FE 的 <code>Type.toMysqlDataTypeString()</code>。四组值得注意：</p>
 <ul>
   <li><code>tinyint</code> 要看 <code>COLUMN_TYPE</code>：FE 把 BOOLEAN 的 <code>DATA_TYPE</code> 也写成 <code>tinyint</code>，只有 <code>COLUMN_TYPE</code> 是 <code>tinyint(1)</code>（<code>ScalarType#toMysqlColumnTypeString</code>）。只看类型名，BOOLEAN 会变成 int8。</li>
-  <li><code>bigint unsigned</code>（LARGEINT，128 位）→ <code>OTHER</code>，按文本承载。映射成 BIGINT 会静默截断。</li>
+  <li><code>bigint unsigned</code>（LARGEINT，128 位）→ <code>DECIMAL</code>，scale 固定为 0。映射成 BIGINT 会静默截断，按文本承载则把数字变成字符串；Connect 的 <code>Decimal</code> 背后是 <code>BigDecimal</code>，两条传输都能无损承载。FE 对 LARGEINT 不填 <code>NUMERIC_SCALE</code>，所以 scale 由 <code>scaleFor</code> 钉死，不靠 NULL→0 的巧合。</li>
   <li><code>array</code>/<code>map</code>/<code>struct</code>/<code>json</code> → <code>OTHER</code>，但<strong>显式列出</strong>而非落到 default——"已知的复杂类型"和"没见过的类型"在 mapper 里会拿到不同的逻辑名。</li>
   <li><code>hll</code>/<code>bitmap</code>/<code>percentile</code> → <code>OTHER</code>，但 <code>isNonExportable</code> 对它们返回 true，preflight 会直接拒绝整张表。</li>
 </ul>
@@ -547,9 +547,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>49</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
-  <tr><td><code>ChangeRecordMapperTest</code></td><td>13</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、结构化文本的逻辑类型名、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
+  <tr><td><code>ChangeRecordMapperTest</code></td><td>14</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、结构化文本的逻辑类型名、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
-  <tr><td><code>ColumnMetadataReaderTest</code></td><td>13</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 不截断、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>
+  <tr><td><code>ColumnMetadataReaderTest</code></td><td>15</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 走 Decimal 且 scale 钉为 0、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>11</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
@@ -588,7 +588,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <li><strong>0</strong> 打包完整性（连接器类、<strong>MariaDB 驱动</strong>、Debezium 三个类、版本资源）+ 集群前置（run_mode 必须是 shared_data、meta functions 开关、OPERATE 权限、FE leader）。Arrow Flight 驱动<strong>不在这里查</strong>——它在步骤 1 的 <code>SR_TRANSPORT=arrow-flight</code> 分支里，跑 MySQL 协议时根本不检</li>
   <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic</li>
   <li><strong>3</strong> 启动 worker，等到快照记录到达</li>
-  <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、同一行（<code>id=2</code>）的 <code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、BOOLEAN 到达时是 JSON 布尔而 TINYINT 是数字、envelope 带 <code>transaction</code> 字段</li>
+  <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、同一行（<code>id=2</code>）的 <code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、BOOLEAN 到达时是 JSON 布尔而 TINYINT 是数字、LARGEINT 以不加引号的完整数字到达（依赖 <code>value.converter.decimal.format=NUMERIC</code>，否则 Decimal 是 base64）、envelope 带 <code>transaction</code> 字段</li>
   <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
   <li><strong>7</strong> DATE 的时区无关取值；DATETIME 只在 MySQL 协议上断言具体值，arrow-flight 上只要求该列到达（驱动的时间戳取值会按 worker 时区整点偏移，已记为限制）</li>
   <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>

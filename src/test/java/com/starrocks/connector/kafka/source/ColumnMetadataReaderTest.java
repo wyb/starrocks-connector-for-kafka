@@ -61,10 +61,30 @@ public class ColumnMetadataReaderTest {
         assertEquals(Types.VARBINARY, ColumnMetadataReader.toJdbcType("varbinary", null));
     }
 
-    /** LARGEINT is 128-bit and spelled "bigint unsigned"; BIGINT would silently truncate it. */
+    /** LARGEINT is 128-bit and spelled "bigint unsigned"; BIGINT would silently truncate it, and
+     *  OTHER would ship a number as text. */
     @Test
-    public void testLargeIntIsNotMappedToBigint() {
-        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("bigint unsigned", null));
+    public void testLargeIntIsMappedToDecimalNotBigint() {
+        assertEquals(Types.DECIMAL, ColumnMetadataReader.toJdbcType("bigint unsigned", null));
+    }
+
+    /**
+     * A LARGEINT's Decimal schema must have scale 0 whatever NUMERIC_SCALE says: FE reports NULL
+     * for it, and a non-zero scale would move the decimal point on every value.
+     */
+    @Test
+    public void testLargeIntScaleIsPinnedToZero() {
+        assertEquals(0, ColumnMetadataReader.scaleFor("bigint unsigned", 0));
+        assertEquals(0, ColumnMetadataReader.scaleFor("bigint unsigned", 9));
+        assertEquals(0, ColumnMetadataReader.scaleFor("  BIGINT UNSIGNED ", 9));
+    }
+
+    /** Only LARGEINT is pinned; a real DECIMAL keeps the scale the server declared. */
+    @Test
+    public void testDecimalKeepsTheDeclaredScale() {
+        assertEquals(4, ColumnMetadataReader.scaleFor("decimal", 4));
+        assertEquals(0, ColumnMetadataReader.scaleFor("varchar", 0));
+        assertEquals(2, ColumnMetadataReader.scaleFor(null, 2));
     }
 
     /** Opaque and unknown types are read as text rather than guessed at. */
@@ -80,7 +100,7 @@ public class ColumnMetadataReaderTest {
     public void testDataTypeMatchingIgnoresCaseAndPadding() {
         assertEquals(Types.INTEGER, ColumnMetadataReader.toJdbcType("  INT ", null));
         assertEquals(Types.TIMESTAMP, ColumnMetadataReader.toJdbcType("DateTime", null));
-        assertEquals(Types.OTHER, ColumnMetadataReader.toJdbcType("BIGINT UNSIGNED", null));
+        assertEquals(Types.DECIMAL, ColumnMetadataReader.toJdbcType("BIGINT UNSIGNED", null));
     }
 
     /** FE spells these exactly "array", "map" and "struct"; all share OTHER, hence srDataType. */
