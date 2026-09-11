@@ -290,6 +290,26 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
+     * Retains a bookmark, ignoring one already held. {@code bookmark_create} returns the holder's
+     * existing bookmark on an unchanged table, so after a resnapshot {@link #bootstrap} reopens the
+     * failed window's id; held twice, it would be released twice.
+     */
+    private static void retain(TableState t, long bookmarkId) {
+        synchronized (t.liveBookmarks) {
+            if (!t.liveBookmarks.contains(bookmarkId)) {
+                t.liveBookmarks.addLast(bookmarkId);
+            }
+        }
+    }
+
+    /** Truncates {@code out} back to the size it had before the current table's window. */
+    private static void discardFrom(List<SourceRecord> out, int from) {
+        if (out.size() > from) {
+            out.subList(from, out.size()).clear();
+        }
+    }
+
+    /**
      * Appends the window, following each <em>real</em> deletion with a tombstone when tombstones are
      * on. StarRocks renders an update as DELETE(before) + INSERT(after) at one row version, so a
      * delete whose key comes back as an insert at that same version is half an update, not a
@@ -350,26 +370,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /**
-     * Retains a bookmark, ignoring one already held. {@code bookmark_create} returns the holder's
-     * existing bookmark on an unchanged table, so after a resnapshot {@link #bootstrap} reopens the
-     * failed window's id; held twice, it would be released twice.
-     */
-    private static void retain(TableState t, long bookmarkId) {
-        synchronized (t.liveBookmarks) {
-            if (!t.liveBookmarks.contains(bookmarkId)) {
-                t.liveBookmarks.addLast(bookmarkId);
-            }
-        }
-    }
-
-    /** Truncates {@code out} back to the size it had before the current table's window. */
-    private static void discardFrom(List<SourceRecord> out, int from) {
-        if (out.size() > from) {
-            out.subList(from, out.size()).clear();
-        }
-    }
-
     private void applyPolicy(TableState t, NonTrackableException e) {
         String note = leaseStateNote(t, monotonicMs());
         if (policyResnapshot) {
@@ -405,25 +405,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
-     * a real TTL. Wall time would let a backward clock step stretch an interval past the lease it
-     * paces. Measured from the first reading because nanoTime's origin may be negative, which would
-     * sink {@code lastRenewMs} below the {@code -1} sentinel and disable the pacing gate.
-     */
-    long monotonicMs() {
-        long n = nanoTime();
-        if (monotonicOriginNanos == Long.MIN_VALUE) {
-            monotonicOriginNanos = n;
-        }
-        return (n - monotonicOriginNanos) / 1_000_000L;
-    }
-
-    /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
-    long nanoTime() {
-        return System.nanoTime();
-    }
-
-    /**
      * Leaves only the window's last record carrying {@code head}; the rest carry {@code base}.
      * Connect commits the longest <em>acked prefix</em>, not the batch, so with every record naming
      * {@code head} an ack of the first alone declared the window durable and a crash dropped the
@@ -444,6 +425,25 @@ public class StarRocksCdcSourceTask extends SourceTask {
     /** Overridden in tests so idle polls do not really sleep. */
     void idleSleep(long ms) throws InterruptedException {
         Thread.sleep(ms);
+    }
+
+    /**
+     * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
+     * a real TTL. Wall time would let a backward clock step stretch an interval past the lease it
+     * paces. Measured from the first reading because nanoTime's origin may be negative, which would
+     * sink {@code lastRenewMs} below the {@code -1} sentinel and disable the pacing gate.
+     */
+    long monotonicMs() {
+        long n = nanoTime();
+        if (monotonicOriginNanos == Long.MIN_VALUE) {
+            monotonicOriginNanos = n;
+        }
+        return (n - monotonicOriginNanos) / 1_000_000L;
+    }
+
+    /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
+    long nanoTime() {
+        return System.nanoTime();
     }
 
     /**
