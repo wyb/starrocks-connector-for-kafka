@@ -23,6 +23,7 @@ package com.starrocks.connector.kafka.source;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Types;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.List;
 import java.util.TimeZone;
@@ -113,16 +114,26 @@ final class RowExtractor {
 
     /**
      * The two transports hand a nested column over in different shapes: the MySQL driver gives the
-     * BE's text as a String, the Arrow Flight driver gives the vector's List or Map. The class of
-     * what getObject returns is the only thing that tells them apart, and each goes to its reader.
+     * BE's text as a String, the Arrow Flight driver gives the vector's objects. The class of what
+     * getObject returns is the only thing that tells them apart, and each goes to its reader.
+     *
+     * <p>On Arrow, getObject is Avatica's, which dispatches on the column's JDBC type id: a MAP or
+     * STRUCT column is JAVA_OBJECT and arrives as the vector's Map, but an ARRAY column is
+     * Types.ARRAY and arrives as a {@link java.sql.Array} whose getArray() holds the element objects.
+     * Only the top level is wrapped this way; a nested list is a plain List.
      */
     private static Object nested(ResultSet rs, ColumnMeta col, int index) throws SQLException {
         Object raw = rs.getObject(index);
         if (raw == null || rs.wasNull()) {
             return null;
         }
-        return raw instanceof String
-                ? MysqlTextReader.read(col.nested, (String) raw, MysqlTextReader.SESSION_BINARY_ENCODING)
-                : ArrowValueReader.read(col.nested, raw);
+        if (raw instanceof String) {
+            return MysqlTextReader.read(col.nested, (String) raw, MysqlTextReader.SESSION_BINARY_ENCODING);
+        }
+        if (raw instanceof java.sql.Array) {
+            Object elements = ((java.sql.Array) raw).getArray();
+            raw = elements instanceof Object[] ? Arrays.asList((Object[]) elements) : elements;
+        }
+        return ArrowValueReader.read(col.nested, raw);
     }
 }

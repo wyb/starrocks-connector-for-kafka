@@ -223,6 +223,24 @@ public class RowExtractorTest {
         assertEquals(fromText, fromArrow);
     }
 
+    /**
+     * Avatica's getObject hands a top-level ARRAY over as java.sql.Array (its dispatch is by JDBC
+     * type id), and getArray() holds the vector's element objects. The first live run died here.
+     */
+    @Test
+    public void testTopLevelArrowArrayIsUnwrappedFromJavaSqlArray() throws Exception {
+        ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
+        java.sql.Array array = (java.sql.Array) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {java.sql.Array.class}, (proxy, method, args) ->
+                        "getArray".equals(method.getName()) && (args == null || args.length == 0)
+                                ? new Object[] {20670, null} : null);
+        RecordingResultSet h = new RecordingResultSet();
+        h.next = array;
+        assertEquals(Arrays.asList("2026-08-05", null),
+                RowExtractor.extractValue(proxyFor(h), nested, 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("getObject"), h.calls);
+    }
+
     /** A complex column whose COLUMN_TYPE did not parse keeps today's getString path. */
     @Test
     public void testUnparsedComplexColumnStillReadsText() throws Exception {
