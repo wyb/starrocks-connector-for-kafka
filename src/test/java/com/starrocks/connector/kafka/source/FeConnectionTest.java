@@ -29,6 +29,7 @@ import java.util.Map;
 import java.util.Collections;
 
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -142,6 +143,22 @@ public class FeConnectionTest {
     }
 
     /** A driver that is simply absent must still name the artifact to add. */
+    /**
+     * The session pin and the text reader must agree on the VARBINARY encoding, and the pin must
+     * stay off the Arrow transport, which carries binary as binary.
+     */
+    @Test
+    public void testMysqlSessionIsPinnedToTheEncodingTheTextReaderScans() {
+        String expected = MysqlTextReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT);
+        assertTrue(FeConnection.SESSION_SETUP_SQL,
+                FeConnection.SESSION_SETUP_SQL.contains("binary_encoding_format = '" + expected + "'"));
+        assertTrue(FeConnection.SESSION_SETUP_SQL,
+                FeConnection.SESSION_SETUP_SQL.contains("binary_encoding_level = 'nested'"));
+        assertTrue(FeConnection.pinsSession("jdbc:mysql://fe1:9030"));
+        assertTrue(FeConnection.pinsSession("jdbc:mariadb://fe1:9030"));
+        assertFalse(FeConnection.pinsSession("jdbc:arrow-flight-sql://fe1:9408?useEncryption=false"));
+    }
+
     @Test
     public void testAMissingDriverNamesItsArtifact() {
         try {

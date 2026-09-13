@@ -122,7 +122,7 @@ final class RowExtractor {
             return null;
         }
         return raw instanceof String
-                ? MysqlTextReader.read(col.nested, (String) raw, MysqlTextReader.BinaryEncoding.HEX)
+                ? MysqlTextReader.read(col.nested, (String) raw, MysqlTextReader.SESSION_BINARY_ENCODING)
                 : ArrowValueReader.read(col.nested, raw);
     }
 }

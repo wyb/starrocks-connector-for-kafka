@@ -259,7 +259,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 | `DECIMAL` | `org.apache.kafka.connect.data.Decimal`, scale from the column |
 | `CHAR` / `VARCHAR` | `STRING` |
 | `DATE` / `DATETIME` | `STRING` in StarRocks' own format, `2026-08-05` / `2026-08-05 12:34:56[.ffffff]` (fraction only when non-zero), logical names `com.starrocks.data.Date` / `.DateTime`. DATETIME carries no zone and none is claimed |
-| `BINARY` / `VARBINARY` | `BYTES` |
+| `BINARY` / `VARBINARY` | `BYTES` (base64 in JSON), nested inside ARRAY/MAP/STRUCT too: the connector runs `SET binary_encoding_format = 'hex', binary_encoding_level = 'nested'` on its MySQL-protocol connections, so the cluster's global values do not change the result |
 | `JSON` | `STRING` named `io.debezium.data.Json` |
 | `ARRAY` / `MAP` / `STRUCT` | Native `array` / `map` / `struct` schemas -- a JSON array / object / object on the wire. Element types follow this table and nested elements are always optional. Map keys are always STRING (JsonConverter renders a map as an object only then); struct fields keep their declared order. The nesting comes from `information_schema.columns.COLUMN_TYPE`; a column whose COLUMN_TYPE does not parse (a struct field with a COMMENT, for one) falls back to `STRING` with the logical name `com.starrocks.data.Array` / `.Map` / `.Struct`, and the connector warns once at startup |
 | `HLL` / `BITMAP` / `PERCENTILE` | **rejected at startup** |

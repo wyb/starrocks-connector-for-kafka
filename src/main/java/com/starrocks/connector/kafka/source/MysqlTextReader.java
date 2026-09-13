@@ -46,6 +46,9 @@ final class MysqlTextReader {
 
     enum BinaryEncoding { HEX, BASE64 }
 
+    /** What the connector pins the session to ({@link FeConnection#SESSION_SETUP_SQL}) and reads with. */
+    static final BinaryEncoding SESSION_BINARY_ENCODING = BinaryEncoding.HEX;
+
     private final String text;
     private final BinaryEncoding binary;
     private int pos;

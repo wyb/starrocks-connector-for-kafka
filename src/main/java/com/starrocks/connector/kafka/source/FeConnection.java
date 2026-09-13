@@ -57,6 +57,18 @@ final class FeConnection implements AutoCloseable {
     private static final long RETRY_PAUSE_MS = 500L;
 
     /**
+     * Run on every MySQL-protocol connection. The text form of a nested VARBINARY is governed by
+     * two session variables that default to exactly this, but a cluster may set them globally:
+     * {@code raw} would put undecodable bytes in the text {@link MysqlTextReader} scans, and
+     * {@code all} would hex-encode top-level VARBINARY under {@code getBytes()}. Pinning them makes
+     * the reader's assumption true whatever the cluster says. Arrow Flight carries binary as
+     * binary and does not consult either.
+     */
+    static final String SESSION_SETUP_SQL = "SET binary_encoding_format = '"
+            + MysqlTextReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT)
+            + "', binary_encoding_level = 'nested'";
+
+    /**
      * MySQL transport only; MariaDB streams row-by-row for any positive fetch size.
      * <b>Must not be {@code Integer.MIN_VALUE}</b> -- that is Connector/J's idiom, and MariaDB
      * rejects every negative value with {@code SQLException("invalid fetch size")}.
@@ -186,7 +198,25 @@ final class FeConnection implements AutoCloseable {
         props.setProperty("user", config.username());
         props.setProperty("password", config.password());
         props.setProperty("connectTimeout", String.valueOf(config.connectTimeoutMs()));
-        return DriverManager.getConnection(url, props);
+        Connection c = DriverManager.getConnection(url, props);
+        if (pinsSession(url)) {
+            try (Statement stmt = c.createStatement()) {
+                stmt.execute(SESSION_SETUP_SQL);
+            } catch (SQLException | RuntimeException e) {
+                try {
+                    c.close();
+                } catch (SQLException suppressed) {
+                    e.addSuppressed(suppressed);
+                }
+                throw e;
+            }
+        }
+        return c;
+    }
+
+    /** Only the MySQL protocol renders nested values as text, so only it needs the session pinned. */
+    static boolean pinsSession(String url) {
+        return !url.startsWith(ARROW_FLIGHT_SCHEME_PREFIX);
     }
 
     private void rotateUrl() {
