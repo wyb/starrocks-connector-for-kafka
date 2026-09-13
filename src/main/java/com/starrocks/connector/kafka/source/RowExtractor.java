@@ -39,9 +39,9 @@ final class RowExtractor {
 
     /**
      * The UTC calendar for one streaming read. Without it the driver materializes temporal values in
-     * the JVM default zone: a local-midnight {@code java.sql.Date} makes converters throw on
-     * Connect's Date logical type, and a Timestamp lands off by the worker's offset. Per-read
-     * because {@link Calendar} is not thread-safe.
+     * the JVM default zone, and {@link TemporalText} would then print a DATE as the neighbouring
+     * day and a DATETIME shifted by the worker's offset -- silently, since both are text now.
+     * Per-read because {@link Calendar} is not thread-safe.
      */
     static Calendar newUtcCalendar() {
         return Calendar.getInstance(TimeZone.getTimeZone("UTC"));

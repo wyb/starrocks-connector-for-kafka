@@ -20,12 +20,10 @@
 
 package com.starrocks.connector.kafka.source;
 
-import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
@@ -215,16 +213,46 @@ public class ChangeRecordMapperTest {
         assertTrue(decimalSchema.isOptional());
 
         Schema dateSchema = rowSchema.field("dt").schema();
-        assertEquals(Date.LOGICAL_NAME, dateSchema.name());
+        assertEquals(Schema.Type.STRING, dateSchema.type());
+        assertEquals(TemporalText.DATE_LOGICAL_NAME, dateSchema.name());
         assertTrue(dateSchema.isOptional());
+        assertEquals("1970-01-01", after.get("dt"));
 
         Schema tsSchema = rowSchema.field("ts").schema();
-        assertEquals(Timestamp.LOGICAL_NAME, tsSchema.name());
+        assertEquals(Schema.Type.STRING, tsSchema.type());
+        assertEquals(TemporalText.DATETIME_LOGICAL_NAME, tsSchema.name());
         assertTrue(tsSchema.isOptional());
+        assertEquals("1970-01-01 00:00:00", after.get("ts"));
 
         Schema jSchema = rowSchema.field("j").schema();
         assertEquals(Schema.Type.STRING, jSchema.type());
         assertTrue(jSchema.isOptional());
+    }
+
+    /**
+     * DATETIME keeps its microseconds through the text path -- Connect's Timestamp logical type
+     * would have cut them to millis -- and a DATE key column is text in the key too.
+     */
+    @Test
+    public void testDateTimeKeepsMicrosecondsAndDateKeysAreText() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("d", Types.DATE, 0, 0, false),
+                new ColumnMeta("ts", Types.TIMESTAMP, 0, 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t",
+                cols, Collections.singletonList("d"));
+        // UTC instants, as getTimestamp(i, utcCalendar) produces them; valueOf would use the JVM zone.
+        java.sql.Timestamp withMicros = java.sql.Timestamp.from(
+                java.time.LocalDateTime.of(2026, 8, 5, 12, 34, 56).toInstant(java.time.ZoneOffset.UTC));
+        withMicros.setNanos(123_456_000);
+        java.sql.Date day = new java.sql.Date(
+                java.time.LocalDate.of(2026, 8, 5).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli());
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{day, withMicros}, 1L);
+
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        assertEquals("2026-08-05 12:34:56.123456", after.get("ts"));
+        assertEquals(Schema.Type.STRING, r.keySchema().field("d").schema().type());
+        assertEquals("2026-08-05", ((Struct) r.key()).get("d"));
     }
 
     /**

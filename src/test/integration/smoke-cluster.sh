@@ -357,14 +357,13 @@ grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v
 note "resumed from committed offset, no snapshot replay OK"
 
 step "7. temporal columns"
-# These ride the same records step 5 already consumed. A DATE read in the worker's local zone
-# is not a wrong value but a rejected record: Connect's Date logical type demands UTC midnight
-# and the converter throws, so the row never reaches Kafka at all.
-grep -q "\"d\":$TZ_EXPECT_DAYS" "$CONSUMED" \
+# These ride the same records step 5 already consumed. Both temporal columns are text in
+# StarRocks' own format, read through a UTC calendar, so the digits must be the stored ones.
+grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
   || { note "actual: $(head -1 "$CONSUMED")"
        grep -iE "DataException|Date type" "$OUT_DIR/connect.log" | tail -5 || true
-       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); another value means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
-note "DATE -> $TZ_EXPECT_DAYS, independent of the worker's timezone"
+       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\"; a shifted day means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
+note "DATE -> \"$TZ_EXPECT_DATE\", independent of the worker's timezone"
 
 # DATETIME's expected value is asserted on the MySQL protocol only. On Arrow Flight it arrives a
 # whole number of hours off (8h on a UTC+8 worker), and the cause is not on this side: the BE
@@ -376,13 +375,13 @@ if [ "$SR_TRANSPORT" = "arrow-flight" ]; then
   grep -q '"ts":' "$CONSUMED" \
     || { note "actual: $(head -1 "$CONSUMED")"
          fail "DATETIME column absent from the record entirely -- that is a new failure, not the known Arrow offset"; }
-  actual_ts=$(sed -n 's/.*"ts":\([0-9-]*\).*/\1/p' "$CONSUMED" | head -1)
-  note "DATETIME present (${actual_ts}); value NOT asserted on arrow-flight -- known offset vs the expected $TZ_EXPECT_MILLIS, tracked as an open Arrow Flight metadata defect"
+  actual_ts=$(sed -n 's/.*"ts":"\([^"]*\)".*/\1/p' "$CONSUMED" | head -1)
+  note "DATETIME present (${actual_ts}); value NOT asserted on arrow-flight -- known offset vs the expected \"$TZ_EXPECT_DATETIME\", tracked as an open Arrow Flight metadata defect"
 else
-  grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$CONSUMED" \
+  grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
     || { note "actual: $(head -1 "$CONSUMED")"
-         fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means the worker's timezone leaked into the read"; }
-  note "DATETIME -> $TZ_EXPECT_MILLIS, independent of the worker's timezone"
+         fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\"; a whole-hour shift means the worker's timezone leaked into the read, a missing fraction means the microseconds were cut"; }
+  note "DATETIME -> \"$TZ_EXPECT_DATETIME\", independent of the worker's timezone"
 fi
 
 step "8. bookmark reclamation actually happens"

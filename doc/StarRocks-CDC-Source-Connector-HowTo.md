@@ -258,7 +258,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 | `FLOAT` / `DOUBLE` | `FLOAT32` / `FLOAT64` |
 | `DECIMAL` | `org.apache.kafka.connect.data.Decimal`, scale from the column |
 | `CHAR` / `VARCHAR` | `STRING` |
-| `DATE` / `DATETIME` | `org.apache.kafka.connect.data.Date` / `Timestamp`, both UTC |
+| `DATE` / `DATETIME` | `STRING` in StarRocks' own format, `2026-08-05` / `2026-08-05 12:34:56[.ffffff]` (fraction only when non-zero), logical names `com.starrocks.data.Date` / `.DateTime`. DATETIME carries no zone and none is claimed |
 | `BINARY` / `VARBINARY` | `BYTES` |
 | `JSON` | `STRING` named `io.debezium.data.Json` |
 | `ARRAY` / `MAP` / `STRUCT` | `STRING` named `com.starrocks.data.Array` / `.Map` / `.Struct` |

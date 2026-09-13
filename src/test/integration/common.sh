@@ -12,13 +12,14 @@ PLUGIN_DIR="$REPO_ROOT/target/smoke-plugin"
 OUT_DIR="$(mktemp -d)"
 CONSUMED="$OUT_DIR/consumed.json"
 
-# Timezone-independent on purpose: Connect's Date is days since the UTC epoch and
-# Timestamp is UTC millis, so any worker must produce exactly these. A whole-hour
-# deviation means the worker's local zone leaked into the read.
+# DATE and DATETIME arrive as the text StarRocks prints, read through a UTC calendar so the
+# digits are the stored ones whatever zone the worker runs in. A whole-hour shift in the
+# string means the worker's local zone leaked into the read; a missing .123456 means the
+# microseconds were cut.
 TZ_DATE="2026-08-05"
-TZ_DATETIME="2026-08-05 12:34:56"
-TZ_EXPECT_DAYS=20670
-TZ_EXPECT_MILLIS=1785933296000
+TZ_DATETIME="2026-08-05 12:34:56.123456"
+TZ_EXPECT_DATE="2026-08-05"
+TZ_EXPECT_DATETIME="2026-08-05 12:34:56.123456"
 
 # 38 nines: past INT64 by 19 digits, so a truncating mapping cannot produce it, yet inside
 # Decimal128(38,0) -- which is what BE hands the Arrow Flight transport, and which LARGEINT's

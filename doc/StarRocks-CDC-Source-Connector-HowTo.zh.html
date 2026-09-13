@@ -405,7 +405,7 @@ connect.timeout.ms=1000</code></pre>
   <tr><td><code>FLOAT</code> / <code>DOUBLE</code></td><td><code>FLOAT32</code> / <code>FLOAT64</code></td></tr>
   <tr><td><code>DECIMAL</code></td><td><code>Decimal</code>，scale 取自列定义</td></tr>
   <tr><td><code>CHAR</code> / <code>VARCHAR</code></td><td><code>STRING</code></td></tr>
-  <tr><td><code>DATE</code> / <code>DATETIME</code></td><td><code>Date</code> / <code>Timestamp</code>，均为 UTC</td></tr>
+  <tr><td><code>DATE</code> / <code>DATETIME</code></td><td><code>STRING</code>，StarRocks 自身格式：<code>2026-08-05</code> / <code>2026-08-05 12:34:56[.ffffff]</code>（微秒非零才带），逻辑名 <code>com.starrocks.data.Date</code> / <code>.DateTime</code>。DATETIME 无时区，输出也不声明时区</td></tr>
   <tr><td><code>BINARY</code> / <code>VARBINARY</code></td><td><code>BYTES</code></td></tr>
   <tr><td><code>JSON</code></td><td><code>STRING</code>，逻辑名 <code>io.debezium.data.Json</code></td></tr>
   <tr><td><code>ARRAY</code> / <code>MAP</code> / <code>STRUCT</code></td><td><code>STRING</code>，逻辑名 <code>com.starrocks.data.Array</code> / <code>.Map</code> / <code>.Struct</code></td></tr>

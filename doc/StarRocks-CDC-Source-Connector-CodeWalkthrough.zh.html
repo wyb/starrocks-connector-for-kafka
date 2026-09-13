@@ -106,8 +106,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>主代码<b>15 个类 / 约 3000 行</b></span>
-    <span>测试<b>183 个</b></span>
+    <span>主代码<b>16 个类 / 约 3100 行</b></span>
+    <span>测试<b>188 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -119,7 +119,7 @@
     <li><a href="#entry">入口层</a><span class="toc-sub"><a href="#StarRocksCdcSourceConnector">StarRocksCdcSourceConnector</a><a href="#StarRocksCdcSourceConfig">StarRocksCdcSourceConfig</a></span></li>
     <li><a href="#state">状态机层</a><span class="toc-sub"><a href="#StarRocksCdcSourceTask">StarRocksCdcSourceTask</a><a href="#OffsetState">OffsetState</a><a href="#NonTrackableException">NonTrackableException</a></span></li>
     <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetadataReader">ColumnMetadataReader</a><a href="#RowExtractor">RowExtractor</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
-    <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a></span></li>
+    <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a><a href="#TemporalText">TemporalText</a></span></li>
     <li><a href="#common">common 包</a><span class="toc-sub"><a href="#Version">Version</a><a href="#KeyValueListParser">KeyValueListParser</a></span></li>
     <li><a href="#tests">测试</a><span class="toc-sub"><a href="#FakeCdcClient">FakeCdcClient</a></span></li>
     <li><a href="#scripts">集成脚本</a></li>
@@ -454,7 +454,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <p><code>MIN_VALUE</code> 是 MySQL Connector/J 的流式习惯用法。MariaDB 驱动对任何负值都抛 <code>SQLException("invalid fetch size")</code>——查询根本发不出去，一行都读不到。Arrow Flight 本来就流式，直接跳过这个调用。</p>
 </div>
 
-<h3 id="ColumnMetadataReader"><span class="fn">ColumnMetadataReader</span><span class="sz">237 行</span></h3>
+<h3 id="ColumnMetadataReader"><span class="fn">ColumnMetadataReader</span><span class="sz">249 行</span></h3>
 <p class="role">权威列清单。两条通道<strong>同一条路径</strong>：只问服务端。</p>
 
 <pre><code>fetchColumns()
@@ -480,7 +480,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <h3 id="RowExtractor"><span class="fn">RowExtractor</span><span class="sz">110 行</span></h3>
 <p class="role">三个静态方法。看着简单，但类型来源的收敛就发生在这里。</p>
 <p><code>extractValue</code> 的 switch 基于 <strong><code>col.jdbcType</code></strong>，与 <code>schemaFor</code> 同源，所以 schema 说什么类型就用什么 getter 取。<code>Types.FLOAT</code> 按 JDBC 规范走双精度，<code>Types.REAL</code> 才是单精度。</p>
-<p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会用 JVM 默认时区，本地午夜的 <code>java.sql.Date</code> 会让 converter 在 Connect 的 Date 逻辑类型上抛异常，Timestamp 则静默偏移。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
+<p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会按 JVM 默认时区落值，<code>TemporalText</code> 再按 UTC 取位，DATE 会印成相邻的一天、DATETIME 偏移 worker 的时差——而且是静默的，两者现在都是文本。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
 <p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
 
 <h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">130 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">61 行</span></h3>
@@ -491,7 +491,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="mapper"><span class="no">5</span>记录映射</h2>
 
-<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">315 行</span></h3>
+<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">329 行</span></h3>
 <p class="role">纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，所以极易测试。</p>
 
 <h4>构造函数：所有 schema 只建一次</h4>
@@ -526,10 +526,16 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </div>
 
 <h4>schemaFor(col) —— 类型映射</h4>
+<p>DATE / DATETIME 不走 Connect 的 <code>Date</code>/<code>Timestamp</code> 逻辑类型，而是 STRING + <code>com.starrocks.data.Date</code>/<code>.DateTime</code>，值由 <code>TemporalText</code> 格式化：线上看到的和 SQL 里一样，DATETIME 的微秒不再被截成毫秒（Connect 的 <code>Timestamp</code> 是 INT64 毫秒），也不给一个本无时区的类型凭空声明时区。</p>
 <p>一个基于 <code>col.jdbcType</code> 的 switch，每个分支按 <code>col.nullable</code> 选 optional 与否。DECIMAL 用 <code>Decimal.builder(col.scale)</code>，DATE/TIMESTAMP 用 Connect 的逻辑类型。</p>
 <p>BINARY/VARBINARY/LONGVARBINARY → <strong>BYTES</strong>。此前它们和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变 U+FFFD，不可恢复。因为要两侧同时改，单独回退任何一侧都会立刻抛 <code>DataException</code>。</p>
 <p>其余落到 <code>textSchemaFor</code>：<code>srDataType</code> 为 <code>json</code> 用 <code>io.debezium.data.Json</code>，<code>array</code>/<code>map</code>/<code>struct</code> 用 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code>，其余为无名的普通 STRING。</p>
 <p><code>putValue</code> 里唯一的特殊处理是 DECIMAL：<code>((BigDecimal) value).setScale(col.scale)</code>，因为 Connect 的 Decimal 逻辑类型要求 scale 与 schema 声明严格一致。</p>
+
+<h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">63 行</span></h3>
+<p class="role">DATE / DATETIME 的唯一格式化器，两条传输共用。</p>
+<p>输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>java.sql.Timestamp</code> 的 <code>getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 则只有毫秒可用。</p>
+<p>测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
 
 <h2 id="common"><span class="no">6</span>common 包</h2>
 
@@ -547,13 +553,14 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>49</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
-  <tr><td><code>ChangeRecordMapperTest</code></td><td>14</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、结构化文本的逻辑类型名、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
+  <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 为文本且 DATETIME 保住微秒、结构化文本的逻辑类型名、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>ColumnMetadataReaderTest</code></td><td>15</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 走 Decimal 且 scale 钉为 0、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>11</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
+  <tr><td><code>TemporalTextTest</code></td><td>4</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分</td></tr>
   <tr><td><code>RowExtractorTest</code></td><td>7</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列</td></tr>
   <tr><td><code>StarRocksJdbcClientTest</code></td><td>4</td><td>全部四条都在 <code>changeDataCaptureEnabled</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
   <tr><td><code>OffsetStateTest</code></td><td>6</td><td>往返、Integer/Long 容错、缺字段降级、<code>snapshot_done=false</code> 不被读成已完成、id 解不出非负数（字符串/布尔/null/负值）时整条回 fresh</td></tr>

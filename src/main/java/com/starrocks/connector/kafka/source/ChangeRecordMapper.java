@@ -22,12 +22,10 @@ package com.starrocks.connector.kafka.source;
 
 import io.debezium.data.Envelope;
 import io.debezium.data.Json;
-import org.apache.kafka.connect.data.Date;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.data.Timestamp;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
@@ -215,6 +213,16 @@ public final class ChangeRecordMapper {
             struct.put(col.name, ((BigDecimal) value).setScale(col.scale));
             return;
         }
+        if (value instanceof java.util.Date) {
+            if (col.jdbcType == Types.DATE) {
+                struct.put(col.name, TemporalText.date((java.util.Date) value));
+                return;
+            }
+            if (col.jdbcType == Types.TIMESTAMP) {
+                struct.put(col.name, TemporalText.dateTime((java.util.Date) value));
+                return;
+            }
+        }
         struct.put(col.name, value);
     }
 
@@ -262,10 +270,13 @@ public final class ChangeRecordMapper {
             case Types.NUMERIC:
                 SchemaBuilder decimalBuilder = Decimal.builder(col.scale);
                 return col.nullable ? decimalBuilder.optional().build() : decimalBuilder.build();
+            // Text in StarRocks' own format rather than Connect's epoch-based logical types: the
+            // wire value then reads like the column does in SQL, keeps DATETIME's microseconds,
+            // and asserts no time zone for a type that has none.
             case Types.DATE:
-                return col.nullable ? Date.builder().optional().build() : Date.SCHEMA;
+                return namedString(col, TemporalText.DATE_LOGICAL_NAME);
             case Types.TIMESTAMP:
-                return col.nullable ? Timestamp.builder().optional().build() : Timestamp.SCHEMA;
+                return namedString(col, TemporalText.DATETIME_LOGICAL_NAME);
             // Must not fall through to STRING: the read side defaulted to getString() too, so
             // nothing failed -- the bytes were just charset-decoded and anything not valid text
             // became U+FFFD, unrecoverably.
@@ -287,7 +298,10 @@ public final class ChangeRecordMapper {
      * embedded quotes and nesting.
      */
     private static Schema textSchemaFor(ColumnMeta col) {
-        String logicalName = logicalNameFor(col.srDataType);
+        return namedString(col, logicalNameFor(col.srDataType));
+    }
+
+    private static Schema namedString(ColumnMeta col, String logicalName) {
         if (logicalName == null) {
             return col.nullable ? Schema.OPTIONAL_STRING_SCHEMA : Schema.STRING_SCHEMA;
         }

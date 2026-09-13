@@ -200,12 +200,12 @@ echo "Debezium envelope shape confirmed on the wire"
 
 # A DATE read in the worker's local zone is not a wrong value but a rejected record: Connect's
 # Date logical type demands UTC midnight and the converter throws, so the row never arrives.
-grep -q "\"d\":$TZ_EXPECT_DAYS" "$CONSUMED" \
+grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
   || { docker compose exec -T kafka grep -iE "DataException|Date type" /tmp/connect.log | tail -5 || true
-       fail "DATE $TZ_DATE should serialize to $TZ_EXPECT_DAYS days since epoch (UTC midnight); another value means a non-UTC calendar, no value means the converter rejected the record"; }
-grep -q "\"ts\":$TZ_EXPECT_MILLIS" "$CONSUMED" \
-  || fail "DATETIME $TZ_DATETIME should serialize to $TZ_EXPECT_MILLIS ms; an offset that is a whole number of hours means the worker's timezone leaked into the read"
-echo "temporal columns OK: DATE -> $TZ_EXPECT_DAYS, DATETIME -> $TZ_EXPECT_MILLIS"
+       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\" (got: $(grep -o '\"d\":[^,}]*' "$CONSUMED" | head -1)); a shifted day means a non-UTC calendar, no value means the converter rejected the record"; }
+grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
+  || fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" (got: $(grep -o '\"ts\":[^,}]*' "$CONSUMED" | head -1)); a whole-hour shift means the worker's timezone leaked in, a missing fraction means the microseconds were cut"
+echo "temporal columns OK: DATE -> \"$TZ_EXPECT_DATE\", DATETIME -> \"$TZ_EXPECT_DATETIME\""
 
 step "6. crash recovery: no snapshot replay"
 old_pid="$worker_pid"
