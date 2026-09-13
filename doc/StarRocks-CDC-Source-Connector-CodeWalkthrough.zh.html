@@ -603,7 +603,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><th>文件</th><th>内容</th></tr>
   <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
   <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 切换两条通道</td></tr>
-  <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，9 个步骤（0–8）。断言同源，但编号与 <code>smoke-cluster.sh</code> 并不对齐</td></tr>
+  <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，9 个步骤（0–8），只走 MySQL 协议。断言同源，但编号与 <code>smoke-cluster.sh</code> 并不对齐；同样播种六个嵌套元素列并按精确 JSON 断言</td></tr>
 </table>
 </div>
 
@@ -612,13 +612,13 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <h4>12 个步骤在验什么</h4>
 <ol>
   <li><strong>0</strong> 打包完整性（连接器类、<strong>MariaDB 驱动</strong>、Debezium 三个类、版本资源）+ 集群前置（run_mode 必须是 shared_data、meta functions 开关、OPERATE 权限、FE leader）。Arrow Flight 驱动<strong>不在这里查</strong>——它在步骤 1 的 <code>SR_TRANSPORT=arrow-flight</code> 分支里，跑 MySQL 协议时根本不检</li>
-  <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic</li>
+  <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic。表里除标量与 ARRAY/MAP/STRUCT 基本列外，还有六个专挑两条传输分歧点的嵌套元素列：<code>array&lt;date&gt;</code>、<code>array&lt;datetime&gt;</code>（带微秒）、<code>map&lt;int,int&gt;</code>、<code>array&lt;varbinary&gt;</code>、<code>array&lt;boolean&gt;</code>、<code>struct&lt;date, json&gt;</code></li>
   <li><strong>3</strong> 启动 worker，等到快照记录到达</li>
   <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、同一行（<code>id=2</code>）的 <code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、BOOLEAN 到达时是 JSON 布尔而 TINYINT 是数字、LARGEINT 以不加引号的完整数字到达（依赖 <code>value.converter.decimal.format=NUMERIC</code>，否则 Decimal 是 base64）、envelope 带 <code>transaction</code> 字段</li>
   <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
   <li><strong>7</strong> DATE 的时区无关取值；DATETIME 只在 MySQL 协议上断言具体值，arrow-flight 上只要求该列到达（驱动的时间戳取值会按 worker 时区整点偏移，已记为限制）</li>
   <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>
-  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次），JSON/ARRAY/MAP/STRUCT 值完整</li>
+  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象（去掉顶层 <code>ts</code>，见步骤 7 的 arrow 限制）按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>/tmp/sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
   <li><strong>11</strong> preflight 拒绝含 HLL 列的表并指明列名——同时证明 StarRocks 类型名在当前通道上确实传到了守卫</li>
 </ol>
 

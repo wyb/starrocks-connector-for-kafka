@@ -171,22 +171,28 @@ note "Kafka reachable"
 step "1. seed StarRocks"
 # One table carries every case, so the temporal and type columns ride the same records the
 # ordering and delete assertions inspect; a separate table would only ever produce op=r.
-# All three complex types, because each takes its own branch in toJdbcType and only a live
-# cluster confirms the server spells them "array", "map", "struct". 0x0102ff is not valid
-# UTF-8 on purpose -- base64 AQL/.
+# All three complex types, and inside them every element the two transports disagree on:
+# a DATE is Integer days on Arrow and "2026-08-05" text on MySQL, a DATETIME Long micros vs
+# text, a BOOLEAN Boolean vs 1/0, a VARBINARY byte[] vs hex, an INT map key Integer vs an
+# unquoted {1:2}, a JSON Text vs a single-quoted 'json'. 0x0102ff is not valid UTF-8 on
+# purpose -- base64 AQL/.
 sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME,
                                  flag BOOLEAN, tiny TINYINT, big LARGEINT,
                                  b VARBINARY, j JSON, arr ARRAY<INT>,
-                                 m MAP<VARCHAR(10),INT>, s STRUCT<x INT, y VARCHAR(10)>)
+                                 m MAP<VARCHAR(10),INT>, s STRUCT<x INT, y VARCHAR(10)>,
+                                 ad ARRAY<DATE>, adt ARRAY<DATETIME>, mi MAP<INT,INT>,
+                                 ab ARRAY<VARBINARY>, abool ARRAY<BOOLEAN>,
+                                 sd STRUCT<d DATE, j JSON>)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
 # Named columns, not positional VALUES: adding a column to the DDL above must not silently
 # shift every literal by one, which is exactly what a positional INSERT does.
-sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big, b, j, arr, m, s) VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30],map{'mk':11},row(7,'seven')),
-        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30],map{'mk':22},row(7,'seven')),
-        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30],map{'mk':33},row(7,'seven'));"
-note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT/VARBINARY/JSON/ARRAY/MAP/STRUCT (this worker's TZ: $(date +%Z))"
+NESTED_VALUES="[cast('$TZ_DATE' as date)],[cast('$TZ_DATETIME' as datetime)],map{1:2},[to_binary('0102ff','hex')],[true,false],row(cast('$TZ_DATE' as date),parse_json('{\"a\":1}'))"
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big, b, j, arr, m, s, ad, adt, mi, ab, abool, sd) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":1}'),[10,20,30],map{'mk':11},row(7,'seven'),$NESTED_VALUES),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":2}'),[10,20,30],map{'mk':22},row(7,'seven'),$NESTED_VALUES),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,to_binary('0102ff','hex'),parse_json('{\"a\":3}'),[10,20,30],map{'mk':33},row(7,'seven'),$NESTED_VALUES);"
+note "created $DB.$TABLE with 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT/VARBINARY/JSON/ARRAY/MAP/STRUCT and six nested-element columns (this worker's TZ: $(date +%Z))"
 
 case "$SR_TRANSPORT" in
   mysql)
@@ -442,23 +448,56 @@ grep '"op":"d"' "$CONSUMED" | grep -q '"b":"AQL/"' \
   || fail "VARBINARY survived the snapshot but not a before image (op=d)"
 note "VARBINARY -> BYTES -> base64 AQL/, in both op=r and op=d OK"
 
-# JSON and the three complex types are carried as text (their schemas are named, but
-# schemas.enable is off here, so only values reach the wire). The exact rendering --
-# spacing, quoting, escaping -- is StarRocks' choice and not something to pin, so each
-# assertion looks for a value that could only have come from the right column.
-for probe in '"j":' '"arr":' '"m":' '"s":'; do
-  grep -q "$probe" "$CONSUMED" \
-    || { head -3 "$CONSUMED"; fail "column $probe missing from the records entirely"; }
-done
-grep -q 'seven' "$CONSUMED" || { head -3 "$CONSUMED"; fail "STRUCT column did not arrive intact"; }
-grep -q 'mk'    "$CONSUMED" || { head -3 "$CONSUMED"; fail "MAP column did not arrive intact"; }
-grep -qE '"j":"?\{?\\?"a' "$CONSUMED" \
-  || { head -3 "$CONSUMED"; fail "JSON column did not arrive intact"; }
-grep -qE '"arr":"?\[?10' "$CONSUMED" \
-  || { head -3 "$CONSUMED"; fail "ARRAY column did not arrive intact"; }
-note "JSON, ARRAY, MAP and STRUCT values arrived intact"
+# ARRAY, MAP and STRUCT are native Connect schemas now, so with schemas.enable off they must
+# be JSON arrays and objects -- not strings holding them -- and every nested element must be
+# the JSON type this table maps it to. Exact text, because the point of the native path is
+# that it is the same text on both transports; StarRocks' own rendering no longer reaches
+# the wire. JSON stays a string (Connect has no JSON type); the space after the colon is
+# StarRocks' JSON printer's, so it is allowed either way.
+first_r=$(grep '"op":"r"' "$CONSUMED" | grep '"id":1[,}]' | head -1)
+[ -n "$first_r" ] || { head -3 "$CONSUMED"; fail "no op=r record for id=1 to inspect"; }
+expect_field() {  # name, ERE for the value
+  printf '%s' "$first_r" | grep -qE "\"$1\":$2([,}])" \
+    || fail "column $1: expected value matching '$2', got: $(printf '%s' "$first_r" | grep -oE "\"$1\":[^,]*" | head -1)
+    whole record: $first_r"
+}
+expect_field j     '"\{\\"a\\": ?1\}"'
+expect_field arr   '\[10,20,30\]'
+expect_field m     '\{"mk":11\}'
+expect_field s     '\{"x":7,"y":"seven"\}'
+expect_field ad    "\[\"$TZ_EXPECT_DATE\"\]"
+expect_field adt   "\[\"$TZ_EXPECT_DATETIME\"\]"
+expect_field mi    '\{"1":2\}'
+expect_field ab    '\["AQL/"\]'
+expect_field abool '\[true,false\]'
+expect_field sd    '\{"d":"'"$TZ_EXPECT_DATE"'","j":"\{\\"a\\": ?1\}"\}'
+note "ARRAY/MAP/STRUCT arrived as JSON arrays/objects with typed elements; JSON as a string"
 note "one record, for the record:"
-head -1 "$CONSUMED"
+printf '%s\n' "$first_r"
+
+# Transport parity. The same table read over the other transport must produce the same
+# 'after' object, byte for byte -- the whole reason the nested readers exist. One run can
+# only see one transport, so each run leaves its 'after' behind, keyed by the plugin jar it
+# was built from, and the second run diffs against the first. The top-level DATETIME is
+# left out: on arrow-flight it carries the known driver offset step 7 already documents.
+PARITY_DIR="${SMOKE_PARITY_DIR:-${TMPDIR:-/tmp}/sr-cdc-smoke-parity}"
+mkdir -p "$PARITY_DIR"
+jar_key=$(cksum < "$JAR" | cut -d' ' -f1)
+mine="$PARITY_DIR/after-$SR_TRANSPORT-$jar_key.json"
+other_transport=$([ "$SR_TRANSPORT" = mysql ] && echo arrow-flight || echo mysql)
+theirs="$PARITY_DIR/after-$other_transport-$jar_key.json"
+printf '%s' "$first_r" | sed -n 's/.*"after":\(.*\),"source":.*/\1/p' | sed -E 's/"ts":"[^"]*",?//' > "$mine"
+[ -s "$mine" ] || fail "could not extract the after object from: $first_r"
+if [ -s "$theirs" ]; then
+  if diff -u "$theirs" "$mine" > "$OUT_DIR/parity.diff"; then
+    note "transport parity: 'after' from $other_transport and $SR_TRANSPORT are identical"
+  else
+    cat "$OUT_DIR/parity.diff"
+    fail "transport parity: the $other_transport run and this $SR_TRANSPORT run produced different 'after' objects for the same table (see diff above; files: $theirs, $mine)"
+  fi
+else
+  note "transport parity: recorded $mine; run again with SR_TRANSPORT=$other_transport against the same jar to compare"
+fi
 
 step "11. preflight refuses a table whose column cannot be exported"
 # HLL/BITMAP/PERCENTILE hold aggregate sketches, not values. Before this guard existed the

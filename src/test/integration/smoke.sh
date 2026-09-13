@@ -70,15 +70,21 @@ sr_sql "ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\"
 sr_sql "CREATE DATABASE IF NOT EXISTS $DB;"
 # One table carries every case. A DATE read in the worker's local zone makes Connect's Date
 # logical type reject the whole record, so the other assertions fail with it -- deliberate.
+# The six nested-element columns are the ones whose text form on this transport is not JSON
+# (an unquoted int map key, a single-quoted nested JSON, 1/0 booleans, hex bytes) and so
+# prove the text reader end to end.
 sr_sql "CREATE TABLE $DB.$TABLE (id INT NOT NULL, v BIGINT, d DATE, ts DATETIME, flag BOOLEAN,
-                                 tiny TINYINT, big LARGEINT)
+                                 tiny TINYINT, big LARGEINT,
+                                 ad ARRAY<DATE>, adt ARRAY<DATETIME>, mi MAP<INT,INT>,
+                                 ab ARRAY<VARBINARY>, abool ARRAY<BOOLEAN>, sd STRUCT<d DATE, j JSON>)
         PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS 1
         PROPERTIES ('replication_num'='1', 'enable_change_data_capture'='true');"
-sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big) VALUES
-        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT),
-        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT),
-        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT);"
-echo "seeded 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT (container TZ applies to the worker, not this shell)"
+NESTED_VALUES="[cast('$TZ_DATE' as date)],[cast('$TZ_DATETIME' as datetime)],map{1:2},[to_binary('0102ff','hex')],[true,false],row(cast('$TZ_DATE' as date),parse_json('{\"a\":1}'))"
+sr_sql "INSERT INTO $DB.$TABLE (id, v, d, ts, flag, tiny, big, ad, adt, mi, ab, abool, sd) VALUES
+        (1,10,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,$NESTED_VALUES),
+        (2,20,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,$NESTED_VALUES),
+        (3,30,'$TZ_DATE','$TZ_DATETIME',true,1,$BIG_INT,$NESTED_VALUES);"
+echo "seeded 3 rows incl. DATE/DATETIME/BOOLEAN/TINYINT/LARGEINT and six nested-element columns (container TZ applies to the worker, not this shell)"
 
 step "3. generate worker config and start connect-standalone"
 cat > "$OUT_DIR/worker.properties" <<EOF
@@ -206,6 +212,24 @@ grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
 grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
   || fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" (got: $(grep -o '\"ts\":[^,}]*' "$CONSUMED" | head -1)); a whole-hour shift means the worker's timezone leaked in, a missing fraction means the microseconds were cut"
 echo "temporal columns OK: DATE -> \"$TZ_EXPECT_DATE\", DATETIME -> \"$TZ_EXPECT_DATETIME\""
+
+# ARRAY/MAP/STRUCT are native schemas: JSON arrays and objects on the wire, elements typed
+# per the column table, exact text. The space after the colon inside the nested JSON string
+# is StarRocks' JSON printer's, so it is allowed either way.
+first_r=$(grep '"op":"r"' "$CONSUMED" | grep '"id":1[,}]' | head -1)
+[ -n "$first_r" ] || fail "no op=r record for id=1 to inspect"
+expect_field() {  # name, ERE for the value
+  printf '%s' "$first_r" | grep -qE "\"$1\":$2([,}])" \
+    || fail "column $1: expected value matching '$2', got: $(printf '%s' "$first_r" | grep -oE "\"$1\":[^,]*" | head -1)
+    whole record: $first_r"
+}
+expect_field ad    "\[\"$TZ_EXPECT_DATE\"\]"
+expect_field adt   "\[\"$TZ_EXPECT_DATETIME\"\]"
+expect_field mi    '\{"1":2\}'
+expect_field ab    '\["AQL/"\]'
+expect_field abool '\[true,false\]'
+expect_field sd    '\{"d":"'"$TZ_EXPECT_DATE"'","j":"\{\\"a\\": ?1\}"\}'
+echo "nested columns OK: array<date>/array<datetime>/map<int,int>/array<varbinary>/array<boolean>/struct<date,json> as typed JSON"
 
 step "6. crash recovery: no snapshot replay"
 old_pid="$worker_pid"
