@@ -88,6 +88,34 @@ public class ArrowValueReaderTest {
                         Arrays.asList(new BigDecimal("99999999999999999999999999999999999999"))));
     }
 
+    /** The nested form: MapVector.getObject is ListVector's, a List of {key, value} entry maps. */
+    private static List<Object> entries(Object... kv) {
+        List<Object> out = new java.util.ArrayList<>();
+        for (int i = 0; i < kv.length; i += 2) {
+            Map<String, Object> e = new LinkedHashMap<>();
+            e.put("key", kv[i]);
+            e.put("value", kv[i + 1]);
+            out.add(e);
+        }
+        return out;
+    }
+
+    /**
+     * A map nested in a list or struct arrives as a List of entry maps, not a Map -- the
+     * accessor's Map conversion only happens for a top-level column. Both shapes must read alike.
+     */
+    @Test
+    public void testNestedMapArrivesAsEntryListAndReadsLikeTheTopLevelMap() {
+        assertEquals(Arrays.asList(map("1", 10, "2", null)),
+                ArrowValueReader.read(type("array<map<int(11),int(11)>>"), Arrays.asList(entries(1, 10, 2, null))));
+        Map<Object, Object> row = new LinkedHashMap<>();
+        row.put("tags", entries(text("k"), 20670));
+        assertEquals(map("tags", map("k", "2026-08-05")),
+                ArrowValueReader.read(type("struct<`tags` map<varchar(10),date>>"), row));
+        assertEquals(Arrays.asList(map()),
+                ArrowValueReader.read(type("array<map<int(11),int(11)>>"), Arrays.asList(entries())));
+    }
+
     /** Map keys become strings spelled per their declared type, values are read like elements. */
     @Test
     public void testMapKeysAreSpelledPerDeclaredType() {
@@ -123,11 +151,9 @@ public class ArrowValueReaderTest {
     public void testAssembledValueMatchesTheConnectSchema() {
         ColumnType t = type("array<struct<`x` int(11), `tags` map<varchar(10),date>>>");
         Schema s = t.toConnectSchema("t.c", true);
-        Map<Object, Object> tags = new LinkedHashMap<>();
-        tags.put(text("k"), 20670);
         Map<Object, Object> row = new LinkedHashMap<>();
         row.put("x", 7);
-        row.put("tags", tags);
+        row.put("tags", entries(text("k"), 20670)); // nested, so the entry-list shape
 
         Object neutral = ArrowValueReader.read(t, Arrays.asList(row, null));
         List<?> value = (List<?>) t.toConnectValue(s, neutral);

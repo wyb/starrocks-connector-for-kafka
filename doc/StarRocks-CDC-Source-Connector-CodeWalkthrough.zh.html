@@ -106,8 +106,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>主代码<b>20 个类 / 约 4000 行</b></span>
-    <span>测试<b>224 个</b></span>
+    <span>主代码<b>20 个类 / 约 4100 行</b></span>
+    <span>测试<b>225 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -544,9 +544,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>COLUMN_TYPE</code> 是 FE <code>Type.toSql()</code> 的显示串，不是契约，所以解析器只认 FE 会产出的拼法，其余一律 <code>Optional.empty()</code>，调用方回退到按文本承载。嵌套层的拼法：<code>boolean</code>、<code>int(11)</code>、<code>bigint(20)</code>、<code>largeint(40)</code>、<code>decimal(18, 2)</code>（逗号后有空格）、<code>varchar(10)</code>、<code>varbinary(16)</code>、<code>date</code>、<code>datetime</code>、<code>json</code>；唯独 <code>array&lt;&gt;</code> 里的 decimal 走 <code>toString()</code>，拼成 <code>DECIMAL64(18,2)</code>。struct 字段是 <code>`name` type</code> 以 <code>", "</code> 相连，反引号翻倍转义；字段 COMMENT 未转义直接拼入，深度 ≥15 打成 <code>...</code>——这两种都以"多出来的 token"形式被拒绝，不需要特判。</p>
 <p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。</p>
 
-<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">131 行</span></h3>
+<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">146 行</span></h3>
 <p class="role">Arrow Flight 传输的嵌套值读取器：把驱动 <code>getObject()</code> 交出的对象按声明类型转成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回非 String 时走这里。</p>
-<p>驱动给的是 vector 自己的对象：list 是 <code>List</code>，struct 和 map 都是 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），而 DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 看和 INT/BIGINT 一模一样。所以每一步都由 <code>ColumnType</code> 驱动而不是看对象长相：声明 date 才把 <code>Integer</code> 当天数，声明 int 就原样是 int。map 键按声明类型拼成字符串（date 键也格式化），struct 按声明字段顺序逐个取而不信 map 的顺序，decimal 按声明 scale 归一。形状对不上（声明数组却来了 map）抛 <code>DataException</code> 并点名类型和实际 class，那是 schema 漂移，不能猜。</p>
+<p>驱动给的是 vector 自己的对象：list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），而 DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 看和 INT/BIGINT 一模一样。map 有两种形态：顶层列由驱动的 accessor 转成 <code>Map</code>；嵌套在 list/struct 里的是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>。读取器两种都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。所以每一步都由 <code>ColumnType</code> 驱动而不是看对象长相：声明 date 才把 <code>Integer</code> 当天数，声明 int 就原样是 int。map 键按声明类型拼成字符串（date 键也格式化），struct 按声明字段顺序逐个取而不信 map 的顺序，decimal 按声明 scale 归一。形状对不上（声明数组却来了 map）抛 <code>DataException</code> 并点名类型和实际 class，那是 schema 漂移，不能猜。</p>
 
 <h3 id="MysqlTextReader"><span class="fn">MysqlTextReader</span><span class="sz">276 行</span></h3>
 <p class="role">MySQL 协议传输的嵌套值读取器：把 BE <code>put_mysql_row_buffer</code> 拼出的文本按声明类型扫描成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回 String 时走这里。</p>
@@ -577,7 +577,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>TemporalTextTest</code></td><td>5</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致</td></tr>
-  <tr><td><code>ArrowValueReaderTest</code></td><td>8</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
+  <tr><td><code>ArrowValueReaderTest</code></td><td>9</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
   <tr><td><code>ColumnTypeParserTest</code></td><td>13</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlTextReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>RowExtractorTest</code></td><td>9</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列、嵌套列按 <code>getObject</code> 返回的 class 分流到两个读取器且结果相同、解析失败的复杂列仍走 <code>getString</code></td></tr>

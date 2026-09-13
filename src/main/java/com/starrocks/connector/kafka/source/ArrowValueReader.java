@@ -32,14 +32,23 @@ import java.util.Map;
  * Turns what the Arrow Flight JDBC driver's {@code getObject()} returns for a nested column into
  * the neutral value {@link ColumnType#toConnectValue} assembles from.
  *
- * <p>The driver hands back the vectors' own objects: {@code List} for a list, a {@code Map} for
- * both a struct (field name to value) and a map, {@code Text} for varchar, and for the types
- * StarRocks sends as something else on the wire, the raw number -- an {@code Integer} of days for
- * a DATE, a {@code Long} of microseconds for a DATETIME. Those two are indistinguishable from an
- * INT and a BIGINT by class alone, which is why every step here is driven by the declared
+ * <p>The driver hands back the vectors' own objects: {@code List} for a list, a {@code Map} of
+ * field name to value for a struct, {@code Text} for varchar, and for the types StarRocks sends
+ * as something else on the wire, the raw number -- an {@code Integer} of days for a DATE, a
+ * {@code Long} of microseconds for a DATETIME. Those two are indistinguishable from an INT and a
+ * BIGINT by class alone, which is why every step here is driven by the declared
  * {@link ColumnType} and not by what the object looks like.
+ *
+ * <p>A map comes in two shapes. At the top level the driver's accessor converts it to a
+ * {@code Map}; nested inside a list or a struct it is whatever {@code MapVector.getObject}
+ * returns, and {@code MapVector} inherits that from {@code ListVector}: a {@code List} of
+ * {@code {key, value}} entry maps.
  */
 final class ArrowValueReader {
+
+    /** Arrow's names for the two fields of a map entry struct (MapVector.KEY_NAME / VALUE_NAME). */
+    private static final String ENTRY_KEY = "key";
+    private static final String ENTRY_VALUE = "value";
 
     private ArrowValueReader() {
     }
@@ -57,10 +66,16 @@ final class ArrowValueReader {
                 return out;
             }
             case MAP: {
-                Map<?, ?> in = as(Map.class, value, type);
                 Map<String, Object> out = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> e : in.entrySet()) {
-                    out.put(keyText(type.key, e.getKey()), read(type.value, e.getValue()));
+                if (value instanceof Map) {
+                    for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
+                        out.put(keyText(type.key, e.getKey()), read(type.value, e.getValue()));
+                    }
+                    return out;
+                }
+                for (Object entry : as(List.class, value, type)) {
+                    Map<?, ?> kv = as(Map.class, entry, type);
+                    out.put(keyText(type.key, kv.get(ENTRY_KEY)), read(type.value, kv.get(ENTRY_VALUE)));
                 }
                 return out;
             }
