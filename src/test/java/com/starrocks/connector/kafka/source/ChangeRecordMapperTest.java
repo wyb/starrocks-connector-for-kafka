@@ -310,39 +310,56 @@ public class ChangeRecordMapperTest {
     }
 
     /**
-     * JSON and the complex types are still carried as text, but a consumer should be able to tell
-     * them from an ordinary string without knowing the source table, so their schemas get a logical
-     * name. JSON uses Debezium's own, which downstream SMTs and sinks already recognise; ARRAY, MAP
-     * and STRUCT get StarRocks-specific names, deliberately not io.debezium.data.Json -- that would
-     * promise every value parses as JSON, which has not been verified for NULLs, embedded quotes or
-     * nesting.
+     * An ARRAY, MAP or STRUCT whose COLUMN_TYPE parses gets its real nested schema and its value
+     * is assembled from the reader's neutral form. JSON stays text with Debezium's logical name --
+     * Connect has no JSON type -- and a complex column whose COLUMN_TYPE this connector cannot
+     * read ("struct<x int>" lacks the backticks FE always prints) falls back to text with a
+     * StarRocks-specific name, never a wrong schema.
      */
     @Test
-    public void testStructuredTextColumnsCarryALogicalTypeName() {
+    public void testParsedComplexColumnsAreNativeAndUnparsedOnesStayText() {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("j", Types.OTHER, 0, 0, true, "json", "json"),
-                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int>"),
-                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int>"),
+                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int(11)>"),
+                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int(11)>"),
+                new ColumnMeta("st", Types.OTHER, 0, 0, false, "struct", "struct<`x` int(11), `d` date>"),
                 new ColumnMeta("s", Types.OTHER, 0, 0, false, "struct", "struct<x int>"),
                 new ColumnMeta("v", Types.VARCHAR, 20, 0, true, "varchar", "varchar(20)"));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
                 cols, Collections.emptyList());
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("mk", 11);
+        java.util.Map<String, Object> st = new java.util.LinkedHashMap<>();
+        st.put("x", 7);
+        st.put("d", "2026-08-05");
 
         SourceRecord r = mapper.toSnapshotRecord(
-                new Object[]{"{\"k\":1}", "[1,2]", "{\"a\":1}", "{\"x\":7}", "plain"}, 1L);
-        Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();
+                new Object[]{"{\"k\":1}", Arrays.asList(1, 2), m, st, "{\"x\":7}", "plain"}, 1L);
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema rowSchema = after.schema();
 
         assertEquals("io.debezium.data.Json", rowSchema.field("j").schema().name());
-        assertEquals("com.starrocks.data.Array", rowSchema.field("a").schema().name());
-        assertEquals("com.starrocks.data.Map", rowSchema.field("m").schema().name());
+        assertEquals(Schema.Type.ARRAY, rowSchema.field("a").schema().type());
+        assertEquals(Schema.Type.INT32, rowSchema.field("a").schema().valueSchema().type());
+        assertEquals(Arrays.asList(1, 2), after.get("a"));
+        assertEquals(Schema.Type.MAP, rowSchema.field("m").schema().type());
+        assertEquals(m, after.get("m"));
+        assertEquals(Schema.Type.STRUCT, rowSchema.field("st").schema().type());
+        assertEquals("sr.db1.cx.st", rowSchema.field("st").schema().name());
+        assertFalse(rowSchema.field("st").schema().isOptional());
+        Struct stValue = (Struct) after.get("st");
+        assertEquals(7, stValue.get("x"));
+        assertEquals("2026-08-05", stValue.get("d"));
+        assertEquals(TemporalText.DATE_LOGICAL_NAME, stValue.schema().field("d").schema().name());
+
+        // The fallback: still STRING, still named, nullability still from the column.
         assertEquals("com.starrocks.data.Struct", rowSchema.field("s").schema().name());
+        assertEquals(Schema.Type.STRING, rowSchema.field("s").schema().type());
+        assertEquals("{\"x\":7}", after.get("s"));
+        assertFalse(rowSchema.field("s").schema().isOptional());
         // A plain string must stay unnamed -- naming everything would make the marker meaningless.
         assertNull(rowSchema.field("v").schema().name());
-
-        // Still STRING underneath, and nullability still comes from the column, not the name.
-        assertEquals(Schema.Type.STRING, rowSchema.field("a").schema().type());
         assertTrue(rowSchema.field("a").schema().isOptional());
-        assertFalse(rowSchema.field("s").schema().isOptional());
     }
 
     /** Columns described without the server's view (no srDataType) must still work, unnamed. */

@@ -39,9 +39,14 @@ public final class ColumnMeta {
     public final boolean nullable;
     /** {@code DATA_TYPE}: "array", "json", "hll", "varchar"... null when the server was not asked. */
     public final String srDataType;
-    /** {@code COLUMN_TYPE}: the full type with nesting, e.g. {@code "map<varchar(10),int>"}. Only
-     *  the unrecognized-type warning reads it. */
+    /** {@code COLUMN_TYPE}: the full type with nesting, e.g. {@code "map<varchar(10),int>"}. */
     public final String srColumnType;
+    /**
+     * The nesting of an ARRAY, MAP or STRUCT column, parsed from {@link #srColumnType}; null for
+     * every other column and for a complex one whose COLUMN_TYPE did not parse, which is then
+     * carried as text.
+     */
+    final ColumnType nested;
 
     public ColumnMeta(String name, int jdbcType, int precision, int scale, boolean nullable) {
         this(name, jdbcType, precision, scale, nullable, null, null);
@@ -56,6 +61,21 @@ public final class ColumnMeta {
         this.nullable = nullable;
         this.srDataType = srDataType;
         this.srColumnType = srColumnType;
+        this.nested = isComplex(srDataType) ? ColumnTypeParser.parse(srColumnType).orElse(null) : null;
+    }
+
+    static boolean isComplex(String srDataType) {
+        if (srDataType == null) {
+            return false;
+        }
+        switch (srDataType.trim().toLowerCase(java.util.Locale.ROOT)) {
+            case "array":
+            case "map":
+            case "struct":
+                return true;
+            default:
+                return false;
+        }
     }
 
 }

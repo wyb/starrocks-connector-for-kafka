@@ -261,7 +261,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 | `DATE` / `DATETIME` | `STRING` in StarRocks' own format, `2026-08-05` / `2026-08-05 12:34:56[.ffffff]` (fraction only when non-zero), logical names `com.starrocks.data.Date` / `.DateTime`. DATETIME carries no zone and none is claimed |
 | `BINARY` / `VARBINARY` | `BYTES` |
 | `JSON` | `STRING` named `io.debezium.data.Json` |
-| `ARRAY` / `MAP` / `STRUCT` | `STRING` named `com.starrocks.data.Array` / `.Map` / `.Struct` |
+| `ARRAY` / `MAP` / `STRUCT` | Native `array` / `map` / `struct` schemas -- a JSON array / object / object on the wire. Element types follow this table and nested elements are always optional. Map keys are always STRING (JsonConverter renders a map as an object only then); struct fields keep their declared order. The nesting comes from `information_schema.columns.COLUMN_TYPE`; a column whose COLUMN_TYPE does not parse (a struct field with a COMMENT, for one) falls back to `STRING` with the logical name `com.starrocks.data.Array` / `.Map` / `.Struct`, and the connector warns once at startup |
 | `HLL` / `BITMAP` / `PERCENTILE` | **rejected at startup** |
 
 **Complex types are carried as their text form**, not as Connect `ARRAY`/`MAP`/`STRUCT`. The value is preserved exactly as StarRocks renders it; what a consumer does not get is a nested schema it could project into. The logical name exists so a consumer can tell structured text from an ordinary string without knowing the source table.

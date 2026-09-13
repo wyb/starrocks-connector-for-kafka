@@ -58,6 +58,9 @@ final class RowExtractor {
     }
 
     static Object extractValue(ResultSet rs, ColumnMeta col, int index, Calendar utc) throws SQLException {
+        if (col.nested != null) {
+            return nested(rs, col, index);
+        }
         Object value;
         switch (col.jdbcType) {
             case Types.DECIMAL:
@@ -106,5 +109,20 @@ final class RowExtractor {
                 break;
         }
         return rs.wasNull() ? null : value;
+    }
+
+    /**
+     * The two transports hand a nested column over in different shapes: the MySQL driver gives the
+     * BE's text as a String, the Arrow Flight driver gives the vector's List or Map. The class of
+     * what getObject returns is the only thing that tells them apart, and each goes to its reader.
+     */
+    private static Object nested(ResultSet rs, ColumnMeta col, int index) throws SQLException {
+        Object raw = rs.getObject(index);
+        if (raw == null || rs.wasNull()) {
+            return null;
+        }
+        return raw instanceof String
+                ? MysqlTextReader.read(col.nested, (String) raw, MysqlTextReader.BinaryEncoding.HEX)
+                : ArrowValueReader.read(col.nested, raw);
     }
 }

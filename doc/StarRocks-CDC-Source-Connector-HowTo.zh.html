@@ -408,7 +408,7 @@ connect.timeout.ms=1000</code></pre>
   <tr><td><code>DATE</code> / <code>DATETIME</code></td><td><code>STRING</code>，StarRocks 自身格式：<code>2026-08-05</code> / <code>2026-08-05 12:34:56[.ffffff]</code>（微秒非零才带），逻辑名 <code>com.starrocks.data.Date</code> / <code>.DateTime</code>。DATETIME 无时区，输出也不声明时区</td></tr>
   <tr><td><code>BINARY</code> / <code>VARBINARY</code></td><td><code>BYTES</code></td></tr>
   <tr><td><code>JSON</code></td><td><code>STRING</code>，逻辑名 <code>io.debezium.data.Json</code></td></tr>
-  <tr><td><code>ARRAY</code> / <code>MAP</code> / <code>STRUCT</code></td><td><code>STRING</code>，逻辑名 <code>com.starrocks.data.Array</code> / <code>.Map</code> / <code>.Struct</code></td></tr>
+  <tr><td><code>ARRAY</code> / <code>MAP</code> / <code>STRUCT</code></td><td>原生的 <code>array</code> / <code>map</code> / <code>struct</code> schema，JSON 里是数组 / 对象 / 对象；元素类型按同表映射，嵌套元素均可空。MAP 的键一律为 STRING（JsonConverter 只在键为 STRING 时输出对象），struct 字段按声明顺序。嵌套类型取自 <code>information_schema.columns.COLUMN_TYPE</code>；解析不了的列（例如 struct 字段带 COMMENT）退化为 <code>STRING</code> 并带逻辑名 <code>com.starrocks.data.Array</code> / <code>.Map</code> / <code>.Struct</code>，启动时 WARN 一次</td></tr>
   <tr><td><code>HLL</code> / <code>BITMAP</code> / <code>PERCENTILE</code></td><td><strong>启动时直接拒绝</strong></td></tr>
 </table>
 </div>

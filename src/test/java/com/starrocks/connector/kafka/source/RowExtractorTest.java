@@ -200,6 +200,39 @@ public class RowExtractorTest {
         assertEquals(TimeZone.getTimeZone("UTC"), a.getTimeZone());
     }
 
+    /**
+     * A parsed complex column is read with getObject and routed by what comes back: the MySQL
+     * driver's String goes to the text reader, the Arrow driver's List to the Arrow reader. Both
+     * end in the same neutral value.
+     */
+    @Test
+    public void testNestedColumnIsRoutedByTheObjectTheDriverReturns() throws Exception {
+        ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
+
+        RecordingResultSet mysql = new RecordingResultSet();
+        mysql.next = "[\"2026-08-05\",null]";
+        Object fromText = RowExtractor.extractValue(proxyFor(mysql), nested, 1, RowExtractor.newUtcCalendar());
+        assertEquals(Arrays.asList("getObject"), mysql.calls);
+
+        RecordingResultSet arrow = new RecordingResultSet();
+        arrow.next = Arrays.asList(20670, null);
+        Object fromArrow = RowExtractor.extractValue(proxyFor(arrow), nested, 1, RowExtractor.newUtcCalendar());
+        assertEquals(Arrays.asList("getObject"), arrow.calls);
+
+        assertEquals(Arrays.asList("2026-08-05", null), fromText);
+        assertEquals(fromText, fromArrow);
+    }
+
+    /** A complex column whose COLUMN_TYPE did not parse keeps today's getString path. */
+    @Test
+    public void testUnparsedComplexColumnStillReadsText() throws Exception {
+        ColumnMeta unparsed = new ColumnMeta("s", Types.OTHER, 0, 0, true, "struct", "struct<x int>");
+        RecordingResultSet h = new RecordingResultSet();
+        h.next = "{\"x\":1}";
+        assertEquals("{\"x\":1}", RowExtractor.extractValue(proxyFor(h), unparsed, 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("getString"), h.calls);
+    }
+
     /** extractRow reads exactly the leading columns, leaving a CHANGES query's pseudo-columns. */
     @Test
     public void testExtractRowReadsOnlyTheDeclaredColumns() throws Exception {

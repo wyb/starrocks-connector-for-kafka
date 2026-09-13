@@ -209,6 +209,10 @@ public final class ChangeRecordMapper {
         if (value == null) {
             return;
         }
+        if (col.nested != null) {
+            struct.put(col.name, col.nested.toConnectValue(struct.schema().field(col.name).schema(), value));
+            return;
+        }
         if (isDecimalType(col.jdbcType) && value instanceof BigDecimal) {
             struct.put(col.name, ((BigDecimal) value).setScale(col.scale));
             return;
@@ -247,7 +251,12 @@ public final class ChangeRecordMapper {
         return jdbcType == Types.DECIMAL || jdbcType == Types.NUMERIC;
     }
 
-    private static Schema schemaFor(ColumnMeta col) {
+    private Schema schemaFor(ColumnMeta col) {
+        // A parsed ARRAY/MAP/STRUCT gets its real nested schema; the fallback below is for one
+        // whose COLUMN_TYPE this connector could not read.
+        if (col.nested != null) {
+            return col.nested.toConnectSchema(topic + "." + col.name, col.nullable);
+        }
         switch (col.jdbcType) {
             case Types.BIT:
             case Types.BOOLEAN:
@@ -290,12 +299,10 @@ public final class ChangeRecordMapper {
     }
 
     /**
-     * Everything StarRocks renders as text. JSON and the complex types get a logical name so a
-     * consumer can tell structured text from an ordinary string without knowing the source table.
-     *
-     * <p>JSON uses Debezium's own name; ARRAY/MAP/STRUCT get StarRocks-specific ones, because
-     * claiming the JSON name would promise every value parses as JSON -- unverified for NULLs,
-     * embedded quotes and nesting.
+     * Everything StarRocks renders as text. JSON keeps Debezium's own logical name. An ARRAY, MAP or
+     * STRUCT lands here only when its COLUMN_TYPE did not parse; it then keeps a StarRocks-specific
+     * name rather than claiming the JSON one, since BE's text is not JSON (unquoted map keys,
+     * single-quoted nested JSON).
      */
     private static Schema textSchemaFor(ColumnMeta col) {
         return namedString(col, logicalNameFor(col.srDataType));
