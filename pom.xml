@@ -15,6 +15,14 @@
     </properties>
 
     <build>
+        <!-- starrocks-connector.properties carries ${project.version} and is read by
+             com.starrocks.connector.kafka.common.Version, so it must be filtered. -->
+        <resources>
+            <resource>
+                <directory>src/main/resources</directory>
+                <filtering>true</filtering>
+            </resource>
+        </resources>
         <plugins>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
@@ -30,8 +38,20 @@
                             <artifactSet>
                                 <includes>
                                     <include>com.starrocks:starrocks-stream-load-sdk</include>
+                                    <include>org.mariadb.jdbc:mariadb-java-client</include>
+                                    <!-- Envelope's class-init also pulls TransactionMonitor and
+                                         SchemaNameAdjuster; common.sh's verify_plugin_jar is what
+                                         catches a missing one. -->
+                                    <include>io.debezium:debezium-core</include>
+                                    <!-- ~42MB uber-jar, bundled deliberately: needing a second
+                                         manual jar drop to switch transports is a deployment trap,
+                                         and the driver is inert unless a URL selects it. -->
+                                    <include>org.apache.arrow:flight-sql-jdbc-driver</include>
                                 </includes>
                             </artifactSet>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
+                            </transformers>
                         </configuration>
                     </execution>
                     <execution>
@@ -149,6 +169,20 @@
                     <artifactId>snappy-java</artifactId>
                 </exclusion>
             </exclusions>
+        </dependency>
+
+        <dependency>
+            <groupId>org.mariadb.jdbc</groupId>
+            <artifactId>mariadb-java-client</artifactId>
+            <version>3.3.3</version>
+        </dependency>
+
+        <!-- Version matches the StarRocks repo's own arrow.version, so the client speaks the
+             same Arrow wire format as the FE/BE Flight SQL service it connects to. -->
+        <dependency>
+            <groupId>org.apache.arrow</groupId>
+            <artifactId>flight-sql-jdbc-driver</artifactId>
+            <version>18.0.0</version>
         </dependency>
 
         <dependency>

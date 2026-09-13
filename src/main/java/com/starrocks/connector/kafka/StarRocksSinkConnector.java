@@ -20,6 +20,8 @@
 
 package com.starrocks.connector.kafka;
 
+import com.starrocks.connector.kafka.common.Version;
+
 import org.apache.kafka.common.config.Config;
 import org.apache.kafka.common.config.ConfigDef;
 import org.apache.kafka.common.config.ConfigValue;
@@ -44,12 +46,12 @@ public class StarRocksSinkConnector extends SinkConnector {
     @Override
     public void start(final Map<String, String> parsedConfig) {
         config = new HashMap<>(parsedConfig);
-        LOG.info("StarRocks sink connector started. version is " + Util.VERSION);
+        LOG.info("StarRocks sink connector started. version is " + Version.get());
     }
 
     @Override
     public void stop() {
-        LOG.info("StarRocks sink connector stopped. version is " + Util.VERSION);
+        LOG.info("StarRocks sink connector stopped. version is " + Version.get());
     }
 
     /** @return Sink task class */
@@ -109,6 +111,6 @@ public class StarRocksSinkConnector extends SinkConnector {
     /** @return connector version */
     @Override
     public String version() {
-        return Util.VERSION;
+        return Version.get();
     }
 }

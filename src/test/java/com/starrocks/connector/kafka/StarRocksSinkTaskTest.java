@@ -19,6 +19,7 @@
  */
 
 package com.starrocks.connector.kafka;
+import com.starrocks.connector.kafka.common.Version;
 import com.starrocks.connector.kafka.json.JsonConverter;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaAndValue;
@@ -165,5 +166,15 @@ public class StarRocksSinkTaskTest {
         SinkRecord sinkRecord = new SinkRecord(TOPIC, 0, null, null, recordSchema, value, 0);
         String row = sinkTask.getRecordFromSinkRecord(sinkRecord);
         Assert.assertEquals("{\"id\":1,\"name\":null}", row);
+    }
+
+    /**
+     * Connect surfaces version() to operators over the REST API. The hand-maintained constant this
+     * replaced said 1.0.3 while the POM said 1.0.5, so it reported a release that was never built.
+     */
+    @Test
+    public void testVersionIsTheOneThatWasBuilt() {
+        Assert.assertEquals(Version.get(), new StarRocksSinkTask().version());
+        Assert.assertEquals(Version.get(), new StarRocksSinkConnector().version());
     }
 }

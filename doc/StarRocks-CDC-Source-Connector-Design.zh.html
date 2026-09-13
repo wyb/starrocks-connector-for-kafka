@@ -1,0 +1,1152 @@
+<title>StarRocks CDC Source Connector 设计文档</title>
+<style>
+  :root {
+    --bg: #f7f8f9;
+    --surface: #ffffff;
+    --ink: #1f262e;
+    --ink-2: #5a646e;
+    --line: #e3e6e9;
+    --accent: #0e7c86;
+    --accent-ink: #0a5b63;
+    --amber: #b26a00;
+    --amber-bg: #fdf6ec;
+    --code-bg: #eff1f3;
+    --chip-bg: #e9edee;
+    --violet: #6b5ca5;
+    --danger: #c0392b;
+    --danger-bg: #fdf0ee;
+    --ok: #2f7d4f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #14181d;
+      --surface: #1a1f26;
+      --ink: #d9dee4;
+      --ink-2: #8b96a1;
+      --line: #2a3138;
+      --accent: #4fb3bd;
+      --accent-ink: #6fc5cd;
+      --amber: #e0a458;
+      --amber-bg: #241d13;
+      --code-bg: #1c2228;
+      --chip-bg: #232a32;
+      --violet: #a596d8;
+      --danger: #e07a68;
+      --danger-bg: #2a1c19;
+      --ok: #6bbd8a;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181d;
+    --surface: #1a1f26;
+    --ink: #d9dee4;
+    --ink-2: #8b96a1;
+    --line: #2a3138;
+    --accent: #4fb3bd;
+    --accent-ink: #6fc5cd;
+    --amber: #e0a458;
+    --amber-bg: #241d13;
+    --code-bg: #1c2228;
+    --chip-bg: #232a32;
+    --violet: #a596d8;
+    --danger: #e07a68;
+    --danger-bg: #2a1c19;
+    --ok: #6bbd8a;
+  }
+  :root[data-theme="light"] {
+    --bg: #f7f8f9;
+    --surface: #ffffff;
+    --ink: #1f262e;
+    --ink-2: #5a646e;
+    --line: #e3e6e9;
+    --accent: #0e7c86;
+    --accent-ink: #0a5b63;
+    --amber: #b26a00;
+    --amber-bg: #fdf6ec;
+    --code-bg: #eff1f3;
+    --chip-bg: #e9edee;
+    --violet: #6b5ca5;
+    --danger: #c0392b;
+    --danger-bg: #fdf0ee;
+    --ok: #2f7d4f;
+  }
+
+  body {
+    background: var(--bg);
+    color: var(--ink);
+    font-family: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", "Microsoft YaHei", system-ui, sans-serif;
+    font-size: 15.5px;
+    line-height: 1.85;
+    margin: 0;
+  }
+  main {
+    max-width: 820px;
+    margin: 0 auto;
+    padding: 48px 28px 96px;
+  }
+  code, pre, .mono {
+    font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  }
+  code {
+    background: var(--code-bg);
+    border-radius: 4px;
+    padding: 1px 5px;
+    font-size: 0.86em;
+  }
+  pre {
+    background: var(--code-bg);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 14px 16px;
+    overflow-x: auto;
+    font-size: 12.8px;
+    line-height: 1.7;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; }
+  .c { color: var(--ink-2); }
+
+  header.doc { border-bottom: 2px solid var(--ink); padding-bottom: 20px; margin-bottom: 8px; }
+  .eyebrow {
+    color: var(--accent);
+    font-size: 12px;
+    letter-spacing: 0.14em;
+    font-weight: 600;
+    margin: 0 0 10px;
+  }
+  h1 {
+    font-size: 27px;
+    font-weight: 700;
+    line-height: 1.4;
+    margin: 0 0 16px;
+    text-wrap: balance;
+  }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px; }
+  .meta span {
+    background: var(--chip-bg);
+    border-radius: 4px;
+    padding: 2px 10px;
+    font-size: 12.5px;
+    color: var(--ink-2);
+  }
+  .meta b { color: var(--ink); font-weight: 600; margin-left: 4px; }
+
+  h2 {
+    font-size: 19px;
+    font-weight: 700;
+    margin: 52px 0 14px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    text-wrap: balance;
+  }
+  h2 .no { color: var(--accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+  h3 { font-size: 16px; font-weight: 650; margin: 32px 0 8px; }
+  h4 { font-size: 14px; font-weight: 650; margin: 22px 0 6px; color: var(--accent-ink); }
+  p { margin: 10px 0; }
+  ul, ol { padding-left: 1.6em; margin: 10px 0; }
+  li { margin: 5px 0; }
+  strong { font-weight: 650; }
+
+  .lead { color: var(--ink-2); margin: 14px 0 0; }
+
+  .tablewrap { overflow-x: auto; margin: 14px 0; }
+  table { border-collapse: collapse; width: 100%; font-size: 13.8px; line-height: 1.7; }
+  th {
+    text-align: left;
+    font-size: 12.5px;
+    color: var(--ink-2);
+    font-weight: 650;
+    border-bottom: 1.5px solid var(--ink);
+    padding: 8px 14px 6px 2px;
+    white-space: nowrap;
+  }
+  td { border-bottom: 1px solid var(--line); padding: 8px 14px 8px 2px; vertical-align: top; }
+  td code { white-space: nowrap; }
+
+  .invariant {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin: 14px 0;
+  }
+  .invariant .tag {
+    color: var(--accent-ink);
+    font-size: 12px;
+    font-weight: 700;
+    letter-spacing: 0.1em;
+    display: block;
+    margin-bottom: 4px;
+  }
+  .invariant p:first-of-type { margin-top: 0; }
+  .invariant p:last-child { margin-bottom: 0; }
+
+  .warn { border-color: var(--amber); background: var(--amber-bg); }
+  .warn .tag { color: var(--amber); }
+
+  .layers { display: grid; gap: 8px; margin: 18px 0; }
+  .layers .box {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 11px 16px;
+  }
+  .layers .box h4 { margin: 0 0 4px; font-size: 13.5px; }
+  .layers .box p { margin: 0; font-size: 13.3px; color: var(--ink-2); }
+  .layers .flow { text-align: center; color: var(--ink-2); font-size: 12.5px; line-height: 1; }
+
+  .stores { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; margin: 16px 0; }
+  .store {
+    border: 1px solid var(--line);
+    background: var(--surface);
+    border-radius: 6px;
+    padding: 13px 16px;
+  }
+  .store h4 { margin: 0 0 8px; font-size: 13.5px; }
+  .store dl { margin: 0; font-size: 13.3px; }
+  .store dt { color: var(--ink-2); font-size: 12px; letter-spacing: 0.04em; margin-top: 8px; }
+  .store dt:first-child { margin-top: 0; }
+  .store dd { margin: 1px 0 0; }
+
+  .seq { margin: 16px 0; border-left: 2px solid var(--line); padding-left: 0; list-style: none; }
+  .seq li { margin: 0; padding: 9px 0 9px 20px; position: relative; font-size: 14px; }
+  .seq li::before {
+    content: "";
+    position: absolute;
+    left: -5px;
+    top: 18px;
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+  .seq .who {
+    display: inline-block;
+    font-size: 11.5px;
+    letter-spacing: 0.06em;
+    color: var(--ink-2);
+    background: var(--chip-bg);
+    border-radius: 3px;
+    padding: 1px 7px;
+    margin-right: 8px;
+    font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  }
+
+  .threads td:first-child { white-space: nowrap; }
+  .files td:first-child { white-space: nowrap; }
+
+  /* ---- 图 ---- */
+  figure { margin: 24px 0; }
+  .figwrap { overflow-x: auto; }
+  figure svg {
+    display: block;
+    width: 100%;
+    min-width: 600px;
+    height: auto;
+    font-family: "PingFang SC", "Hiragino Sans GB", "Source Han Sans SC", "Noto Sans SC", system-ui, sans-serif;
+  }
+  figcaption { color: var(--ink-2); font-size: 12.6px; margin-top: 10px; line-height: 1.7; }
+  figcaption b { color: var(--accent); font-weight: 650; margin-right: 6px; font-variant-numeric: tabular-nums; }
+
+  .legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 12.3px; color: var(--ink-2); margin: 0 0 10px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: middle; }
+
+  /* SVG 内部通用类 */
+  .bx  { fill: var(--surface); stroke: var(--line);   stroke-width: 1; }
+  .bxa { fill: var(--surface); stroke: var(--accent); stroke-width: 1.4; }
+  .bxw { fill: var(--amber-bg); stroke: var(--amber); stroke-width: 1.2; }
+  .bxd { fill: var(--danger-bg); stroke: var(--danger); stroke-width: 1.2; }
+  .bxg { fill: var(--chip-bg); stroke: none; }
+  .t   { fill: var(--ink);   font-size: 12.4px; }
+  .ts  { fill: var(--ink-2); font-size: 11.3px; }
+  .tb  { fill: var(--ink);   font-size: 12.6px; font-weight: 650; }
+  .ta  { fill: var(--accent-ink); font-size: 11.8px; font-weight: 650; }
+  .td  { fill: var(--danger); font-size: 11.8px; font-weight: 650; }
+  .tok { fill: var(--ok); font-size: 11.8px; font-weight: 650; }
+  .tm  { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 11.2px; fill: var(--ink); }
+  .tms { font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; font-size: 10.8px; fill: var(--ink-2); }
+  .ln  { stroke: var(--ink-2); stroke-width: 1.2; fill: none; }
+  .lnd { stroke: var(--danger); stroke-width: 1.4; fill: none; }
+  .lna { stroke: var(--accent); stroke-width: 1.3; fill: none; }
+  .ax  { stroke: var(--line); stroke-width: 1; }
+  .dash { stroke-dasharray: 4 3; }
+
+  footer { margin-top: 60px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--ink-2); font-size: 13px; }
+</style>
+
+<main>
+<header class="doc">
+  <p class="eyebrow">STARROCKS-CONNECTOR-FOR-KAFKA · 设计文档</p>
+  <h1>StarRocks CDC Source Connector 设计文档</h1>
+  <div class="meta">
+    <span>分支<b>cdc-source-connector</b></span>
+    <span>状态<b>已实现 · 未提交</b></span>
+    <span>交付语义<b>at-least-once</b></span>
+    <span>验证<b>双通道集群冒烟 9/9</b></span>
+  </div>
+  <p class="lead">本文描述连接器<strong>当前已实现</strong>的设计，而非最初的计划。使用方法见同目录下的《使用指南》；本文回答的是"为什么这样设计"。</p>
+</header>
+
+<h2 id="scope"><span class="no">1</span>定位与范围</h2>
+
+<p>这是一个 Kafka Connect <strong>source</strong> 连接器，方向与本仓库已有的 StarRocks sink 相反：把 StarRocks 存算分离表的变更数据持续流出到 Kafka，一张表对应一个 topic。</p>
+
+<p>它<strong>不新增 StarRocks 服务端能力</strong>，完全构建在已发布的原语之上：</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>原语</th><th>作用</th></tr>
+  <tr><td><code>bookmark_create</code> / <code>bookmark_release</code></td><td>元函数，在服务端钉住/释放一个版本位置，同时充当 vacuum 栅栏</td></tr>
+  <tr><td><code>[_BOOKMARK_&lt;id&gt;_]</code></td><td>查询提示，读取该 bookmark 钉住的时间点快照</td></tr>
+  <tr><td><code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code></td><td>查询提示，读取两个 bookmark 之间的增量变更</td></tr>
+  <tr><td><code>__CHANGE_TYPE__</code> / <code>__ROW_VERSION__</code></td><td>CHANGES 结果集的元数据伪列（0=INSERT/UPSERT，1=DELETE）</td></tr>
+</table>
+</div>
+
+<p>因此对服务端的唯一要求是：存算分离集群、开启 <code>enable_bookmark_meta_functions</code>、连接用户具备 <code>OPERATE</code> 权限、PRIMARY KEY 表提前打开 <code>enable_change_data_capture</code>。</p>
+
+<div class="invariant">
+  <span class="tag">设计取舍</span>
+  <p>曾评估过三条路线：<strong>①</strong> 在 StarRocks 内部实现订阅并直写 Kafka；<strong>②</strong> 引入 Flink 消费 CDC 再走 Flink-Kafka 生态；<strong>③</strong> 写一个 Kafka Connect source connector 走 JDBC。</p>
+  <p>选择 ③ 的理由：不动服务端代码（① 需要在 FE/BE 里维护一套投递、重试、位点管理），不引入一整个计算引擎作为纯搬运层（②），并且可以直接复用 Connect 生态既有的 offset 存储、rebalance、SMT、converter、DLQ 与 exactly-once 框架。代价是数据要经过一次 JDBC 序列化——这也是后来引入 Arrow Flight SQL 通道的动机。</p>
+</div>
+
+<h2 id="architecture"><span class="no">2</span>总体架构</h2>
+
+<p>整体可以拆成两个方向相反的平面：<strong>数据面</strong>把行从 StarRocks 搬到 Kafka；<strong>控制面</strong>反向决定服务端的 bookmark 什么时候可以安全删除。前者直白，后者是设计里真正复杂的部分。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 268" role="img" aria-label="数据面与控制面的双向架构图">
+  <defs>
+    <marker id="a1" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <text class="ta" x="8" y="20">数据面 · 记录如何流出</text>
+  <rect class="bx" x="8" y="34" width="132" height="58" rx="5"/>
+  <text class="tb" x="20" y="56">StarRocks 表</text>
+  <text class="ts" x="20" y="75">存算分离 · PK 表</text>
+
+  <line class="ln" x1="142" y1="63" x2="190" y2="63" marker-end="url(#a1)"/>
+  <text class="tms" x="166" y="55" text-anchor="middle">扫描</text>
+
+  <rect class="bxa" x="194" y="34" width="190" height="58" rx="5"/>
+  <text class="tm" x="206" y="57">[_BOOKMARK_] → 钉住快照读</text>
+  <text class="tm" x="206" y="77">[_CHANGES_] → 增量读</text>
+
+  <line class="ln" x1="386" y1="63" x2="426" y2="63" marker-end="url(#a1)"/>
+  <text class="tms" x="406" y="55" text-anchor="middle">行</text>
+
+  <rect class="bx" x="430" y="34" width="154" height="58" rx="5"/>
+  <text class="tb" x="440" y="56">ChangeRecordMapper</text>
+  <text class="ts" x="440" y="75">→ Debezium envelope</text>
+
+  <line class="ln" x1="586" y1="63" x2="628" y2="63" marker-end="url(#a1)"/>
+  <text class="tms" x="607" y="55" text-anchor="middle">记录</text>
+
+  <rect class="bx" x="632" y="34" width="120" height="58" rx="5"/>
+  <text class="tb" x="644" y="56">Kafka topic</text>
+  <text class="tms" x="644" y="75">sr.&lt;db&gt;.&lt;t&gt;</text>
+
+  <path class="ln dash" d="M692 92 L692 178" marker-end="url(#a1)"/>
+  <text class="tms" x="684" y="116" text-anchor="end">producer ack → offset 落盘</text>
+
+  <line class="ax dash" x1="8" y1="146" x2="660" y2="146"/>
+
+  <text class="ta" x="8" y="172">控制面 · 位点如何被保护（方向相反）</text>
+  <rect class="bx" x="8" y="186" width="170" height="58" rx="5"/>
+  <text class="tb" x="20" y="208">bookmark tracker</text>
+  <text class="ts" x="20" y="227">FE leader · vacuum 栅栏</text>
+
+  <line class="ln" x1="228" y1="215" x2="182" y2="215" marker-end="url(#a1)"/>
+  <text class="tms" x="205" y="207" text-anchor="middle">SQL 调用</text>
+
+  <rect class="bx" x="232" y="186" width="170" height="58" rx="5"/>
+  <text class="tm" x="244" y="207">bookmark_create</text>
+  <text class="tm" x="244" y="227">bookmark_release</text>
+
+  <line class="ln" x1="446" y1="215" x2="406" y2="215" marker-end="url(#a1)"/>
+  <text class="tms" x="426" y="207" text-anchor="middle">授权 id</text>
+
+  <rect class="bxa" x="450" y="186" width="140" height="58" rx="5"/>
+  <text class="tb" x="462" y="208">释放围栏</text>
+  <text class="ts" x="462" y="227">commit() 授权</text>
+
+  <line class="ln" x1="632" y1="215" x2="594" y2="215" marker-end="url(#a1)"/>
+  <text class="tms" x="613" y="207" text-anchor="middle">安全边界</text>
+
+  <rect class="bx" x="636" y="186" width="116" height="58" rx="5"/>
+  <text class="tb" x="648" y="208">offset store</text>
+  <text class="ts" x="648" y="227">位点落盘</text>
+</svg>
+</div>
+<figcaption><b>图 1</b>数据面自左向右，控制面自右向左。两者由虚线连接：只有当记录被 Kafka 确认、且其 offset 落盘之后，对应的 bookmark 才可能进入释放流程。第 3 节展开这条反向链路。</figcaption>
+</figure>
+
+<div class="layers">
+  <div class="box">
+    <h4>StarRocksCdcSourceConnector</h4>
+    <p>启动期做 preflight（逐表校验表模型/CDC 属性，并用<em>独立 holder</em> 探测 bookmark 元函数确实可用），把表按 round-robin 切成 <code>min(maxTasks, tables.size())</code> 组下发给 task。</p>
+  </div>
+  <div class="flow">↓ task.tables</div>
+  <div class="box">
+    <h4>StarRocksCdcSourceTask</h4>
+    <p>正确性核心。poll 循环 + bookmark 状态机 + 释放围栏。每张表一份独立的 <code>TableState</code>。</p>
+  </div>
+  <div class="flow">↓ Object[] row</div>
+  <div class="box">
+    <h4>ChangeRecordMapper</h4>
+    <p>纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，因此可单测。</p>
+  </div>
+  <div class="flow">↑ 由 CdcClient 供给</div>
+  <div class="box">
+    <h4>CdcClient / StarRocksJdbcClient</h4>
+    <p>接口 + JDBC 实现。<code>StarRocksJdbcClient</code> 只保留业务查询（bookmark 函数、快照/CHANGES 读、表元数据），底下三块各自独立：</p>
+  </div>
+  <div class="flow">↓ 委托</div>
+  <div class="box">
+    <h4>FeConnection　·　ColumnMetadataReader　·　RowExtractor</h4>
+    <p><strong>FeConnection</strong>：URL 扇出、传输通道判定、连接复用、FE leader 轮转、有界重试。<br>
+       <strong>ColumnMetadataReader</strong>：权威列清单，两种传输各用一套策略（见第 6 节）。<br>
+       <strong>RowExtractor</strong>：结果集行 → <code>Object[]</code>，<em>用同一份列清单定类型</em>。</p>
+  </div>
+</div>
+
+<p>辅助类：<code>SqlBuilder</code>（纯静态 SQL 构造，统一标识符/字面量转义）、<code>OffsetState</code>（offset map 编解码）、<code>ColumnMeta</code>、<code>NonTrackableException</code>（把服务端多种"不可追踪"错误归一化）。跨 sink/source 复用的部分放在 <code>com.starrocks.connector.kafka.common</code>：<code>Version</code>（版本号唯一来源，构建期由 Maven 过滤写入资源文件）与 <code>KeyValueListParser</code>（<code>a:b,a:b</code> 配置格式的唯一解析器）。</p>
+
+<div class="invariant">
+  <span class="tag">为什么要拆</span>
+  <p>拆分之前 <code>StarRocksJdbcClient</code> 是 728 行、32 个方法，同时承担驱动注册、URL 解析、连接生命周期、leader 轮转重试、列元数据、类型映射、行提取和全部业务查询。最直接的证据是它的测试：为了测 URL 解析，测试得用反射撬开 private static 方法——需要反射才能测一个纯函数，说明边界画错了。现在 <code>FeConnection.parseUrls</code> 和 <code>ColumnMetadataReader.toJdbcType</code> 都是包内可见，直接调用即可。</p>
+</div>
+
+<h4>为什么 Connector 要做 preflight</h4>
+<p><code>enable_bookmark_meta_functions</code> 在 StarRocks 里默认是 <code>false</code>，这是首次部署最可能踩的坑。没有这个探测的话，配置校验通过、task 正常启动，真正的原因要到某次 poll 失败后、剥掉两层 <code>getCause()</code> 才能看到。preflight 用一次 bookmark 创建+释放（TTL 60s）把这件事提前到 <code>start()</code>。释放是 best-effort——能证明开关已打开的是<em>创建</em>，泄漏的探测 bookmark 60s 内自行过期。</p>
+
+<div class="invariant warn">
+  <span class="tag">不要"简化"掉的细节</span>
+  <p>preflight 的 holder 必须与 task 的 holder <strong>不同</strong>（代码里是 <code>PROBE_HOLDER_SUFFIX = ":preflight"</code>）。<code>bookmark_create</code> 对同一 holder 是幂等的：当表的分区元数据未变、且该 holder 已经引用了最新 bookmark 时，FE 会返回<em>已存在</em>的那个 id。若 preflight 复用了 task 的 holder <code>kc:&lt;name&gt;</code>，那么任何一次 <code>start()</code>（重启、改配置、rebalance）都可能拿回 task 正在持有的 bookmark <code>B</code>，而 preflight 的释放会把 <code>B</code> 删掉——随后 task 恢复出持久 offset <code>B</code>，发起 <code>[_CHANGES_B_head_]</code>，得到 "bookmark B not found"。</p>
+  <p>这是实现过程中真实发生过的回归，由一次修复引入、又在集群冒烟里暴露出来。</p>
+</div>
+
+<h2 id="state"><span class="no">3</span>位点持久化：两个存储，一个 id</h2>
+
+<p>这是整个设计里最需要说清楚的一块：一次重启要正确恢复，依赖<strong>两处状态同时有效</strong>——Kafka Connect 侧记住"读到哪儿了"，StarRocks 侧还必须<strong>真的保留着</strong>那个位置。</p>
+
+<div class="stores">
+  <div class="store">
+    <h4>Kafka Connect offset store</h4>
+    <dl>
+      <dt>存什么</dt>
+      <dd><code>{"bookmark_id": &lt;head&gt;, "snapshot_done": &lt;bool&gt;}</code></dd>
+      <dt>键</dt>
+      <dd><code>{"db": ..., "table": ...}</code></dd>
+      <dt>存在哪</dt>
+      <dd>standalone：<code>offset.storage.file.filename</code><br>distributed：<code>connect-offsets</code> topic</dd>
+      <dt>谁写</dt>
+      <dd>worker，在 producer ack 之后，每 <code>offset.flush.interval.ms</code>（默认 60s）</dd>
+    </dl>
+  </div>
+  <div class="store">
+    <h4>StarRocks bookmark tracker</h4>
+    <dl>
+      <dt>存什么</dt>
+      <dd>真实的服务端对象，钉住一个版本、阻止 vacuum 回收</dd>
+      <dt>键</dt>
+      <dd>(db, table, holder)，holder = <code>kc:&lt;connector name&gt;</code></dd>
+      <dt>存在哪</dt>
+      <dd>FE 元数据，leader-only</dd>
+      <dt>谁写</dt>
+      <dd>连接器，通过 <code>bookmark_create</code> / <code>bookmark_renew</code> / <code>bookmark_release</code>；TTL（默认 7 天）兜底连接器停止轮询后的遗留引用</dd>
+    </dl>
+  </div>
+</div>
+
+<p>连接器自己<strong>不做任何位点持久化</strong>——它只是把 bookmark id 塞进每条记录的 <code>sourceOffset</code>，剩下的交给 Connect 标准机制。真正需要连接器自己管的是右边那半：让服务端的 bookmark 在需要它之前不被删掉，在不再需要之后尽快删掉。</p>
+
+<p>下面这张图是全文的骨架：一个 bookmark 从被创建到被释放，要穿过<strong>四个不同的线程</strong>。图里的颜色就是线程归属，后面 3.5 节会回到这一点。</p>
+
+<figure>
+<p class="legend">
+  <span><i style="background:var(--accent)"></i>poll 线程 · 全部 JDBC</span>
+  <span><i style="background:var(--ink-2)"></i>Connect 运行时</span>
+  <span><i style="background:var(--amber)"></i>producer 回调线程</span>
+  <span><i style="background:var(--violet)"></i>offset committer 线程</span>
+</p>
+<div class="figwrap">
+<svg viewBox="0 0 760 400" role="img" aria-label="bookmark 从创建到释放穿越四个线程的八个步骤">
+  <defs>
+    <marker id="a2" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <circle cx="30" cy="35" r="13" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text x="30" y="40" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--accent)">1</text>
+  <text class="ts" x="52" y="32" fill="var(--accent)">poll</text>
+  <text class="t" x="136" y="30"><tspan class="tm">bookmark_create</tspan> → head</text>
+  <text class="ts" x="136" y="48">head == committedBookmark 时本轮无新版本，直接跳过（idle dedup）</text>
+
+  <line class="ax" x1="14" y1="58" x2="746" y2="58"/>
+  <circle cx="30" cy="81" r="13" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text x="30" y="86" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--accent)">2</text>
+  <text class="ts" x="52" y="78" fill="var(--accent)">poll</text>
+  <text class="tm" x="136" y="76">[_CHANGES_&lt;base&gt;_&lt;head&gt;_] 流式读</text>
+  <text class="ts" x="136" y="94">强制 ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC（见第 4 节）</text>
+
+  <line class="ax" x1="14" y1="104" x2="746" y2="104"/>
+  <circle cx="30" cy="127" r="13" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text x="30" y="132" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--accent)">3</text>
+  <text class="ts" x="52" y="124" fill="var(--accent)">poll</text>
+  <text class="t" x="136" y="122">Mapper 逐行产出 SourceRecord</text>
+  <text class="tms" x="136" y="140">offset = {"bookmark_id": head, "snapshot_done": true}　← 位置就藏在记录里</text>
+
+  <line class="ax" x1="14" y1="150" x2="746" y2="150"/>
+  <circle cx="30" cy="173" r="13" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text x="30" y="178" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--ink-2)">4</text>
+  <text class="ts" x="52" y="170">运行时</text>
+  <text class="t" x="136" y="168">producer 发送到 Kafka topic</text>
+  <text class="ts" x="136" y="186">批量、重试、分区选择均由 Connect 运行时负责</text>
+
+  <line class="ax" x1="14" y1="196" x2="746" y2="196"/>
+  <circle cx="30" cy="219" r="13" fill="var(--surface)" stroke="var(--amber)" stroke-width="1.6"/>
+  <text x="30" y="224" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--amber)">5</text>
+  <text class="ts" x="52" y="216" fill="var(--amber)">producer</text>
+  <text class="t" x="136" y="214"><tspan class="tm">SubmittedRecords</tspan>：ack 回调标记该记录已发送</text>
+  <text class="ts" x="136" y="232" fill="var(--amber)">可提交 offset 只取<tspan font-weight="650">已 ack 的最长前缀</tspan>；task 不参与（未覆写 commitRecord）</text>
+
+  <line class="ax" x1="14" y1="242" x2="746" y2="242"/>
+  <circle cx="30" cy="265" r="13" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text x="30" y="270" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--ink-2)">6</text>
+  <text class="ts" x="52" y="262">运行时</text>
+  <text class="t" x="136" y="260">offset flush → 写入 offset store</text>
+  <text class="ts" x="136" y="278">持久化水位。每 offset.flush.interval.ms 一次，默认 60s</text>
+
+  <line class="ax" x1="14" y1="288" x2="746" y2="288"/>
+  <circle cx="30" cy="311" r="13" fill="var(--surface)" stroke="var(--violet)" stroke-width="1.6"/>
+  <text x="30" y="316" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--violet)">7</text>
+  <text class="ts" x="52" y="308" fill="var(--violet)">committer</text>
+  <text class="t" x="136" y="306"><tspan class="tm">commit()</tspan>：把 &lt; 围栏的 bookmark 移入 pendingReleases</text>
+  <text class="ts" x="136" y="324" fill="var(--violet)">只入队，不发 SQL；围栏 = min(offset store 里的 bookmark_id, committedBookmark)</text>
+
+  <line class="ax" x1="14" y1="334" x2="746" y2="334"/>
+  <circle cx="30" cy="357" r="13" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text x="30" y="362" text-anchor="middle" font-size="12.5" font-weight="650" fill="var(--accent)">8</text>
+  <text class="ts" x="52" y="354" fill="var(--accent)">poll</text>
+  <text class="t" x="136" y="352"><tspan class="tm">drainPendingReleases()</tspan> → <tspan class="tm">bookmark_release</tspan></text>
+  <text class="ts" x="136" y="370">推迟到下次 poll 开头执行，因为 JDBC client 是单线程的</text>
+
+  <path class="ln" d="M690 357 L726 357 L726 35 L694 35" marker-end="url(#a2)"/>
+  <text class="tms" transform="rotate(-90 740 196)" x="740" y="196" text-anchor="middle">下一轮 poll</text>
+</svg>
+</div>
+<figcaption><b>图 2</b>步骤 1–3、8 在 poll 线程（所有 JDBC 调用都被约束在这里）；5 在 producer 发送回调；7 在 offset committer 线程。步骤 5 与 6 之间的时间差——ack 已发生但 offset 尚未落盘——正是释放围栏要防的窗口。</figcaption>
+</figure>
+
+<h3>3.1 写入路径</h3>
+
+<p>每条 <code>SourceRecord</code> 都背着自己的位置（<code>ChangeRecordMapper</code>）：</p>
+
+<pre><code><span class="c">// 变更记录</span>
+sourcePartition = {"db": db, "table": table}
+sourceOffset    = {"bookmark_id": head, "snapshot_done": true}
+
+<span class="c">// 快照记录</span>
+sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
+
+<p>两个决定：</p>
+
+<ul>
+  <li><strong>sourcePartition 按表拆分</strong>，而不是整个连接器一个位点。表之间因此互相独立，rebalance 把表重新分配到别的 task 上也能各自恢复。</li>
+  <li><strong>bookmark_id 存的是窗口的 head</strong>，即"读到哪儿了"。重启后它成为下一个窗口的 base。</li>
+</ul>
+
+<h3>3.2 恢复路径</h3>
+
+<ol class="seq">
+  <li><span class="who">start()</span>拿到本 task 分到的表清单，逐表 <code>reader.offset(sourcePartition(db, t))</code> 读回 raw map。</li>
+  <li><span class="who">restoreOffset()</span><code>OffsetState.fromMap</code> 解码，容忍 <code>bookmark_id</code> 被反序列化成 <code>Integer</code> 或 <code>Long</code>；解不出非负数就整条丢弃回 <code>fresh()</code>，不把 <code>-1</code> 哨兵和 <code>snapshot_done</code> 配成矛盾状态。</li>
+  <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）保持 fresh，下次 poll 重做整表快照。</li>
+  <li><span class="who">restoreOffset()</span>把恢复出来的 bookmark <strong>重新压回 <code>liveBookmarks</code></strong>。</li>
+  <li><span class="who">poll()</span><code>head = bookmarkCreate(...)</code>；若 <code>head == committedBookmark</code> 则本轮无新版本，直接跳过（idle dedup）；否则读 <code>[_CHANGES_base_head_]</code>。</li>
+</ol>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 330" role="img" aria-label="重启时的位点恢复决策流程">
+  <defs>
+    <marker id="a3" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <rect class="bx" x="264" y="8" width="232" height="42" rx="5"/>
+  <text class="tb" x="380" y="26" text-anchor="middle">start()</text>
+  <text class="tms" x="380" y="42" text-anchor="middle">reader.offset({db, table})</text>
+  <line class="ln" x1="380" y1="50" x2="380" y2="66" marker-end="url(#a3)"/>
+
+  <path class="bxa" d="M380 70 L492 102 L380 134 L268 102 Z"/>
+  <text class="tm" x="380" y="99" text-anchor="middle">snapshot_done</text>
+  <text class="tm" x="380" y="115" text-anchor="middle">== true ?</text>
+
+  <path class="ln" d="M268 102 L185 102 L185 160" marker-end="url(#a3)"/>
+  <text class="ta" x="214" y="95">true</text>
+
+  <path class="ln" d="M492 102 L585 102 L585 160" marker-end="url(#a3)"/>
+  <text class="ts" x="500" y="95" fill="var(--amber)">false，或完全没有 offset</text>
+
+  <rect class="bxa" x="60" y="164" width="250" height="80" rx="5"/>
+  <text class="tms" x="72" y="184">committedBookmark = bookmark_id</text>
+  <text class="tms" x="72" y="202">snapshotDone = true</text>
+  <text class="tms" x="72" y="220" fill="var(--danger)">liveBookmarks.addLast(bookmark_id)</text>
+  <text class="td" x="72" y="236">★ 漏掉这行 = 每次重启泄漏一个 bookmark</text>
+
+  <rect class="bxw" x="450" y="164" width="270" height="80" rx="5"/>
+  <text class="tb" x="462" y="186">保持 fresh，不信任该位点</text>
+  <text class="tms" x="462" y="206">committedBookmark = -1</text>
+  <text class="tms" x="462" y="224">snapshotDone = false</text>
+
+  <line class="ln" x1="185" y1="244" x2="185" y2="264" marker-end="url(#a3)"/>
+  <line class="ln" x1="585" y1="244" x2="585" y2="264" marker-end="url(#a3)"/>
+
+  <rect class="bx" x="60" y="268" width="250" height="48" rx="5"/>
+  <text class="tb" x="72" y="288">续读</text>
+  <text class="tms" x="72" y="306">[_CHANGES_&lt;id&gt;_&lt;head&gt;_]</text>
+
+  <rect class="bx" x="450" y="268" width="270" height="48" rx="5"/>
+  <text class="tb" x="462" y="288">bootstrap()</text>
+  <text class="ts" x="462" y="306">整表重做快照 —— 宁可重复，不留空洞</text>
+</svg>
+</div>
+<figcaption><b>图 3</b>只有 <code>snapshot_done=true</code> 的位点才被信任。★ 那一行不是可选的：它把恢复出来的 bookmark 重新放回本地的存活队列，否则服务端那一份永远等不到释放。这个 bug 真实发生过——集群冒烟日志里 21275 一直不被释放、而相邻 id 都正常回收，才定位到。</figcaption>
+</figure>
+
+<div class="invariant">
+  <span class="tag">不变式 · 快照崩溃语义</span>
+  <p>快照行的 offset 一律 <code>snapshot_done=false</code>，变更记录一律 <code>true</code>。因此在"第一条变更记录的 offset 落盘"之前的任意时刻崩溃，恢复出来的都是 <code>false</code>，会<strong>整表重做快照</strong>，而不是接着一份投递了一半的快照往下走。宁可重复，不留静默空洞。</p>
+</div>
+
+<div class="invariant">
+  <span class="tag">不变式 · 恢复的 bookmark 必须重新入队</span>
+  <p>第 4 步不是可选的。漏掉它的话，每次重启/rebalance/改配置都会在服务端留下一个孤儿 bookmark，钉住 vacuum 直到 TTL（默认 7 天）过期。这个 bug 真实发生过，是在集群冒烟日志里看到 21275 一直不被释放、而相邻 id 都正常释放才定位到的。</p>
+  <p>重新入队是安全的：<code>commit()</code> 只释放严格早于"上一轮 ack 水位"的 bookmark，所以这一个会一直活到更新窗口的记录被确认为止——那正是保护崩溃重放基点所需要的栅栏。</p>
+</div>
+
+<h3>3.3 释放围栏：只信 offset store 已经落盘的位置</h3>
+
+<p>Connect 的 <code>commit()</code> 只告诉你"一次 offset flush 的时机到了"，<strong>不告诉你是哪个 offset</strong>——甚至不保证真的 flush 过：<code>WorkerSourceTask.commitOffsets()</code> 里 <code>if (!shouldFlush) { … commitSourceTask(); return true; }</code>，零次 flush 也会调用 <code>commit()</code>。同时，一个 bookmark 可能从未产生任何记录（空的 CHANGES 窗口也会推进 <code>committedBookmark</code>）。所以"保留最新 N 个"、"释放早于上一轮已确认水位的"这类规则，迟早会释放掉持久 offset 正指着的那个 base，重启就 <code>CHANGE_NOT_TRACKABLE</code>。</p>
+
+<p>实现不再从 <code>commit()</code> 的<em>发生</em>推断落盘进度，而是<strong>直接去问 offset store</strong>：</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>取值</th><th>含义</th></tr>
+  <tr><td><code>durableBookmarkOf(t)</code></td><td><code>context.offsetStorageReader().offset(sourcePartition(db, table))</code> 里的 <code>bookmark_id</code>。读不到、拿不到 reader、或字段不是数字时为 <code>-1</code>。</td></tr>
+  <tr><td><code>t.committedBookmark</code></td><td>本 task 自己已经推进到的位置。<code>volatile</code>：commit 线程读，poll 线程写。</td></tr>
+  <tr><td><code>fence</code></td><td><code>Math.min(durable, committedBookmark)</code>。<code>&lt; 0</code> 时本轮不释放该表。</td></tr>
+</table>
+</div>
+
+<p>每次 <code>commit()</code> 逐表求出 <code>fence</code>，释放严格早于它的 bookmark（进 <code>pendingReleases</code>，由 poll 线程实际调用 <code>bookmark_release</code>）。<code>fence</code> 自身<strong>不释放</strong>——它正是重启时的恢复点。</p>
+
+<p>安全性来自 reader 的读取方向：<code>OffsetStorageReaderImpl.offset()</code> 是穿透读（<code>offsetReadFuture.get()</code>），<strong>看不到尚未 flush 的写入</strong>。也就是说它只会偏旧，不会偏新；而偏旧的后果仅仅是这一轮少释放几个，下一轮补上。</p>
+
+<p><code>Math.min</code> 那一步是跨代保护：offset store 以 connector 名而非 task 世代为键，一个仍在 flush 的僵尸前任会让 store 的答案越过本 task 自己的位置——不钳制的话，task 就会释放掉它自己刚刚恢复所依赖的那个 bookmark。</p>
+
+<p>读失败按表隔离：记一条 WARN，该表的释放推迟到下一次 <code>commit()</code>，不影响其余表，也不失败 task。读被中断则恢复中断标志并整轮返回——继续下去只会让剩下每张表各自在自己的读上再阻塞一次，而中断信息已经丢了。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 300" role="img" aria-label="释放围栏直接读取 offset store 的时序图">
+  <defs>
+    <marker id="a4" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <text class="tms" x="124" y="30">时间</text>
+  <line class="ax" x1="124" y1="38" x2="300" y2="38" marker-end="url(#a4)"/>
+
+  <text class="ts" x="8" y="76" fill="var(--accent)">poll 线程</text>
+  <line class="ax" x1="124" y1="72" x2="740" y2="72"/>
+  <circle cx="165" cy="72" r="5" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text class="tms" x="165" y="61" text-anchor="middle">读窗口 → B1</text>
+  <circle cx="405" cy="72" r="5" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.6"/>
+  <text class="tms" x="405" y="61" text-anchor="middle">读窗口 → B2</text>
+
+  <text class="ts" x="8" y="126">offset store</text>
+  <line class="ax" x1="124" y1="122" x2="740" y2="122"/>
+  <circle cx="320" cy="122" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text class="tms" x="320" y="111" text-anchor="middle">flush → B1</text>
+  <circle cx="640" cy="122" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text class="tms" x="640" y="111" text-anchor="middle">flush → B2</text>
+
+  <text class="ts" x="8" y="176" fill="var(--violet)">commit()</text>
+  <line class="ax" x1="124" y1="172" x2="740" y2="172"/>
+  <circle cx="555" cy="172" r="6" fill="var(--surface)" stroke="var(--violet)" stroke-width="1.8"/>
+  <text class="tms" x="555" y="191" text-anchor="middle">#1 读到 B1 → 释放 &lt; B1（无）</text>
+  <circle cx="710" cy="172" r="6" fill="var(--surface)" stroke="var(--violet)" stroke-width="1.8"/>
+  <text class="tms" x="710" y="191" text-anchor="middle">#2 读到 B2 → 释放 B1</text>
+
+  <line class="ax dash" x1="555" y1="122" x2="555" y2="172"/>
+  <line class="ax dash" x1="710" y1="122" x2="710" y2="172"/>
+  <text class="td" x="559" y="140">此刻 store 仍答 B1</text>
+
+  <rect class="bxd" x="8" y="214" width="364" height="78" rx="5"/>
+  <text class="td" x="20" y="234">✕　若从「commit() 发生了」推断</text>
+  <text class="ts" x="20" y="253">shouldFlush 为假时 commit() 照样触发，一次 flush</text>
+  <text class="ts" x="20" y="270">都没发生。围栏据此前移，就会释放掉一个</text>
+  <text class="ts" x="20" y="285">从未落盘的位置——崩溃后 bookmark not found。</text>
+
+  <rect class="bx" x="388" y="214" width="364" height="78" rx="5" style="stroke:var(--ok);stroke-width:1.3"/>
+  <text class="tok" x="400" y="234">✓　实际规则：直接问 offset store</text>
+  <text class="ts" x="400" y="253">穿透读看不到未 flush 的写入，答案只会偏旧。</text>
+  <text class="ts" x="400" y="270">偏旧 = 这一轮少释放，下一轮补上；</text>
+  <text class="ts" x="400" y="285">fence 自身永不释放，它就是恢复点。</text>
+</svg>
+</div>
+<figcaption><b>图 4</b><code>commit()</code> 不携带任何 offset 信息，且在零次 flush 时也会被调用，所以"commit 过了"推不出"落盘了"。task 因此在每次 <code>commit()</code> 里逐表读一次 offset store：#1 落在 flush→B2 之前，store 仍答 B1，于是不释放任何东西；#2 时 store 已答 B2，B1 才被释放，而那时它早已不是任何恢复点。</figcaption>
+</figure>
+
+<h3>3.4 租约续期</h3>
+<p><code>bookmark_create</code> 在表未变化时返回既有 id 但<strong>不刷新其租约</strong>，所以没有续期时，
+空闲超过 <code>source.bookmark.ttl.ms</code> 的表会丢失位点。每轮 poll 在 <code>drainPendingReleases</code>
+之后调 <code>renewLiveBookmarks(t)</code>：对该表持有的<strong>每一个</strong> bookmark（不只
+<code>committedBookmark</code>——ack 滞后时旧窗口的引用同样在计时，且其中任何一个都可能成为重启恢复点）调
+<code>bookmark_renew</code>。排期取<strong>授予租约的三分之一与五分钟中较小者</strong>：集群上限是 mutable 配置，
+只按租约排期会让一个已经过时的租约最长 56 小时不被复查。</p>
+<ul>
+  <li><strong>节奏取服务端授予的租约的 1/3</strong>，不是配置值：真正决定过期的是
+      两者中较小的一个（任一侧 <code>&lt;= 0</code> 按不限处理），而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变，
+      <code>bookmark_renew</code> 因此把生效值作为返回值带回。</li>
+  <li><strong>只有成功的轮次推进节奏时钟</strong>；全失败的轮次从一个 poll 间隔起步指数退避（租约未知时封顶一分钟，已知后封顶租约/3），
+      瞬时故障秒级重试，没有 <code>bookmark_renew</code> 的旧集群渐近回到无续期时的节奏。</li>
+  <li>续租失败不触发 <code>source.nontrackable.policy</code>：位点是否真丢了由下一次 CHANGES 读判定，
+      恢复入口保持唯一。</li>
+  <li>续租只在 poll 线程发 SQL；锁内仅拷贝 <code>liveBookmarks</code>。单次 poll 长于租约
+      （如大表初始快照）时无法续租——见使用指南限制第 1 条。</li>
+</ul>
+
+<h3>3.5 线程模型</h3>
+
+<p>Connect 运行时会从两个线程调进来，而 JDBC client 是单线程的：</p>
+
+<div class="tablewrap">
+<table class="threads">
+  <tr><th>线程</th><th>入口</th><th>约束</th></tr>
+  <tr><td>task poll 线程</td><td><code>poll()</code>、<code>bootstrap()</code>、<code>drainPendingReleases()</code>、<code>renewLiveBookmarks()</code></td><td><strong>所有 JDBC 都在这里</strong></td></tr>
+  <tr><td>SourceTaskOffsetCommitter</td><td><code>commit()</code></td><td>读 offset store（阻塞 IO），只入队待释放 id，<strong>不发 SQL</strong></td></tr>
+</table>
+</div>
+
+<p>因此 <code>commit()</code> 授权释放之后，真正的 <code>bookmark_release</code> round trip 被推迟到下一次 <code>poll()</code> 开头的 <code>drainPendingReleases()</code> 执行。</p>
+
+<ul>
+  <li><code>liveBookmarks</code>（<code>ArrayDeque</code>）由 <code>synchronized (liveBookmarks)</code> 保护：commit 线程在里面挑出低于围栏的 id，poll 线程在里面追加和续期取快照。这是真并发，不是交错——早期版本没加锁，是设计缺陷。</li>
+  <li><code>committedBookmark</code> 是 <code>volatile</code>：poll 线程写，commit 线程读来钳制围栏。它不进监视器，因为读它的那一步（<code>Math.min</code>）不需要与 deque 的修改原子。</li>
+  <li><code>pendingReleases</code> 是 <code>ConcurrentLinkedQueue</code>，自身线程安全，不需要外部监视器。</li>
+  <li>释放失败是 best-effort：记 WARN（带表名和 id），该 bookmark 挂到 TTL 过期。成功释放记 <strong>INFO</strong>——否则"没有释放失败"和"根本没尝试释放"在日志里无法区分，一个卡死的栅栏会看起来很健康，直到 vacuum 停止回收存储。</li>
+</ul>
+
+<h2 id="ordering"><span class="no">4</span>顺序不变式</h2>
+
+<p>CHANGES 扫描的自然输出顺序是<strong>版本降序</strong>，且同一版本内 INSERT 在 DELETE 之前。直接透传是错的。所有 CHANGES 查询因此强制带上：</p>
+
+<pre><code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code></pre>
+
+<p>转成版本升序、同版本内 DELETE 先于 INSERT。这是正确性不变式，不是格式化偏好：一次 UPDATE 在下游必须表现为 <code>op=d</code>(旧值) 后跟 <code>op=c</code>(新值)。集群冒烟的 step 5 专门断言这一点，该子句一旦回归就会失败。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 384" role="img" aria-label="CHANGES 结果集排序前后的对比">
+  <defs>
+    <marker id="a5" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <rect class="bxd" x="8" y="8" width="744" height="150" rx="5"/>
+  <text class="tb" x="22" y="28">BE 的自然输出顺序　<tspan class="ts">版本降序；同一版本内 INSERT 在 DELETE 之前</tspan></text>
+  <text class="tms" x="22" y="50">__ROW_VERSION__</text>
+  <text class="tms" x="168" y="50">__CHANGE_TYPE__</text>
+  <text class="tms" x="316" y="50">id</text>
+  <text class="tms" x="368" y="50">amt</text>
+  <text class="tms" x="446" y="50">含义</text>
+  <text class="tms" x="614" y="50">下游看到</text>
+  <line class="ax" x1="22" y1="58" x2="738" y2="58"/>
+  <text class="tm" x="22" y="78">7</text><text class="tm" x="168" y="78">0</text>
+  <text class="tm" x="316" y="78">1</text><text class="tm" x="368" y="78">200</text>
+  <text class="ts" x="446" y="78">UPDATE 之后的新值</text><text class="tm" x="614" y="78">op=c</text>
+  <text class="tm" x="22" y="100">7</text><text class="tm" x="168" y="100">1</text>
+  <text class="tm" x="316" y="100">1</text><text class="tm" x="368" y="100">20</text>
+  <text class="ts" x="446" y="100">UPDATE 之前的旧值</text><text class="tm" x="614" y="100">op=d</text>
+  <text class="tm" x="22" y="122">5</text><text class="tm" x="168" y="122">0</text>
+  <text class="tm" x="316" y="122">3</text><text class="tm" x="368" y="122">30</text>
+  <text class="ts" x="446" y="122">更早的一次 INSERT</text><text class="tm" x="614" y="122">op=c</text>
+  <text class="td" x="22" y="145">✕　按此顺序应用：先写入 amt=200，再执行删除 —— 这一行最终消失了</text>
+
+  <line class="ln" x1="380" y1="158" x2="380" y2="172" marker-end="url(#a5)"/>
+  <rect class="bxg" x="196" y="176" width="368" height="28" rx="4"/>
+  <text class="tm" x="380" y="195" text-anchor="middle">ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</text>
+  <line class="ln" x1="380" y1="204" x2="380" y2="218" marker-end="url(#a5)"/>
+
+  <rect class="bx" x="8" y="222" width="744" height="150" rx="5" style="stroke:var(--ok);stroke-width:1.3"/>
+  <text class="tb" x="22" y="242">连接器实际发出的顺序　<tspan class="ts">版本升序；同一版本内 DELETE 先于 INSERT</tspan></text>
+  <text class="tms" x="22" y="264">__ROW_VERSION__</text>
+  <text class="tms" x="168" y="264">__CHANGE_TYPE__</text>
+  <text class="tms" x="316" y="264">id</text>
+  <text class="tms" x="368" y="264">amt</text>
+  <text class="tms" x="446" y="264">含义</text>
+  <text class="tms" x="614" y="264">下游看到</text>
+  <line class="ax" x1="22" y1="272" x2="738" y2="272"/>
+  <text class="tm" x="22" y="292">5</text><text class="tm" x="168" y="292">0</text>
+  <text class="tm" x="316" y="292">3</text><text class="tm" x="368" y="292">30</text>
+  <text class="ts" x="446" y="292">更早的一次 INSERT</text><text class="tm" x="614" y="292">op=c</text>
+  <text class="tm" x="22" y="314">7</text><text class="tm" x="168" y="314">1</text>
+  <text class="tm" x="316" y="314">1</text><text class="tm" x="368" y="314">20</text>
+  <text class="ts" x="446" y="314">UPDATE 之前的旧值</text><text class="tm" x="614" y="314">op=d</text>
+  <text class="tm" x="22" y="336">7</text><text class="tm" x="168" y="336">0</text>
+  <text class="tm" x="316" y="336">1</text><text class="tm" x="368" y="336">200</text>
+  <text class="ts" x="446" y="336">UPDATE 之后的新值</text><text class="tm" x="614" y="336">op=c</text>
+  <text class="tok" x="22" y="359">✓　先 d（旧值 20）后 c（新值 200）—— 与 UPDATE 的真实语义一致</text>
+</svg>
+</div>
+<figcaption><b>图 5</b>后果是具体的：直接透传 BE 的自然顺序，消费者会先写入新值、再执行删除，被 UPDATE 的那一行在下游<strong>凭空消失</strong>。这就是那句 ORDER BY 不能省的原因。</figcaption>
+</figure>
+
+<h2 id="format"><span class="no">5</span>记录格式</h2>
+
+<p>value 是标准 Debezium envelope，由 <strong>Debezium 官方的 <code>io.debezium.data.Envelope</code></strong> 构建，而不是手工拼装。</p>
+
+<div class="invariant">
+  <span class="tag">为什么必须用官方 Envelope</span>
+  <p>该库拥有 envelope 的字段集合与<strong>字段顺序</strong>（<code>before, after, source, op, ts_ms, transaction</code>），以及各工厂方法打的 <code>op</code> 码。这个顺序是 Avro schema 身份的一部分，下游消费者和 schema registry 会拿它做比较；手写的 envelope 会静默漂移。此外 <code>.Envelope</code> 这个 schema 名后缀正是各类 SMT 判断"这是不是 Debezium 记录"的依据。</p>
+  <p>初版是手写的，后来改成标准实现。<strong>不要改回 <code>SchemaBuilder</code>/<code>Struct</code> 手工拼装。</strong></p>
+</div>
+
+<div class="tablewrap">
+<table>
+  <tr><th>字段</th><th>内容</th></tr>
+  <tr><td><code>op</code></td><td><code>r</code> 快照 / <code>c</code> INSERT·UPSERT / <code>d</code> DELETE</td></tr>
+  <tr><td><code>before</code> / <code>after</code></td><td>行 struct（optional schema，因为 <code>c</code>/<code>d</code> 各有一侧为 null）</td></tr>
+  <tr><td><code>source</code></td><td><code>{db, table, row_version, bookmark: {base, head}}</code></td></tr>
+  <tr><td><code>transaction</code></td><td>恒为 null——StarRocks 的 CHANGES 流不携带事务元数据</td></tr>
+  <tr><td>key</td><td>主键列组成的 struct；无主键时为 null</td></tr>
+</table>
+</div>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 282" role="img" aria-label="Debezium envelope 的字段结构与 key、分区的关系">
+  <rect class="bxa" x="8" y="8" width="500" height="268" rx="5"/>
+  <text class="tm" x="24" y="30" fill="var(--accent-ink)">&lt;topic&gt;.Envelope</text>
+  <text class="ts" x="24" y="48">字段集合与顺序由 io.debezium.data.Envelope 拥有，不可手工重排</text>
+
+  <rect class="bxg" x="20" y="58" width="476" height="24" rx="3"/>
+  <text class="tm" x="30" y="75">before</text>
+  <text class="ts" x="130" y="75">行 struct（optional）· 仅 op=d 时非空</text>
+
+  <rect class="bxg" x="20" y="88" width="476" height="24" rx="3"/>
+  <text class="tm" x="30" y="105">after</text>
+  <text class="ts" x="130" y="105">行 struct（optional）· op=r / op=c 时非空</text>
+
+  <text class="tm" x="30" y="136">source</text>
+  <rect class="bx" x="120" y="118" width="376" height="70" rx="4"/>
+  <text class="tms" x="132" y="138">db, table</text>
+  <text class="tms" x="132" y="156">row_version<tspan fill="var(--amber)">　← 快照行恒为 0，不是 bookmark id</tspan></text>
+  <text class="tms" x="132" y="174">bookmark { base, head }<tspan fill="var(--ink-2)">　← 这里才是 bookmark id 空间</tspan></text>
+
+  <rect class="bxg" x="20" y="194" width="476" height="24" rx="3"/>
+  <text class="tm" x="30" y="211">op</text>
+  <text class="ts" x="130" y="211">"r" 快照　|　"c" INSERT·UPSERT　|　"d" DELETE</text>
+
+  <rect class="bxg" x="20" y="224" width="476" height="22" rx="3"/>
+  <text class="tm" x="30" y="239">ts_ms</text>
+
+  <rect class="bxg" x="20" y="252" width="476" height="22" rx="3"/>
+  <text class="tm" x="30" y="267">transaction</text>
+  <text class="ts" x="130" y="267">恒为 null —— StarRocks 的 CHANGES 流不带事务元数据</text>
+
+  <rect class="bx" x="528" y="8" width="224" height="268" rx="5"/>
+  <text class="tb" x="542" y="30">key</text>
+  <text class="ts" x="542" y="50">主键列组成的 struct；</text>
+  <text class="ts" x="542" y="68">无主键时为 null</text>
+  <line class="ax" x1="542" y1="84" x2="738" y2="84"/>
+  <text class="tb" x="542" y="108">分区：不自定义</text>
+  <text class="tms" x="542" y="128">partition = hash(key) % N</text>
+  <text class="ts" x="542" y="150">同一主键的全部变更因此</text>
+  <text class="ts" x="542" y="168">落在同一分区，顺序得以保持</text>
+  <line class="ax" x1="542" y1="184" x2="738" y2="184"/>
+  <text class="tb" x="542" y="208">tombstone（可选）</text>
+  <text class="ts" x="542" y="228">op=d 之后追加一条</text>
+  <text class="ts" x="542" y="246">value=null，共享 key /</text>
+  <text class="ts" x="542" y="264">topic / partition / offset</text>
+</svg>
+</div>
+<figcaption><b>图 6</b>左侧灰底的是 Debezium 拥有的字段，顺序即 Avro schema 身份的一部分；只有 <code>source</code> 块是 StarRocks 特有的。右侧说明为什么不需要自定义 partitioner——key 已经是主键，默认哈希恰好给出所需的分区内顺序。</figcaption>
+</figure>
+
+<div class="invariant">
+  <span class="tag">复杂类型：先按文本承载，但把服务端的类型名留住</span>
+  <p><code>java.sql.Types</code> 表达不了「这是 StarRocks 的 ARRAY」或「这是 HLL 草图」——它们全都是 <code>OTHER</code>，而在 MySQL 协议上，<code>ResultSetMetaData</code> 更是把它们和 VARCHAR 完全混同。所以 <code>ColumnMeta</code> 同时保留两套视角：JDBC 的，和 <code>information_schema</code> 给出的 <code>DATA_TYPE</code>（<code>array</code>/<code>json</code>/<code>hll</code>）与 <code>COLUMN_TYPE</code>（完整嵌套类型，如 <code>array&lt;int&gt;</code>）。</p>
+  <p>这也是<strong>两条通道都只查 <code>information_schema</code></strong> 的原因：驱动的描述一概不用。BOOLEAN 是实测分歧过的那一个——FE 只在 <code>COLUMN_TYPE</code> 里写 <code>tinyint(1)</code>，只看 <code>DATA_TYPE</code> 的一侧会给出 int8。否则同一张表会因为 URL scheme 不同而产出不同的 schema——传输方式本该是实现细节，会改变 schema 的就不是。</p>
+  <p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> 目前发的是文本，但带上了 <code>com.starrocks.data.*</code> 逻辑名；<code>JSON</code> 用 Debezium 自己的 <code>io.debezium.data.Json</code>（JSON 列按定义就是 JSON 文档，这个承诺是安全的）。前三者不借用那个名字，是因为那等于承诺每个值都能按 JSON 解析，而 NULL、内嵌引号、深层嵌套这些边界尚未验证。<code>srColumnType</code> 已经留在 <code>ColumnMeta</code> 上，是为重建嵌套 schema 那一步准备的——注意 StarRocks 超过 15 层嵌套会渲染成 <code>array&lt;...&gt;</code>，将来的解析器必须对此显式失败而不是猜。</p>
+</div>
+
+<div class="invariant warn">
+  <span class="tag">HLL / BITMAP / PERCENTILE 直接拒绝</span>
+  <p>这三种是聚合中间态，不是值：不配合聚合函数直接 <code>SELECT</code>，得到的东西消费者既解释不了也回灌不了。此前 preflight 只查表模型、CDC 属性和元数据列名冲突，所以带 HLL 列的表能顺利建起 connector，然后持续向 Kafka 发送无意义内容——<strong>从外部看和正常工作没有区别</strong>。现在在 preflight 拒绝并指明列名。</p>
+  <p><code>DATA_TYPE</code> 为 <code>unknown</code>（StarRocks 新增了类型）不阻塞，但会记一条带 <code>COLUMN_TYPE</code> 的 WARN——值仍按文本保留，不至于丢，但值得在启动时说一次。</p>
+</div>
+
+<div class="invariant warn">
+  <span class="tag">快照行的 row_version 必须是 0，不能是 bookmark id</span>
+  <p>变更记录的 <code>row_version</code> 是分区的可见版本号，从 1 开始逐次发布递增；而 bookmark id 来自 FE 全局 id 生成器，通常大几个数量级。把 bookmark id 放进这个字段，会让每一行快照数据看起来都比其后的所有变更更新——下游若按"仅当 row_version 增大才应用"去重，就会把全部变更丢掉。</p>
+  <p>快照行本就没有单一版本可报（钉住的读跨多个分区，各自处在自己的版本上），所以报 0。识别"这行来自哪次快照"应该看 <code>source.bookmark.base/head</code>，那两个字段才在 bookmark id 空间里。</p>
+</div>
+
+<p><code>source.tombstones.on.delete=true</code> 时，每条 <code>op=d</code> 之后追加一条 value 为 null 的墓碑记录，与删除记录共享 key/topic/partition/offset，供 topic compaction 使用。</p>
+
+<h4>分区策略</h4>
+<p>不自定义 partitioner。key 是主键 struct，默认 partitioner 按 key 哈希——同一主键的所有变更因此天然落在同一分区，顺序得以保持。这正是下游需要的语义，自定义分区算法只会破坏它。</p>
+
+<h2 id="transport"><span class="no">6</span>双传输通道</h2>
+
+<p>数据面走哪条通道，完全由 <code>starrocks.jdbc.url</code> 的 scheme 决定，没有单独的开关配置：</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th></th><th>MySQL 协议</th><th>Arrow Flight SQL</th></tr>
+  <tr><td>URL</td><td><code>jdbc:mysql://</code>（内部重写为 <code>jdbc:mariadb://</code>）</td><td><code>jdbc:arrow-flight-sql://</code>（原样保留）</td></tr>
+  <tr><td>驱动</td><td>mariadb-java-client 3.3.3</td><td>flight-sql-jdbc-driver 18.0.0</td></tr>
+  <tr><td>端口</td><td><code>query_port</code>（默认 9030）</td><td><code>arrow_flight_port</code>（默认 -1，需显式开启）</td></tr>
+  <tr><td>流式读</td><td><code>setFetchSize(1024)</code></td><td>驱动自带，不设置</td></tr>
+  <tr><td>列元数据</td><td><code>ResultSetMetaData</code></td><td><code>information_schema.columns</code></td></tr>
+</table>
+</div>
+
+<p>两个驱动都<strong>打进了主 shaded jar</strong>。这是刻意的：一个"换传输方式还要手动补一个 jar"的连接器是部署陷阱；而未被 URL 选中的驱动是完全惰性的。代价是 jar 体积（Arrow 驱动本身约 42MB）。</p>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 292" role="img" aria-label="按 JDBC URL scheme 分流到两个传输通道">
+  <defs>
+    <marker id="a7" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
+    </marker>
+  </defs>
+
+  <rect class="bxa" x="290" y="6" width="180" height="30" rx="5"/>
+  <text class="tm" x="380" y="26" text-anchor="middle">starrocks.jdbc.url</text>
+  <path class="ln" d="M380 36 L380 50 L195 50 L195 62" marker-end="url(#a7)"/>
+  <path class="ln" d="M380 36 L380 50 L565 50 L565 62" marker-end="url(#a7)"/>
+
+  <rect class="bx" x="50" y="66" width="290" height="30" rx="4"/>
+  <text class="tm" x="195" y="86" text-anchor="middle">jdbc:mysql://</text>
+  <rect class="bx" x="420" y="66" width="290" height="30" rx="4"/>
+  <text class="tm" x="565" y="86" text-anchor="middle">jdbc:arrow-flight-sql://</text>
+
+  <line class="ln" x1="195" y1="96" x2="195" y2="112" marker-end="url(#a7)"/>
+  <line class="ln" x1="565" y1="96" x2="565" y2="112" marker-end="url(#a7)"/>
+
+  <rect class="bx" x="50" y="116" width="290" height="30" rx="4"/>
+  <text class="ts" x="195" y="136" text-anchor="middle">内部重写为 jdbc:mariadb://</text>
+  <rect class="bx" x="420" y="116" width="290" height="30" rx="4"/>
+  <text class="ts" x="565" y="136" text-anchor="middle">原样保留 —— 重写会把它送给错误的驱动</text>
+
+  <line class="ln" x1="195" y1="146" x2="195" y2="162" marker-end="url(#a7)"/>
+  <line class="ln" x1="565" y1="146" x2="565" y2="162" marker-end="url(#a7)"/>
+
+  <rect class="bxg" x="50" y="166" width="290" height="28" rx="4"/>
+  <text class="tm" x="195" y="185" text-anchor="middle">mariadb-java-client 3.3.3</text>
+  <rect class="bxg" x="420" y="166" width="290" height="28" rx="4"/>
+  <text class="tm" x="565" y="185" text-anchor="middle">flight-sql-jdbc-driver 18.0.0</text>
+
+  <line class="ln" x1="195" y1="194" x2="195" y2="208" marker-end="url(#a7)"/>
+  <line class="ln" x1="565" y1="194" x2="565" y2="208" marker-end="url(#a7)"/>
+
+  <rect class="bx" x="50" y="212" width="290" height="76" rx="4"/>
+  <text class="tms" x="64" y="230">流式读　setFetchSize(1024)</text>
+  <text class="tms" x="64" y="248">列元数据　information_schema</text>
+  <text class="tms" x="64" y="268" fill="var(--danger)">⚠ 不可用 Integer.MIN_VALUE —— 那是</text>
+  <text class="tms" x="64" y="282" fill="var(--danger)">　Connector/J 的写法，MariaDB 会抛异常</text>
+
+  <rect class="bx" x="420" y="212" width="290" height="76" rx="4"/>
+  <text class="tms" x="434" y="230">流式读　驱动自带，不设置</text>
+  <text class="tms" x="434" y="248">列元数据　information_schema.columns</text>
+  <text class="tms" x="434" y="268" fill="var(--danger)">⚠ 驱动自述不可用：4 列的表报告 8 列，</text>
+  <text class="tms" x="434" y="282" fill="var(--danger)">　全部 nullable=false、precision=scale=0</text>
+</svg>
+</div>
+<figcaption><b>图 7</b>没有单独的传输开关配置：URL 的 scheme 就是开关。两条路径的分歧只有两处——流式读怎么开、列元数据从哪来——但都不是可以想当然的，红字那两条各自是一次线上级别的失败。</figcaption>
+</figure>
+
+<div class="invariant warn">
+  <span class="tag">两个踩过的坑</span>
+  <p><strong><code>setFetchSize(Integer.MIN_VALUE)</code> 是 MySQL Connector/J 的习惯用法，MariaDB 驱动会直接抛异常。</strong>（其 <code>setFetchSize</code> 字节码是 <code>ifge</code> → <code>athrow "invalid fetch size"</code>。）这个缺陷让流式读 100% 不可用，而且任何单测都抓不到——单测全部注入 <code>FakeCdcClient</code>。现在用正数 1024。</p>
+  <p><strong>Arrow 通道的列元数据不可用</strong>，必须绕开驱动、改用 <code>information_schema.columns</code> 当普通行读。实测证据：一张 4 列的表，驱动报告 <strong>8 列</strong>，且全部 <code>nullable=false</code>、<code>precision=0, scale=0</code>。三个成因叠加——FE 的 <code>ArrowUtils.convertToArrowType</code> 给 <code>FieldType</code> 传了 <code>metadata=null</code>；驱动的 <code>ConvertUtils</code> 从不调用 <code>Field.isNullable()</code>（18.0.0 与 19.0.0 均如此）；prepared statement 路径把 schema 返回了两次。</p>
+</div>
+
+<div class="invariant">
+  <span class="tag">不变式 · 列类型只有一个真相源</span>
+  <p>上面那条坑还有个后半段：schema 端换用了 <code>information_schema</code>，取值端却仍在问驱动。<code>extractValue</code> 曾经 switch 在 <code>ResultSetMetaData.getColumnType()</code> 上，而 <code>ChangeRecordMapper</code> 用的是 <code>ColumnMetadataReader</code> 给出的清单——同一条读取路径上两个真相源，其中一个已知在 Arrow 通道上不可信。两者一旦分歧，就是 schema 说 <code>Date</code>、值却是 <code>String</code>，在序列化时抛 <code>DataException</code>，且离成因很远。</p>
+  <p>现在 <code>streamSnapshot</code>/<code>streamChanges</code> 接的是 <code>List&lt;ColumnMeta&gt;</code> 而非列名，<code>RowExtractor</code> 按同一份清单取值，两边不可能再漂移。</p>
+</div>
+
+<div class="invariant">
+  <span class="tag">BINARY / VARBINARY 走 BYTES</span>
+  <p>这两种类型曾经在 schema 端和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变成 U+FFFD，原始字节不可恢复。两侧现已改为 <code>Schema.BYTES</code> + <code>getBytes()</code>；因为是两侧同时改，单独改一侧会立刻抛 <code>DataException</code>，这也正是新增测试所钉住的。</p>
+</div>
+
+<p>时间类型的读取统一传入一个每次新建的 <code>Calendar.getInstance(TimeZone.getTimeZone("UTC"))</code>，避免 worker 本地时区泄漏进结果。</p>
+
+<h4>FE leader 轮转</h4>
+<p><code>bookmark_create</code>/<code>bookmark_release</code> 只能在 FE leader 上执行。客户端捕获 "must run on the FE leader"，关闭当前连接、轮转到下一个配置的 host 重试；轮转次数上限为 URL 个数，转满一圈仍未找到 leader 则抛出最后一个异常。其他 <code>SQLException</code> 则在同一 URL 上按 <code>source.max.retries</code> 重试。所以用户只需在 <code>starrocks.jdbc.url</code> 里列出全部 FE，不必自己指向 leader。</p>
+
+<h2 id="config"><span class="no">7</span>配置项</h2>
+
+<p>命名沿用本仓库 sink connector 的风格：StarRocks 连接参数用 <code>starrocks.*</code>，source 行为参数用 <code>source.*</code>。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>键</th><th>默认值</th><th>说明</th></tr>
+  <tr><td><code>starrocks.jdbc.url</code></td><td>必填</td><td>FE 查询端点；scheme 决定传输通道</td></tr>
+  <tr><td><code>starrocks.database.name</code></td><td>必填</td><td>源库名</td></tr>
+  <tr><td><code>starrocks.username</code> / <code>.password</code></td><td>必填</td><td>需 <code>OPERATE</code> 权限</td></tr>
+  <tr><td><code>starrocks.table.names</code></td><td>必填</td><td>逗号分隔的表名</td></tr>
+  <tr><td><code>starrocks.table2topic.map</code></td><td>空</td><td><code>table:topic,table:topic</code></td></tr>
+  <tr><td><code>source.topic.prefix</code></td><td><code>sr</code></td><td>未显式映射时，topic = <code>&lt;prefix&gt;.&lt;db&gt;.&lt;table&gt;</code></td></tr>
+  <tr><td><code>source.snapshot.mode</code></td><td><code>initial</code></td><td><code>initial</code> | <code>no_snapshot</code></td></tr>
+  <tr><td><code>source.poll.interval.ms</code></td><td><code>5000</code></td><td>空轮询之间的休眠</td></tr>
+  <tr><td><code>source.bookmark.ttl.ms</code></td><td><code>604800000</code>（7天）</td><td>续租请求的租约时长；task 轮询期间按服务端授予值的 1/3 自动续租，TTL 只兜底停止轮询后的遗留引用</td></tr>
+  <tr><td><code>source.nontrackable.policy</code></td><td><code>fail</code></td><td><code>fail</code> | <code>resnapshot</code></td></tr>
+  <tr><td><code>source.tombstones.on.delete</code></td><td><code>false</code></td><td>删除后追加墓碑</td></tr>
+  <tr><td><code>source.max.retries</code></td><td><code>3</code></td><td>同 URL 重试次数</td></tr>
+  <tr><td><code>connect.timeout.ms</code></td><td><code>1000</code></td><td>连接超时</td></tr>
+</table>
+</div>
+
+<p><strong>被显式拒绝的组合</strong>：<code>source.snapshot.mode=no_snapshot</code> + <code>source.nontrackable.policy=resnapshot</code>。resnapshot 的自愈方式是丢弃位点、重建一份快照；关掉快照后它什么也读不到，于是会静默丢掉"不可用 base"到"新 bookmark"之间的全部变更，而运维看到的是"表已自愈"。这个组合在配置构造期就抛 <code>ConfigException</code>。</p>
+
+<h2 id="semantics"><span class="no">8</span>交付语义与已知缺口</h2>
+
+<p>整体是 <strong>at-least-once</strong>。崩溃时未落盘的 offset 会导致从上一个已持久化的 bookmark 重新读一个窗口，重复投递已发出的记录。这也是"key 用主键 struct"重要的原因：PRIMARY KEY 表 + 主键 key 让下游可以幂等地应用。</p>
+
+<p>Connect 的 KIP-618 exactly-once source 支持可以叠加：<code>exactlyOnceSupport()</code> 在 <code>source.snapshot.mode=no_snapshot</code> 时返回 <code>SUPPORTED</code>，其余情况返回 <code>UNSUPPORTED</code>。快照那一半做不到，原因不在分块而在位点：快照行带的是 <code>snapshot_done=false</code>，<code>restoreOffset</code> 只信 <code>true</code>，所以事务已提交的快照在重启后仍会整份重做——对至少一次这是刻意的（宁可重复不要静默缺口），对精确一次则正好是它要消灭的东西。流式那一半没有这个标记，窗口提交的 offset 就是重启要续的 bookmark。仍需 distributed 模式，而两套冒烟 harness 都是 standalone，因此这条路径目前只有单测覆盖。</p>
+
+<div class="invariant warn">
+  <span class="tag">缺口 1 · 空闲表每次重启都会全量重做快照</span>
+  <p>唯一写 <code>snapshot_done=true</code> 的地方是变更记录。若快照做完后表一直没有变更，<code>poll()</code> 会命中 idle dedup（<code>head == committedBookmark</code> 直接跳过），一条变更记录都不发，持久 offset 就永远停在 <code>snapshot_done=false</code>。重启即整表重读。</p>
+  <p>语义上仍是 at-least-once（只是重复），但大表上代价不小。倾向的修法：让 bootstrap 结束时也能落一个 <code>snapshot_done=true</code> 的位点。</p>
+</div>
+
+<div class="invariant warn">
+  <span class="tag">缺口 2 · bootstrap 未产生记录时，首个窗口持久化之前存在丢数据窗口</span>
+  <p>当 bootstrap 没有发出任何记录时——<code>no_snapshot</code> 模式，或者 <code>initial</code> 模式下快照时表为空——不会有任何 offset 落盘。若在第一个变更窗口被确认之前崩溃，重启会在<em>当前版本</em>重新开 bookmark，崩溃到重启之间的变更被静默跳过。</p>
+  <p>这一小段是 at-most-once，与整体语义不一致。窗口很窄（仅限首个持久 offset 出现之前），但确实存在。</p>
+</div>
+
+<figure>
+<div class="figwrap">
+<svg viewBox="0 0 760 302" role="img" aria-label="两个已知缺口的时间轴">
+  <rect class="bxw" x="8" y="8" width="744" height="138" rx="5"/>
+  <text class="tb" x="24" y="30">缺口 1 · 空闲表每次重启都会全量重做快照<tspan class="ts">　（重复投递，语义仍成立，但代价大）</tspan></text>
+  <line class="ax" x1="40" y1="76" x2="716" y2="76"/>
+
+  <circle cx="110" cy="76" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text class="tms" x="110" y="62" text-anchor="middle">poll #1 · bootstrap</text>
+  <text class="tms" x="110" y="100" text-anchor="middle">快照 N 行</text>
+  <text class="tms" x="110" y="116" text-anchor="middle">offset = {b0, false}</text>
+
+  <circle cx="310" cy="76" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text class="tms" x="310" y="62" text-anchor="middle">poll #2 … #n</text>
+  <text class="tms" x="310" y="100" text-anchor="middle">head == b0 → idle dedup</text>
+  <text class="tms" x="310" y="116" text-anchor="middle">一条记录都不发出</text>
+
+  <circle cx="510" cy="76" r="5" fill="var(--surface)" stroke="var(--amber)" stroke-width="1.6"/>
+  <text class="tms" x="510" y="62" text-anchor="middle">表一直没有变更</text>
+  <text class="tms" x="510" y="100" text-anchor="middle" fill="var(--amber)">于是 snapshot_done</text>
+  <text class="tms" x="510" y="116" text-anchor="middle" fill="var(--amber)">永远停在 false</text>
+
+  <circle cx="670" cy="76" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
+  <text class="tms" x="670" y="62" text-anchor="middle">重启</text>
+  <text class="tms" x="670" y="100" text-anchor="middle" fill="var(--danger)">读到 false</text>
+  <text class="tms" x="670" y="116" text-anchor="middle" fill="var(--danger)">→ 整表重读</text>
+
+  <text class="ts" x="24" y="138">唯一写 <tspan class="tm">snapshot_done=true</tspan> 的地方是变更记录；没有变更，就没人翻转这个标志。</text>
+
+  <rect class="bxd" x="8" y="158" width="744" height="138" rx="5"/>
+  <text class="tb" x="24" y="180">缺口 2 · bootstrap 未产生记录时，首个位点落盘前存在丢数据窗口<tspan class="ts">　（at-most-once）</tspan></text>
+  <line class="ax" x1="40" y1="226" x2="716" y2="226"/>
+
+  <circle cx="130" cy="226" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
+  <text class="tms" x="130" y="212" text-anchor="middle">poll #1 · bootstrap</text>
+  <text class="tms" x="130" y="250" text-anchor="middle">no_snapshot，或快照时表为空</text>
+  <text class="tms" x="130" y="266" text-anchor="middle">0 条记录 → offset store 为空</text>
+
+  <circle cx="345" cy="226" r="5" fill="var(--surface)" stroke="var(--amber)" stroke-width="1.6"/>
+  <text class="tms" x="345" y="212" text-anchor="middle" fill="var(--amber)">表发生变更</text>
+  <text class="tms" x="345" y="250" text-anchor="middle" fill="var(--amber)">版本 v1 → v2</text>
+
+  <circle cx="545" cy="226" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
+  <text class="tms" x="545" y="212" text-anchor="middle">崩溃 &amp; 重启</text>
+  <text class="tms" x="545" y="250" text-anchor="middle">读不到任何 offset</text>
+  <text class="tms" x="545" y="266" text-anchor="middle">→ 视为首次运行</text>
+
+  <circle cx="678" cy="226" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
+  <text class="tms" x="678" y="212" text-anchor="middle">新建 bookmark</text>
+  <text class="tms" x="678" y="250" text-anchor="middle" fill="var(--danger)">位于当前版本 v2</text>
+
+  <path class="lnd dash" d="M345 232 L345 278 L678 278 L678 240"/>
+  <text class="td" x="511" y="292" text-anchor="middle">v1 … v2 之间的变更被静默跳过</text>
+</svg>
+</div>
+<figcaption><b>图 8</b>两者的成因相同——<strong>没有记录，就没有 offset</strong>——但后果不同：缺口 1 只是重复，缺口 2 是真的丢数据。修法也相同：让 bootstrap 结束时能够独立落一个位点，而不是依赖第一条变更记录去翻转标志。</figcaption>
+</figure>
+
+<p class="lead">以上两条均由代码推导得出，尚未编写复现测试；不是本轮改动引入的，是设计本身的推论。</p>
+
+<h4>不可追踪的处理</h4>
+<p>当 CHANGES 窗口跨越了破坏可追踪性的操作（PK 表 CDC 属性关闭期间的写入、DELETE/TRUNCATE 于非 PK 表、分区 drop/重写、schema 重写型 ALTER、bucket 数变更等），服务端报 <code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)</code> 或 FE 规划期的 "not trackable"。<code>NonTrackableException.classify</code> 需要同时匹配这几类措辞——早期只匹配 <code>CDC-ERROR-</code> 前缀，导致 <code>resnapshot</code> 策略事实上从未生效。</p>
+
+<h2 id="verification"><span class="no">9</span>验证情况</h2>
+
+<p>单测覆盖状态机（注入共享的 <code>FakeCdcClient</code>）与纯函数部分，<code>source</code> + <code>common</code> 两个包共 <strong>140</strong> 个，整个模块 159 个。但状态机单测<strong>无法覆盖真实 JDBC 行为</strong>——<code>setFetchSize</code> 那个缺陷就是明证：它让流式读 100% 不可用，而全部单测照常通过。因此集成冒烟是必需的，不是补充。</p>
+
+<div class="tablewrap">
+<table>
+  <tr><th>步骤</th><th>断言</th></tr>
+  <tr><td>0</td><td>主 shaded jar 同时包含连接器类、mariadb 驱动、Debezium Envelope、Arrow 驱动，且被单独 stage 到一个只含它一个 jar 的目录</td></tr>
+  <tr><td>2–3</td><td>开启 CDC 的 PK 表产出目标 topic</td></tr>
+  <tr><td>5</td><td>初始快照恰好 3 条 <code>op=r</code>；UPDATE 产出 <code>op=d</code>(v=20) <strong>先于</strong> <code>op=c</code>(v=200)；DELETE 产出 <code>op=d</code>；线上格式为 Debezium envelope</td></tr>
+  <tr><td>6</td><td>杀掉并重启 worker，从持久 offset 续读：新行以 <code>op=c</code> 出现，快照<strong>不重放</strong></td></tr>
+  <tr><td>7</td><td>DATE / DATETIME 的时区无关取值</td></tr>
+  <tr><td>8–9</td><td>bookmark 释放数量符合预期，无释放失败</td></tr>
+</table>
+</div>
+
+<p>两套入口：<code>smoke.sh</code>（Docker 自建环境）与 <code>smoke-cluster.sh</code>（对接已有集群，附带 preflight 检查与唯一命名的一次性数据库）。<code>SR_TRANSPORT=mysql|arrow-flight</code> 切换传输通道，两种设置各跑一遍是确认"传输层改动没有挪动删除/插入顺序或时间类型读取"的唯一办法。</p>
+
+<p><strong>当前状态：两个通道各自 9 步全绿</strong>（真实集群，非 Docker）。</p>
+
+<h2 id="open"><span class="no">10</span>未决事项</h2>
+
+<div class="tablewrap">
+<table>
+  <tr><th>事项</th><th>状态</th></tr>
+  <tr><td>Arrow Flight 通道 DATETIME 存在整小时偏移</td><td>已知限制 11；step 7 在该通道只断言列存在并打印实际值，不断言数值</td></tr>
+  <tr><td>缺口 1、缺口 2（见第 8 节）</td><td>已识别，未写复现测试，未修</td></tr>
+  <tr><td>FE <code>ArrowUtils.convertToArrowType</code> 传 <code>metadata=null</code>，丢失 precision/scale</td><td>待提上游</td></tr>
+  <tr><td>FE prepared statement 返回双份 schema</td><td>待提上游</td></tr>
+  <tr><td>arrow-java <code>ConvertUtils</code> 不读 <code>Field.isNullable()</code></td><td>待提上游；影响所有 Arrow Flight JDBC 下游，不限于本项目</td></tr>
+  <tr><td><code>bookmark_acquire</code> FE 元函数（原计划 1）</td><td>按决定推迟；当前用 <code>bookmark_create</code> 的幂等性替代</td></tr>
+  <tr><td>净变更（<code>enable_cdc_net_change</code>）</td><td>已按决定<strong>移除</strong>。原有 <code>source.netchanges</code> 开关会在每条连接上设置该会话变量，但从无任何测试覆盖，且未验证净变更模式下排序不变式是否仍成立。若日后重新引入，须先补冒烟用例</td></tr>
+  <tr><td>重构后的两个通道未重跑集群冒烟</td><td><strong>待办</strong>：本轮改动触及取值路径（列类型来源收敛、BINARY 走 BYTES）与打包（新增版本资源），单测 179/179 通过，但 MySQL 与 Arrow Flight 两条通道都应在真实集群上各跑一遍再合并</td></tr>
+  <tr><td>分支 <code>cdc-source-connector</code></td><td>已 push 至 origin，未开 PR</td></tr>
+</table>
+</div>
+
+<footer>
+  相关文档：《StarRocks CDC Source Connector 使用指南》（<code>doc/StarRocks-CDC-Source-Connector-HowTo.zh.html</code>）、集成冒烟说明（<code>src/test/integration/README.md</code>）。
+</footer>
+</main>
