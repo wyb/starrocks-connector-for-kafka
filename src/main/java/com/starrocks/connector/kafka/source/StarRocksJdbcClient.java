@@ -169,9 +169,10 @@ public class StarRocksJdbcClient implements CdcClient {
             try (Statement stmt = c.createStatement()) {
                 connection.applyStreamingFetchSize(stmt);
                 Calendar utc = RowExtractor.newUtcCalendar();
+                boolean arrowFlight = connection.isArrowFlight();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
-                        consumer.accept(RowExtractor.extractRow(rs, cols, utc));
+                        consumer.accept(RowExtractor.extractRow(rs, cols, utc, arrowFlight));
                     }
                 }
             }
@@ -197,6 +198,7 @@ public class StarRocksJdbcClient implements CdcClient {
             try (Statement stmt = c.createStatement()) {
                 connection.applyStreamingFetchSize(stmt);
                 Calendar utc = RowExtractor.newUtcCalendar();
+                boolean arrowFlight = connection.isArrowFlight();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     // The last two projected columns are always __CHANGE_TYPE__ (int) and
                     // __ROW_VERSION__ (long); extractRow only covers the leading business columns,
@@ -204,7 +206,7 @@ public class StarRocksJdbcClient implements CdcClient {
                     int changeTypeIdx = cols.size() + 1;
                     int rowVersionIdx = cols.size() + 2;
                     while (rs.next()) {
-                        Object[] row = RowExtractor.extractRow(rs, cols, utc);
+                        Object[] row = RowExtractor.extractRow(rs, cols, utc, arrowFlight);
                         int changeType = rs.getInt(changeTypeIdx);
                         long rowVersion = rs.getLong(rowVersionIdx);
                         consumer.accept(row, changeType, rowVersion);

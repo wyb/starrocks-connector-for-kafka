@@ -243,4 +243,27 @@
         </dependency>
 
     </dependencies>
+
+    <profiles>
+        <!-- Arrow's off-heap memory needs java.nio opened on Java 9+; the tests that drive the real
+             Arrow Flight ResultSet in-process (ArrowDriverResultSetTest) fail to allocate otherwise.
+             The smoke harness passes the same flag to the Connect worker. -->
+        <profile>
+            <id>arrow-add-opens</id>
+            <activation>
+                <jdk>[9,)</jdk>
+            </activation>
+            <build>
+                <plugins>
+                    <plugin>
+                        <groupId>org.apache.maven.plugins</groupId>
+                        <artifactId>maven-surefire-plugin</artifactId>
+                        <configuration>
+                            <argLine>--add-opens=java.base/java.nio=ALL-UNNAMED</argLine>
+                        </configuration>
+                    </plugin>
+                </plugins>
+            </build>
+        </profile>
+    </profiles>
 </project>

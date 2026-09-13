@@ -69,6 +69,19 @@ final class TemporalText {
         return dateTime(ts);
     }
 
+    /**
+     * Undo the Arrow Flight driver's zone shift. Its timestamp accessor ends in
+     * {@code Timestamp.valueOf(LocalDateTime)}, which reads the stored digits in the JVM's default
+     * zone whatever Calendar was passed (a UTC+8 worker turns 12:34:56 into the instant 04:34:56Z).
+     * {@code toLocalDateTime()} in that same zone hands the digits back; re-anchoring them in UTC
+     * is what {@link #dateTime} expects. Not invertible inside a DST gap -- the one hour a year a
+     * DST-zone worker can still print a shifted value.
+     */
+    static Timestamp fromJvmWallClock(Timestamp shifted) {
+        LocalDateTime digits = shifted.toLocalDateTime();
+        return Timestamp.from(digits.toInstant(ZoneOffset.UTC));
+    }
+
     // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.
     private static LocalDateTime utcSeconds(long epochMillis) {
         return LocalDateTime.ofEpochSecond(Math.floorDiv(epochMillis, 1_000L), 0, ZoneOffset.UTC);

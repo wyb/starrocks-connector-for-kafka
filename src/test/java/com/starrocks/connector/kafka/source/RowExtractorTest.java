@@ -169,7 +169,7 @@ public class RowExtractorTest {
     /**
      * Temporal reads pass an explicit UTC calendar; without it the driver uses the JVM zone. This
      * pins that we pass it, not that a driver honours it -- the Arrow Flight driver takes the
-     * calendar and still resolves through the JVM default zone, which is Limitation 11.
+     * calendar and still builds the value in the JVM default zone, which the arrowFlight flag undoes.
      */
     @Test
     public void testTemporalGettersReceiveTheUtcCalendar() throws Exception {
@@ -189,6 +189,29 @@ public class RowExtractorTest {
         RowExtractor.extractValue(rs, col(Types.DATE), 1, utc);
         RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, utc);
         assertEquals(Arrays.asList(utc, utc), seen);
+    }
+
+    /**
+     * The Arrow driver hands back Timestamp.valueOf(digits) in the JVM zone whatever calendar it
+     * got; the transport flag routes that through fromJvmWallClock. Without the flag the value is
+     * taken as the driver gave it, which is right for MariaDB.
+     */
+    @Test
+    public void testArrowFlagUndoesTheDriversZoneShift() throws Exception {
+        TimeZone previous = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        try {
+            Timestamp shifted = Timestamp.valueOf(java.time.LocalDateTime.of(2026, 8, 5, 12, 34, 56, 123_456_000));
+            ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
+                    new Class<?>[] {ResultSet.class},
+                    (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
+            Object viaArrow = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), true);
+            Object viaMysql = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), false);
+            assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime((java.util.Date) viaArrow));
+            assertEquals("2026-08-05 04:34:56.123456", TemporalText.dateTime((java.util.Date) viaMysql));
+        } finally {
+            TimeZone.setDefault(previous);
+        }
     }
 
     /** Each Calendar is per-read: Calendar is not thread-safe and the poll thread shares nothing. */

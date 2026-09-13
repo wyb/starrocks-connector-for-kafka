@@ -27,6 +27,7 @@ import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.util.Date;
+import java.util.TimeZone;
 
 import static org.junit.Assert.assertEquals;
 
@@ -77,6 +78,21 @@ public class TemporalTextTest {
         assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTimeOfEpochMicros(1785933296123456L));
         assertEquals("2026-08-05 12:34:56", TemporalText.dateTimeOfEpochMicros(1785933296000000L));
         assertEquals("1969-12-31 23:59:59.999999", TemporalText.dateTimeOfEpochMicros(-1L));
+    }
+
+    /** valueOf(LocalDateTime) then fromJvmWallClock must give the digits back, nanos included. */
+    @Test
+    public void testFromJvmWallClockUndoesValueOf() {
+        TimeZone previous = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        try {
+            LocalDateTime digits = LocalDateTime.of(2026, 8, 5, 12, 34, 56, 123_456_000);
+            Timestamp shifted = Timestamp.valueOf(digits);            // what the Arrow driver does
+            assertEquals("2026-08-05 04:34:56.123456", TemporalText.dateTime(shifted));
+            assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime(TemporalText.fromJvmWallClock(shifted)));
+        } finally {
+            TimeZone.setDefault(previous);
+        }
     }
 
     /** Before the epoch the seconds and the fraction must still be split with floor semantics. */

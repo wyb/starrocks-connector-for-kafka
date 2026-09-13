@@ -371,24 +371,13 @@ grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
        fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\"; a shifted day means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
 note "DATE -> \"$TZ_EXPECT_DATE\", independent of the worker's timezone"
 
-# DATETIME's expected value is asserted on the MySQL protocol only. On Arrow Flight it arrives a
-# whole number of hours off (8h on a UTC+8 worker), and the cause is not on this side: the BE
-# emits the wall clock as UTC and SET time_zone changes nothing, so the shift comes from the
-# driver's timestamp accessor, which resolves through a LocalDateTime in the JVM default zone
-# whatever Calendar is passed. -Duser.timezone=UTC on the worker makes it zero. The column is
-# still required to arrive, so losing DATETIME entirely still fails.
-if [ "$SR_TRANSPORT" = "arrow-flight" ]; then
-  grep -q '"ts":' "$CONSUMED" \
-    || { note "actual: $(head -1 "$CONSUMED")"
-         fail "DATETIME column absent from the record entirely -- that is a new failure, not the known Arrow offset"; }
-  actual_ts=$(sed -n 's/.*"ts":"\([^"]*\)".*/\1/p' "$CONSUMED" | head -1)
-  note "DATETIME present (${actual_ts}); value NOT asserted on arrow-flight -- known offset vs the expected \"$TZ_EXPECT_DATETIME\", tracked as an open Arrow Flight metadata defect"
-else
-  grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
-    || { note "actual: $(head -1 "$CONSUMED")"
-         fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\"; a whole-hour shift means the worker's timezone leaked into the read, a missing fraction means the microseconds were cut"; }
-  note "DATETIME -> \"$TZ_EXPECT_DATETIME\", independent of the worker's timezone"
-fi
+# On both transports. The Arrow driver builds a DATETIME in the JVM zone whatever Calendar it is
+# given (8h off on a UTC+8 worker); the connector undoes that per transport, so the same string
+# must come back here as over the MySQL protocol -- and parity below compares it too.
+grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
+  || { note "actual: $(head -1 "$CONSUMED")"
+       fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" on $SR_TRANSPORT; a whole-hour shift means a zone leaked into the read (on arrow-flight: the driver's JVM-zone shift is no longer being undone), a missing fraction means the microseconds were cut"; }
+note "DATETIME -> \"$TZ_EXPECT_DATETIME\", independent of the worker's timezone"
 
 step "8. bookmark reclamation actually happens"
 # Steps 8 and 9 only read an append-only log, so a worker that died right after the restart would
@@ -478,15 +467,14 @@ printf '%s\n' "$first_r"
 # Transport parity. The same table read over the other transport must produce the same
 # 'after' object, byte for byte -- the whole reason the nested readers exist. One run can
 # only see one transport, so each run leaves its 'after' behind, keyed by the plugin jar it
-# was built from, and the second run diffs against the first. The top-level DATETIME is
-# left out: on arrow-flight it carries the known driver offset step 7 already documents.
+# was built from, and the second run diffs against the first.
 PARITY_DIR="${SMOKE_PARITY_DIR:-${TMPDIR:-/tmp}/sr-cdc-smoke-parity}"
 mkdir -p "$PARITY_DIR"
 jar_key=$(cksum < "$JAR" | cut -d' ' -f1)
 mine="$PARITY_DIR/after-$SR_TRANSPORT-$jar_key.json"
 other_transport=$([ "$SR_TRANSPORT" = mysql ] && echo arrow-flight || echo mysql)
 theirs="$PARITY_DIR/after-$other_transport-$jar_key.json"
-printf '%s' "$first_r" | sed -n 's/.*"after":\(.*\),"source":.*/\1/p' | sed -E 's/"ts":"[^"]*",?//' > "$mine"
+printf '%s' "$first_r" | sed -n 's/.*"after":\(.*\),"source":.*/\1/p' > "$mine"
 [ -s "$mine" ] || fail "could not extract the after object from: $first_r"
 if [ -s "$theirs" ]; then
   if diff -u "$theirs" "$mine" > "$OUT_DIR/parity.diff"; then

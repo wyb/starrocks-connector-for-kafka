@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>20 个类 / 约 4100 行</b></span>
-    <span>测试<b>226 个</b></span>
+    <span>测试<b>230 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -412,7 +412,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
-<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">264 行</span></h3>
+<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">266 行</span></h3>
 <p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
 
 <div class="tablewrap">
@@ -479,10 +479,11 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>isUnrecognized</code> 是第三个静态方法：类型名不在 <code>KNOWN_DATA_TYPES</code> 里即为真。这个集合逐条镜像 <code>toJdbcType</code> 的 case——switch 自己分不出"有意按文本承载"和"没见过"，两者都是 <code>OTHER</code>。加一个 case 就得加一个名字。</p>
 <p>precision/scale 读 <code>NUMERIC_PRECISION</code>/<code>NUMERIC_SCALE</code>，不读 <code>COLUMN_SIZE</code>/<code>DECIMAL_DIGITS</code>：BE 往 <code>COLUMN_SIZE</code> 里填的是 <code>columnLength</code>，一个长度，不是精度。</p>
 
-<h3 id="RowExtractor"><span class="fn">RowExtractor</span><span class="sz">139 行</span></h3>
+<h3 id="RowExtractor"><span class="fn">RowExtractor</span><span class="sz">158 行</span></h3>
 <p class="role">三个静态方法。看着简单，但类型来源的收敛就发生在这里。</p>
 <p><code>extractValue</code> 先看 <code>col.nested</code>：有就 <code>getObject()</code>，按返回对象的 class 分流——String 给 <code>MysqlTextReader</code>，其余给 <code>ArrowValueReader</code>，两条传输在这一步之后完全汇合。Arrow 上的 <code>getObject</code> 是 Avatica 的，按列的 JDBC 类型码分发：MAP/STRUCT 是 JAVA_OBJECT(2000) 拿到 vector 的 Map，而 ARRAY 是 <code>Types.ARRAY</code>(2003) 拿到 <code>java.sql.Array</code>，先 <code>getArray()</code> 解出元素对象再交给读取器（只有顶层这么包，嵌套的 list 是普通 <code>List</code>）。这一层是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 List，但 <code>ResultSet.getObject</code> 根本不走那里。其余的 switch 基于 <strong><code>col.jdbcType</code></strong>，与 <code>schemaFor</code> 同源，所以 schema 说什么类型就用什么 getter 取。<code>Types.FLOAT</code> 按 JDBC 规范走双精度，<code>Types.REAL</code> 才是单精度。</p>
 <p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会按 JVM 默认时区落值，<code>TemporalText</code> 再按 UTC 取位，DATE 会印成相邻的一天、DATETIME 偏移 worker 的时差——而且是静默的，两者现在都是文本。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
+<p><code>extractRow</code> 多一个 <code>arrowFlight</code> 参数（<code>StarRocksJdbcClient</code> 从 <code>connection.isArrowFlight()</code> 传入），只影响一处：Arrow 驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值，传什么 Calendar 都一样——UTC+8 的 worker 上 12:34:56 会变成 04:34:56Z。Arrow 通道上把值交给 <code>TemporalText.fromJvmWallClock</code> 逆转回来，两条传输从此打出同一串。</p>
 <p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
 
 <h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">130 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">81 行</span></h3>
@@ -534,9 +535,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>col.nested</code> 非空的列直接用 <code>ColumnType.toConnectSchema(topic + "." + 列名, 可空性)</code>：ARRAY → <code>array</code>、MAP → <code>map(STRING, v)</code>、STRUCT → 按声明序的 <code>struct</code>，嵌套元素一律 optional；<code>putValue</code> 对应用 <code>toConnectValue</code> 装配。其余落到 <code>textSchemaFor</code>：<code>json</code> 用 <code>io.debezium.data.Json</code>；<code>array</code>/<code>map</code>/<code>struct</code> 只有在 <code>COLUMN_TYPE</code> 解析失败时才到这里，保留 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code>；其余为无名的普通 STRING。</p>
 <p><code>putValue</code> 里唯一的特殊处理是 DECIMAL：<code>((BigDecimal) value).setScale(col.scale)</code>，因为 Connect 的 Decimal 逻辑类型要求 scale 与 schema 声明严格一致。</p>
 
-<h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">76 行</span></h3>
+<h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">89 行</span></h3>
 <p class="role">DATE / DATETIME 的唯一格式化器，两条传输共用。</p>
-<p>输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>java.sql.Timestamp</code> 的 <code>getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 则只有毫秒可用。</p>
+<p>输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>java.sql.Timestamp</code> 的 <code>getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 则只有毫秒可用。<code>fromJvmWallClock</code> 是 Arrow 专用的逆运算：驱动做了 <code>Timestamp.valueOf(digits)</code>，这里用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定。DST 跳变那一小时不可逆，是唯一残留。</p>
 <p>测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
 
 <h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">232 行</span></h3>
@@ -576,11 +577,12 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>FeConnectionTest</code></td><td>12</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact、MySQL 会话钉住的二进制编码与文本读取器一致而 Arrow 不设。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
-  <tr><td><code>TemporalTextTest</code></td><td>5</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致</td></tr>
+  <tr><td><code>TemporalTextTest</code></td><td>6</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致、<code>fromJvmWallClock</code> 是 <code>valueOf</code> 的逆</td></tr>
   <tr><td><code>ArrowValueReaderTest</code></td><td>9</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
   <tr><td><code>ColumnTypeParserTest</code></td><td>13</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlTextReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
-  <tr><td><code>RowExtractorTest</code></td><td>10</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列、嵌套列按 <code>getObject</code> 返回的 class 分流到两个读取器且结果相同、顶层 Arrow 数组从 <code>java.sql.Array</code> 解包、解析失败的复杂列仍走 <code>getString</code></td></tr>
+  <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlTextReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>
+  <tr><td><code>RowExtractorTest</code></td><td>11</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列、嵌套列按 <code>getObject</code> 返回的 class 分流到两个读取器且结果相同、顶层 Arrow 数组从 <code>java.sql.Array</code> 解包、<code>arrowFlight</code> 标志逆转驱动的时区平移而 MySQL 不动、解析失败的复杂列仍走 <code>getString</code></td></tr>
   <tr><td><code>StarRocksJdbcClientTest</code></td><td>4</td><td>全部四条都在 <code>changeDataCaptureEnabled</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
   <tr><td><code>OffsetStateTest</code></td><td>6</td><td>往返、Integer/Long 容错、缺字段降级、<code>snapshot_done=false</code> 不被读成已完成、id 解不出非负数（字符串/布尔/null/负值）时整条回 fresh</td></tr>
   <tr><td><code>NonTrackableExceptionTest</code></td><td>4</td><td>五种写法分三组识别（BE 执行期、bookmark 失效、FE 规划期），加一条不过度匹配</td></tr>
@@ -596,7 +598,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="scripts"><span class="no">8</span>集成脚本</h2>
 
-<p>单测全部注入 <code>FakeCdcClient</code>，所以驱动和服务端的真实行为一律测不到。<code>setFetchSize</code> 那个缺陷让流式读 100% 不可用，而全部单测照常通过——集成冒烟因此是必需的，不是补充。</p>
+<p>单测全部注入 <code>FakeCdcClient</code>，所以服务端的真实行为测不到；驱动侧则有 <code>ArrowDriverResultSetTest</code> 在进程内驱动<strong>真实的</strong> Arrow Flight JDBC <code>ResultSet</code>（<code>fromVectorSchemaRoot</code>；pom 的 <code>arrow-add-opens</code> profile 在 JDK 9+ 上给 surefire 加 <code>--add-opens</code>）。<code>setFetchSize</code> 那个缺陷让流式读 100% 不可用，而全部单测照常通过——集成冒烟因此是必需的，不是补充。</p>
 
 <div class="tablewrap">
 <table>
@@ -616,9 +618,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <li><strong>3</strong> 启动 worker，等到快照记录到达</li>
   <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、同一行（<code>id=2</code>）的 <code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、BOOLEAN 到达时是 JSON 布尔而 TINYINT 是数字、LARGEINT 以不加引号的完整数字到达（依赖 <code>value.converter.decimal.format=NUMERIC</code>，否则 Decimal 是 base64）、envelope 带 <code>transaction</code> 字段</li>
   <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
-  <li><strong>7</strong> DATE 的时区无关取值；DATETIME 只在 MySQL 协议上断言具体值，arrow-flight 上只要求该列到达（驱动的时间戳取值会按 worker 时区整点偏移，已记为限制）</li>
+  <li><strong>7</strong> DATE 与 DATETIME 在两条传输上都断言精确字符串。arrow-flight 上驱动的 JVM 时区平移由连接器按传输逆转（第一次真集群冒烟时顶层 <code>ts</code> 是 04:34 而嵌套 <code>adt</code> 是 12:34，同一条记录里自相矛盾，这就是修它的起点）</li>
   <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>
-  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象（去掉顶层 <code>ts</code>，见步骤 7 的 arrow 限制）按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>/tmp/sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
+  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>/tmp/sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
   <li><strong>11</strong> preflight 拒绝含 HLL 列的表并指明列名——同时证明 StarRocks 类型名在当前通道上确实传到了守卫</li>
 </ol>
 

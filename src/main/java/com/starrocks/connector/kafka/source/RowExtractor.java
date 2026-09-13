@@ -51,14 +51,30 @@ final class RowExtractor {
     /** The leading {@code cols.size()} columns; a CHANGES query's two trailing pseudo-columns are
      * read by the caller. */
     static Object[] extractRow(ResultSet rs, List<ColumnMeta> cols, Calendar utc) throws SQLException {
+        return extractRow(rs, cols, utc, false);
+    }
+
+    /**
+     * {@code arrowFlight} names the transport because one read differs by driver: the Arrow
+     * driver's {@code getTimestamp(i, calendar)} ignores the calendar's zone and builds the value in
+     * the JVM's, so the digits must be recovered afterwards ({@link TemporalText#fromJvmWallClock}).
+     * Everything else is the same for both.
+     */
+    static Object[] extractRow(ResultSet rs, List<ColumnMeta> cols, Calendar utc, boolean arrowFlight)
+            throws SQLException {
         Object[] row = new Object[cols.size()];
         for (int i = 0; i < cols.size(); i++) {
-            row[i] = extractValue(rs, cols.get(i), i + 1, utc);
+            row[i] = extractValue(rs, cols.get(i), i + 1, utc, arrowFlight);
         }
         return row;
     }
 
     static Object extractValue(ResultSet rs, ColumnMeta col, int index, Calendar utc) throws SQLException {
+        return extractValue(rs, col, index, utc, false);
+    }
+
+    static Object extractValue(ResultSet rs, ColumnMeta col, int index, Calendar utc, boolean arrowFlight)
+            throws SQLException {
         if (col.nested != null) {
             return nested(rs, col, index);
         }
@@ -73,6 +89,9 @@ final class RowExtractor {
                 break;
             case Types.TIMESTAMP:
                 value = rs.getTimestamp(index, utc);
+                if (arrowFlight && value != null) {
+                    value = TemporalText.fromJvmWallClock((java.sql.Timestamp) value);
+                }
                 break;
             case Types.BIT:
             case Types.BOOLEAN:
