@@ -106,8 +106,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>主代码<b>18 个类 / 约 3500 行</b></span>
-    <span>测试<b>201 个</b></span>
+    <span>主代码<b>19 个类 / 约 3700 行</b></span>
+    <span>测试<b>210 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -119,7 +119,7 @@
     <li><a href="#entry">入口层</a><span class="toc-sub"><a href="#StarRocksCdcSourceConnector">StarRocksCdcSourceConnector</a><a href="#StarRocksCdcSourceConfig">StarRocksCdcSourceConfig</a></span></li>
     <li><a href="#state">状态机层</a><span class="toc-sub"><a href="#StarRocksCdcSourceTask">StarRocksCdcSourceTask</a><a href="#OffsetState">OffsetState</a><a href="#NonTrackableException">NonTrackableException</a></span></li>
     <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetadataReader">ColumnMetadataReader</a><a href="#RowExtractor">RowExtractor</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
-    <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a><a href="#TemporalText">TemporalText</a><a href="#ColumnTypeParser">ColumnTypeParser</a><a href="#ColumnType">ColumnType</a></span></li>
+    <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a><a href="#TemporalText">TemporalText</a><a href="#ColumnTypeParser">ColumnTypeParser</a><a href="#ColumnType">ColumnType</a><a href="#ArrowValueReader">ArrowValueReader</a></span></li>
     <li><a href="#common">common 包</a><span class="toc-sub"><a href="#Version">Version</a><a href="#KeyValueListParser">KeyValueListParser</a></span></li>
     <li><a href="#tests">测试</a><span class="toc-sub"><a href="#FakeCdcClient">FakeCdcClient</a></span></li>
     <li><a href="#scripts">集成脚本</a></li>
@@ -532,15 +532,19 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>其余落到 <code>textSchemaFor</code>：<code>srDataType</code> 为 <code>json</code> 用 <code>io.debezium.data.Json</code>，<code>array</code>/<code>map</code>/<code>struct</code> 用 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code>，其余为无名的普通 STRING。</p>
 <p><code>putValue</code> 里唯一的特殊处理是 DECIMAL：<code>((BigDecimal) value).setScale(col.scale)</code>，因为 Connect 的 Decimal 逻辑类型要求 scale 与 schema 声明严格一致。</p>
 
-<h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">63 行</span></h3>
+<h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">76 行</span></h3>
 <p class="role">DATE / DATETIME 的唯一格式化器，两条传输共用。</p>
 <p>输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>java.sql.Timestamp</code> 的 <code>getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 则只有毫秒可用。</p>
 <p>测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
 
-<h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">187 行</span></h3>
+<h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">232 行</span></h3>
 <p class="role">把 <code>information_schema.columns.COLUMN_TYPE</code> 解析成带嵌套的类型树，再由类型树生成 Connect schema。复杂列原生化的第一块；下一步接进 mapper 与两条传输的值读取器。</p>
 <p><code>COLUMN_TYPE</code> 是 FE <code>Type.toSql()</code> 的显示串，不是契约，所以解析器只认 FE 会产出的拼法，其余一律 <code>Optional.empty()</code>，调用方回退到按文本承载。嵌套层的拼法：<code>boolean</code>、<code>int(11)</code>、<code>bigint(20)</code>、<code>largeint(40)</code>、<code>decimal(18, 2)</code>（逗号后有空格）、<code>varchar(10)</code>、<code>varbinary(16)</code>、<code>date</code>、<code>datetime</code>、<code>json</code>；唯独 <code>array&lt;&gt;</code> 里的 decimal 走 <code>toString()</code>，拼成 <code>DECIMAL64(18,2)</code>。struct 字段是 <code>`name` type</code> 以 <code>", "</code> 相连，反引号翻倍转义；字段 COMMENT 未转义直接拼入，深度 ≥15 打成 <code>...</code>——这两种都以"多出来的 token"形式被拒绝，不需要特判。</p>
-<p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。</p>
+<p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。</p>
+
+<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">131 行</span></h3>
+<p class="role">Arrow Flight 传输的嵌套值读取器：把驱动 <code>getObject()</code> 交出的对象按声明类型转成中立值。尚未接线，第 4 步与 MySQL 读取器一起切换。</p>
+<p>驱动给的是 vector 自己的对象：list 是 <code>List</code>，struct 和 map 都是 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），而 DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 看和 INT/BIGINT 一模一样。所以每一步都由 <code>ColumnType</code> 驱动而不是看对象长相：声明 date 才把 <code>Integer</code> 当天数，声明 int 就原样是 int。map 键按声明类型拼成字符串（date 键也格式化），struct 按声明字段顺序逐个取而不信 map 的顺序，decimal 按声明 scale 归一。形状对不上（声明数组却来了 map）抛 <code>DataException</code> 并点名类型和实际 class，那是 schema 漂移，不能猜。</p>
 
 <h2 id="common"><span class="no">6</span>common 包</h2>
 
@@ -565,7 +569,8 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>FeConnectionTest</code></td><td>11</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
-  <tr><td><code>TemporalTextTest</code></td><td>4</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分</td></tr>
+  <tr><td><code>TemporalTextTest</code></td><td>5</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致</td></tr>
+  <tr><td><code>ArrowValueReaderTest</code></td><td>8</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
   <tr><td><code>ColumnTypeParserTest</code></td><td>13</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>RowExtractorTest</code></td><td>7</td><td>逐类型用对 getter、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器且每次新建、只读声明过的列</td></tr>
   <tr><td><code>StarRocksJdbcClientTest</code></td><td>4</td><td>全部四条都在 <code>changeDataCaptureEnabled</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>

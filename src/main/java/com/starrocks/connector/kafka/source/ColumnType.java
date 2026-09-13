@@ -24,9 +24,13 @@ import io.debezium.data.Json;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
+import org.apache.kafka.connect.data.Struct;
 
+import java.util.ArrayList;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.StringJoiner;
 
 /**
@@ -162,6 +166,47 @@ final class ColumnType {
                 throw new IllegalStateException("unmapped kind " + kind);
         }
         return optional ? b.optional().build() : b.build();
+    }
+
+    /**
+     * Turns a reader's neutral value -- scalars already coerced, {@code List} for arrays,
+     * {@code Map<String, Object>} for both maps and structs -- into what the Connect schema wants:
+     * structs become {@link Struct}s, recursively. {@code schema} must be this type's own
+     * {@link #toConnectSchema} output.
+     */
+    Object toConnectValue(Schema schema, Object neutral) {
+        if (neutral == null) {
+            return null;
+        }
+        switch (kind) {
+            case ARRAY: {
+                List<Object> out = new ArrayList<>();
+                for (Object item : (List<?>) neutral) {
+                    out.add(element.toConnectValue(schema.valueSchema(), item));
+                }
+                return out;
+            }
+            case MAP: {
+                Map<String, Object> out = new LinkedHashMap<>();
+                for (Map.Entry<?, ?> e : ((Map<?, ?>) neutral).entrySet()) {
+                    out.put((String) e.getKey(), value.toConnectValue(schema.valueSchema(), e.getValue()));
+                }
+                return out;
+            }
+            case STRUCT: {
+                Map<?, ?> in = (Map<?, ?>) neutral;
+                Struct out = new Struct(schema);
+                for (Field f : fields) {
+                    Object v = f.type.toConnectValue(schema.field(f.name).schema(), in.get(f.name));
+                    if (v != null) {
+                        out.put(f.name, v);
+                    }
+                }
+                return out;
+            }
+            default:
+                return neutral;
+        }
     }
 
     /** A normalized spelling, for messages and tests: {@code map<int,array<decimal(2)>>}. */

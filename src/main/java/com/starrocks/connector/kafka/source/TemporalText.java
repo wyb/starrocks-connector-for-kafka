@@ -21,6 +21,7 @@
 package com.starrocks.connector.kafka.source;
 
 import java.sql.Timestamp;
+import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
@@ -54,6 +55,18 @@ final class TemporalText {
                 : Math.floorMod(value.getTime(), 1_000L) * 1_000L;
         String text = SECONDS.format(utcSeconds(value.getTime()));
         return micros == 0 ? text : String.format("%s.%06d", text, micros);
+    }
+
+    /** Arrow's date32: days since the epoch. */
+    static String dateOfEpochDays(int days) {
+        return LocalDate.ofEpochDay(days).toString();
+    }
+
+    /** Arrow's timestamp(MICRO): microseconds since the epoch. */
+    static String dateTimeOfEpochMicros(long micros) {
+        Timestamp ts = new Timestamp(Math.floorDiv(micros, 1_000L));
+        ts.setNanos((int) (Math.floorMod(micros, 1_000_000L) * 1_000L));
+        return dateTime(ts);
     }
 
     // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.

@@ -69,6 +69,16 @@ public class TemporalTextTest {
         assertEquals("1970-01-01 00:00:00", TemporalText.dateTime(new Date(0L)));
     }
 
+    /** The epoch-based entry points Arrow needs agree with the Date-based ones. */
+    @Test
+    public void testEpochDaysAndMicrosMatchTheDateForms() {
+        assertEquals("2026-08-05", TemporalText.dateOfEpochDays(20670));
+        assertEquals("1969-12-31", TemporalText.dateOfEpochDays(-1));
+        assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTimeOfEpochMicros(1785933296123456L));
+        assertEquals("2026-08-05 12:34:56", TemporalText.dateTimeOfEpochMicros(1785933296000000L));
+        assertEquals("1969-12-31 23:59:59.999999", TemporalText.dateTimeOfEpochMicros(-1L));
+    }
+
     /** Before the epoch the seconds and the fraction must still be split with floor semantics. */
     @Test
     public void testBeforeEpoch() {
