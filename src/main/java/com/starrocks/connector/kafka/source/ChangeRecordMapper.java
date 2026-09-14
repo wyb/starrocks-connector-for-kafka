@@ -21,19 +21,15 @@
 package com.starrocks.connector.kafka.source;
 
 import io.debezium.data.Envelope;
-import io.debezium.data.Json;
-import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
-import java.sql.Types;
 import java.time.Instant;
 import java.util.HashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
 
 /**
@@ -236,86 +232,12 @@ public final class ChangeRecordMapper {
         return builder.build();
     }
 
-    private Schema schemaFor(ColumnMeta col) {
-        // A parsed ARRAY/MAP/STRUCT gets its real nested schema; the fallback below is for one
-        // whose COLUMN_TYPE this connector could not read.
-        if (col.nested != null) {
-            return col.nested.toConnectSchema(topic + "." + col.name, col.nullable);
-        }
-        switch (col.jdbcType) {
-            case Types.BIT:
-            case Types.BOOLEAN:
-                return col.nullable ? Schema.OPTIONAL_BOOLEAN_SCHEMA : Schema.BOOLEAN_SCHEMA;
-            case Types.TINYINT:
-                return col.nullable ? Schema.OPTIONAL_INT8_SCHEMA : Schema.INT8_SCHEMA;
-            case Types.SMALLINT:
-                return col.nullable ? Schema.OPTIONAL_INT16_SCHEMA : Schema.INT16_SCHEMA;
-            case Types.INTEGER:
-                return col.nullable ? Schema.OPTIONAL_INT32_SCHEMA : Schema.INT32_SCHEMA;
-            case Types.BIGINT:
-                return col.nullable ? Schema.OPTIONAL_INT64_SCHEMA : Schema.INT64_SCHEMA;
-            case Types.REAL:
-                return col.nullable ? Schema.OPTIONAL_FLOAT32_SCHEMA : Schema.FLOAT32_SCHEMA;
-            // FLOAT is double precision in JDBC; REAL is the single-precision one.
-            case Types.FLOAT:
-            case Types.DOUBLE:
-                return col.nullable ? Schema.OPTIONAL_FLOAT64_SCHEMA : Schema.FLOAT64_SCHEMA;
-            case Types.DECIMAL:
-            case Types.NUMERIC:
-                SchemaBuilder decimalBuilder = Decimal.builder(col.scale);
-                return col.nullable ? decimalBuilder.optional().build() : decimalBuilder.build();
-            // Text in StarRocks' own format rather than Connect's epoch-based logical types: the
-            // wire value then reads like the column does in SQL, keeps DATETIME's microseconds,
-            // and asserts no time zone for a type that has none.
-            case Types.DATE:
-                return namedString(col, TemporalText.DATE_LOGICAL_NAME);
-            case Types.TIMESTAMP:
-                return namedString(col, TemporalText.DATETIME_LOGICAL_NAME);
-            // Must not fall through to STRING: the read side defaulted to getString() too, so
-            // nothing failed -- the bytes were just charset-decoded and anything not valid text
-            // became U+FFFD, unrecoverably.
-            case Types.BINARY:
-            case Types.VARBINARY:
-            case Types.LONGVARBINARY:
-                return col.nullable ? Schema.OPTIONAL_BYTES_SCHEMA : Schema.BYTES_SCHEMA;
-            default:
-                return textSchemaFor(col);
-        }
-    }
-
     /**
-     * Everything StarRocks renders as text. JSON keeps Debezium's own logical name. An ARRAY, MAP or
-     * STRUCT lands here only when its COLUMN_TYPE did not parse; it then keeps a StarRocks-specific
-     * name rather than claiming the JSON one, since BE's text is not JSON (unquoted map keys,
-     * single-quoted nested JSON).
+     * Every column's schema comes from its {@link ColumnType}: the same tree that drives how the
+     * value is read, so the two cannot drift apart. Only the column itself takes the declared
+     * nullability; nested elements are always optional. The name seeds nested struct names.
      */
-    private static Schema textSchemaFor(ColumnMeta col) {
-        return namedString(col, logicalNameFor(col.srDataType));
-    }
-
-    private static Schema namedString(ColumnMeta col, String logicalName) {
-        if (logicalName == null) {
-            return col.nullable ? Schema.OPTIONAL_STRING_SCHEMA : Schema.STRING_SCHEMA;
-        }
-        SchemaBuilder builder = SchemaBuilder.string().name(logicalName).version(1);
-        return col.nullable ? builder.optional().build() : builder.build();
-    }
-
-    private static String logicalNameFor(String srDataType) {
-        if (srDataType == null) {
-            return null;
-        }
-        switch (srDataType.trim().toLowerCase(Locale.ROOT)) {
-            case "json":
-                return Json.LOGICAL_NAME;
-            case "array":
-                return "com.starrocks.data.Array";
-            case "map":
-                return "com.starrocks.data.Map";
-            case "struct":
-                return "com.starrocks.data.Struct";
-            default:
-                return null;
-        }
+    private Schema schemaFor(ColumnMeta col) {
+        return col.type.toConnectSchema(topic + "." + col.name, col.nullable);
     }
 }

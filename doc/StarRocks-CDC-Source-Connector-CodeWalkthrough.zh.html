@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>20 个类 / 约 4100 行</b></span>
-    <span>测试<b>231 个</b></span>
+    <span>测试<b>238 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -504,15 +504,15 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>extractRow</code> 多一个 <code>arrowFlight</code> 参数（<code>StarRocksJdbcClient</code> 从 <code>connection.isArrowFlight()</code> 传入），只影响一处：Arrow 驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值，传什么 Calendar 都一样——UTC+8 的 worker 上 12:34:56 会变成 04:34:56Z。Arrow 通道上把值交给 <code>TemporalText.fromJvmWallClock</code> 逆转回来，再由 <code>TemporalText.dateTime</code> 成文本。<strong><code>Object[]</code> 是规范形式</strong>：DECIMAL 在这里 <code>setScale(col.scale)</code>（Arrow 把 DECIMALV2 按 scale 9 交回，MariaDB 按声明值），DATE/DATETIME 在这里成文本，嵌套列是读取器的中立值——两条传输交出的 <code>Object[]</code> 逐项相等，mapper 只剩装形状。</p>
 <p>末尾统一 <code>return rs.wasNull() ? null : value;</code>——基本类型 getter 对 NULL 返回 0/false，必须靠 <code>wasNull()</code> 纠正。</p>
 
-<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">130 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">81 行</span></h3>
+<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">130 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">151 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
 <p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
 <p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
-<p><code>ColumnMeta</code> 同时保留 JDBC 视角（<code>jdbcType</code>/<code>precision</code>/<code>scale</code>/<code>nullable</code>）与 StarRocks 视角（<code>srDataType</code>/<code>srColumnType</code>），因为两者单独都不够用；ARRAY/MAP/STRUCT 列在构造时把 <code>srColumnType</code> 交给 <code>ColumnTypeParser</code>，结果放在 <code>nested</code>，解析不出来就是 null。5 参构造只有测试在用——生产侧的列一律带着服务端类型名构造。</p>
+<p><code>ColumnMeta</code> 同时保留 JDBC 视角（<code>jdbcType</code>/<code>precision</code>/<code>scale</code>/<code>nullable</code>）与 StarRocks 视角（<code>srDataType</code>/<code>srColumnType</code>），并在构造时把两者折成<strong>一棵 <code>ColumnType</code>，每一列都有</strong>：ARRAY/MAP/STRUCT 交给 <code>ColumnTypeParser</code>，解析成功是嵌套树，失败是 <code>OPAQUE</code>（按文本承载，逻辑名 <code>com.starrocks.data.Array/Map/Struct</code>）；标量按 <code>jdbcType</code> 映射成种类，<code>srDataType</code> 只用来把 <code>bigint unsigned</code> 认成 LARGEINT、把 <code>json</code> 认成 JSON，其余没映射的类型也是 <code>OPAQUE</code>（无逻辑名）。<code>nested</code> 是 <code>type.isNested() ? type : null</code> 的快捷方式。5 参构造只有测试在用——生产侧的列一律带着服务端类型名构造。</p>
 
 <h2 id="mapper"><span class="no">5</span>记录映射</h2>
 
-<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">321 行</span></h3>
+<h3 id="ChangeRecordMapper"><span class="fn">ChangeRecordMapper</span><span class="sz">243 行</span></h3>
 <p class="role">纯函数：<code>Object[]</code> + 列元数据 → Debezium envelope <code>SourceRecord</code>。不碰 JDBC，所以极易测试。</p>
 
 <h4>构造函数：所有 schema 只建一次</h4>
@@ -547,10 +547,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </div>
 
 <h4>schemaFor(col) —— 类型映射</h4>
-<p>先看 <code>col.nested</code>：非空就是一个解析成功的 ARRAY/MAP/STRUCT，直接 <code>ColumnType.toConnectSchema(topic + "." + 列名, 可空性)</code>——ARRAY → <code>array</code>、MAP → <code>map(STRING, v)</code>、STRUCT → 按声明序的 <code>struct</code>，嵌套元素一律 optional。其余走一个基于 <code>col.jdbcType</code> 的 switch，每个分支按 <code>col.nullable</code> 选 optional 与否：整数/浮点/布尔对应 Connect 原生类型，DECIMAL 用 <code>Decimal.builder(col.scale)</code>（LARGEINT 也在这条路上，scale 0），DATE/TIMESTAMP 见下，BINARY 见下，剩下的落到 <code>textSchemaFor</code>。</p>
-<p>DATE / DATETIME 不走 Connect 的 <code>Date</code>/<code>Timestamp</code> 逻辑类型，而是 STRING + <code>com.starrocks.data.Date</code>/<code>.DateTime</code>，值由 <code>TemporalText</code> 格式化：线上看到的和 SQL 里一样，DATETIME 的微秒不再被截成毫秒（Connect 的 <code>Timestamp</code> 是 INT64 毫秒），也不给一个本无时区的类型凭空声明时区。</p>
-<p><code>textSchemaFor</code>：<code>json</code> 用 <code>io.debezium.data.Json</code>；<code>array</code>/<code>map</code>/<code>struct</code> 只有在 <code>COLUMN_TYPE</code> 解析失败时才到这里，保留 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code> 以示"这是没能原生化的复杂列"；其余为无名的普通 STRING。</p>
-<p>BINARY/VARBINARY/LONGVARBINARY → <strong>BYTES</strong>。此前它们和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变 U+FFFD，不可恢复。因为要两侧同时改，单独回退任何一侧都会立刻抛 <code>DataException</code>。</p>
+<p>一行：<code>col.type.toConnectSchema(topic + "." + 列名, col.nullable)</code>。以前这里有一个按 <code>jdbcType</code> 的 switch 加两层文本回退（<code>textSchemaFor</code>/<code>namedString</code>/<code>logicalNameFor</code>），现在全部由 <code>ColumnType</code> 决定：整数/浮点/布尔对应 Connect 原生类型，DECIMAL 是 <code>Decimal(scale)</code>，LARGEINT 是 <code>Decimal(0)</code>，DATE/DATETIME 是 STRING + <code>com.starrocks.data.Date/.DateTime</code>（值由 <code>TemporalText</code> 格式化，线上和 SQL 里一样、微秒不丢、不凭空声明时区），BINARY/VARBINARY 是 BYTES（读取侧配套 <code>getBytes</code>，两侧曾同时落到 STRING 而静默损坏），JSON 是 STRING + <code>io.debezium.data.Json</code>，ARRAY/MAP/STRUCT 是原生嵌套 schema，<code>OPAQUE</code> 是 STRING 加可有可无的逻辑名。只有列本身取声明的可空性，嵌套元素一律 optional。<strong>决定 schema 的树和决定取值方式的是同一棵</strong>，两者不可能再各说各话。</p>
 <p><code>putValue</code> 只有两个分支：null 跳过；<code>col.nested</code> 非空 → <code>toConnectValue</code> 把读取器交来的中立值装成 <code>Struct</code>/<code>List</code>/<code>Map</code>；其余原样 <code>put</code>。decimal 的 <code>setScale</code> 和时间的格式化都不在这里——<code>Object[]</code> 到手时已经是规范形式（见 <code>RowExtractor</code>），mapper 不碰值，只碰形状。</p>
 
 
@@ -559,10 +556,10 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>java.sql.Timestamp</code> 的 <code>getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 则只有毫秒可用。<code>fromJvmWallClock</code> 是 Arrow 专用的逆运算：驱动做了 <code>Timestamp.valueOf(digits)</code>，这里用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定。DST 跳变那一小时不可逆，是唯一残留。</p>
 <p>测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
 
-<h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">232 行</span></h3>
+<h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">252 行</span></h3>
 <p class="role">把 <code>information_schema.columns.COLUMN_TYPE</code> 解析成带嵌套的类型树，再由类型树生成 Connect schema。复杂列原生化的第一块；<code>ColumnMeta</code> 在构造时调用它，结果驱动 mapper 的 schema 与两条传输的值读取器。</p>
 <p><code>COLUMN_TYPE</code> 是 FE <code>Type.toSql()</code> 的显示串，不是契约，所以解析器只认 FE 会产出的拼法，其余一律 <code>Optional.empty()</code>，调用方回退到按文本承载。嵌套层的拼法：<code>boolean</code>、<code>int(11)</code>、<code>bigint(20)</code>、<code>largeint(40)</code>、<code>decimal(18, 2)</code>（逗号后有空格）、<code>varchar(10)</code>、<code>varbinary(16)</code>、<code>date</code>、<code>datetime</code>、<code>json</code>；唯独 <code>array&lt;&gt;</code> 里的 decimal 走 <code>toString()</code>，拼成 <code>DECIMAL64(18,2)</code>。struct 字段是 <code>`name` type</code> 以 <code>", "</code> 相连，反引号翻倍转义；字段 COMMENT 未转义直接拼入，深度 ≥15 打成 <code>...</code>——这两种都以"多出来的 token"形式被拒绝，不需要特判。</p>
-<p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。</p>
+<p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。<code>OPAQUE</code> 是给"按文本承载"的列准备的标量种类，带一个可空的 <code>logicalName</code>；<code>isNested()</code> 判断是不是三种容器之一。</p>
 
 <h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">146 行</span></h3>
 <p class="role">Arrow Flight 传输的嵌套值读取器：把驱动 <code>getObject()</code> 交出的对象按声明类型转成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回非 String 时走这里（顶层 ARRAY 先从 <code>java.sql.Array</code> 解包成 <code>List</code>）。</p>
@@ -598,6 +595,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>TemporalTextTest</code></td><td>6</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致、<code>fromJvmWallClock</code> 是 <code>valueOf</code> 的逆</td></tr>
   <tr><td><code>ArrowValueReaderTest</code></td><td>9</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
+  <tr><td><code>ColumnMetaTest</code></td><td>7</td><td>每种 <code>jdbcType</code> 落到哪个种类、DECIMAL 保留声明 scale、<code>bigint unsigned</code> 是 LARGEINT 且 schema scale 为 0、<code>json</code> 是 JSON 种类、解析成功的复杂列 <code>nested</code> 即 <code>type</code>、解析失败是带 StarRocks 逻辑名的 OPAQUE 文本且可空性来自列、未识别类型是无名文本</td></tr>
   <tr><td><code>ColumnTypeParserTest</code></td><td>13</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlTextReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlTextReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>

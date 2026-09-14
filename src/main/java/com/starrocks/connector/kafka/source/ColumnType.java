@@ -47,6 +47,9 @@ final class ColumnType {
     enum Kind {
         BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, LARGEINT, FLOAT, DOUBLE, DECIMAL,
         STRING, BYTES, DATE, DATETIME, JSON,
+        /** Carried as the text the server renders: an unparseable complex column or a type this
+         *  connector never met. STRING on the wire, with a logical name when one is known. */
+        OPAQUE,
         ARRAY, MAP, STRUCT
     }
 
@@ -67,36 +70,47 @@ final class ColumnType {
     final ColumnType key;       // MAP, as declared
     final ColumnType value;     // MAP
     final List<Field> fields;   // STRUCT, declared order
+    /** OPAQUE only: the schema name that says what the text is, or null for a plain string. */
+    final String logicalName;
 
     private ColumnType(Kind kind, int scale, ColumnType element, ColumnType key, ColumnType value,
-                       List<Field> fields) {
+                       List<Field> fields, String logicalName) {
         this.kind = kind;
         this.scale = scale;
         this.element = element;
         this.key = key;
         this.value = value;
         this.fields = fields;
+        this.logicalName = logicalName;
     }
 
     static ColumnType scalar(Kind kind) {
-        return new ColumnType(kind, 0, null, null, null, Collections.emptyList());
+        return new ColumnType(kind, 0, null, null, null, Collections.emptyList(), null);
     }
 
     static ColumnType decimal(int scale) {
-        return new ColumnType(Kind.DECIMAL, scale, null, null, null, Collections.emptyList());
+        return new ColumnType(Kind.DECIMAL, scale, null, null, null, Collections.emptyList(), null);
+    }
+
+    static ColumnType opaque(String logicalName) {
+        return new ColumnType(Kind.OPAQUE, 0, null, null, null, Collections.emptyList(), logicalName);
     }
 
     static ColumnType array(ColumnType element) {
-        return new ColumnType(Kind.ARRAY, 0, element, null, null, Collections.emptyList());
+        return new ColumnType(Kind.ARRAY, 0, element, null, null, Collections.emptyList(), null);
     }
 
     static ColumnType map(ColumnType key, ColumnType value) {
-        return new ColumnType(Kind.MAP, 0, null, key, value, Collections.emptyList());
+        return new ColumnType(Kind.MAP, 0, null, key, value, Collections.emptyList(), null);
     }
 
     static ColumnType struct(List<Field> fields) {
         return new ColumnType(Kind.STRUCT, 0, null, null, null,
-                Collections.unmodifiableList(fields));
+                Collections.unmodifiableList(fields), null);
+    }
+
+    boolean isNested() {
+        return kind == Kind.ARRAY || kind == Kind.MAP || kind == Kind.STRUCT;
     }
 
     /**
@@ -149,6 +163,12 @@ final class ColumnType {
                 break;
             case JSON:
                 b = SchemaBuilder.string().name(Json.LOGICAL_NAME).version(1);
+                break;
+            case OPAQUE:
+                b = SchemaBuilder.string();
+                if (logicalName != null) {
+                    b.name(logicalName).version(1);
+                }
                 break;
             case ARRAY:
                 b = SchemaBuilder.array(element.toConnectSchema(name + ".element", true));
