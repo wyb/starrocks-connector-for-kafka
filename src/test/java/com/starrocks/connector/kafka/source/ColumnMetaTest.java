@@ -30,7 +30,6 @@ import java.sql.Types;
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNull;
-import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /** Every column gets one {@link ColumnType}; these pin how it is derived from what the server said. */
@@ -86,7 +85,7 @@ public class ColumnMetaTest {
     public void testParsedComplexColumnIsTheNestedTree() {
         ColumnMeta c = new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int(11)>");
         assertEquals(ColumnType.Kind.ARRAY, c.type.kind);
-        assertSame(c.type, c.nested);
+        assertTrue(c.type.isNested());
     }
 
     /** No parse, no guess: the column stays text and says which complex type it was. */
@@ -97,7 +96,7 @@ public class ColumnMetaTest {
         for (String[] c : cases) {
             ColumnMeta col = new ColumnMeta("x", Types.OTHER, 0, 0, false, c[0], "struct<x int>");
             assertEquals(c[0], ColumnType.Kind.OPAQUE, col.type.kind);
-            assertNull(col.nested);
+            assertFalse(col.type.isNested());
             Schema s = col.type.toConnectSchema("t.x", col.nullable);
             assertEquals(Schema.Type.STRING, s.type());
             assertEquals(c[1], s.name());

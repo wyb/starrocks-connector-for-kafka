@@ -201,15 +201,15 @@ public final class ChangeRecordMapper {
     }
 
     /**
-     * The row is already canonical ({@link RowExtractor}): decimals at the declared scale, temporals
+     * The row is already canonical ({@link ValueReader}): decimals at the declared scale, temporals
      * as text. Only a nested column still needs assembling into Connect's own containers.
      */
     private static void putValue(Struct struct, ColumnMeta col, Object value) {
         if (value == null) {
             return;
         }
-        if (col.nested != null) {
-            struct.put(col.name, col.nested.toConnectValue(struct.schema().field(col.name).schema(), value));
+        if (col.type.isNested()) {
+            struct.put(col.name, col.type.toConnectValue(struct.schema().field(col.name).schema(), value));
             return;
         }
         struct.put(col.name, value);

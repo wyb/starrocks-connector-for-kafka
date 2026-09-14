@@ -62,19 +62,19 @@ public class ArrowValueReaderTest {
     /** DATE arrives as Integer days and DATETIME as Long micros; both are INT-shaped by class. */
     @Test
     public void testDeclaredTypeDisambiguatesDaysAndMicrosFromInts() {
-        assertEquals(Arrays.asList("2026-08-05"), ArrowValueReader.read(type("array<date>"), Arrays.asList(20670)));
-        assertEquals(Arrays.asList(20670), ArrowValueReader.read(type("array<int(11)>"), Arrays.asList(20670)));
+        assertEquals(Arrays.asList("2026-08-05"), new ArrowValueReader().nested(type("array<date>"), Arrays.asList(20670)));
+        assertEquals(Arrays.asList(20670), new ArrowValueReader().nested(type("array<int(11)>"), Arrays.asList(20670)));
         assertEquals(Arrays.asList("2026-08-05 12:34:56.123456"),
-                ArrowValueReader.read(type("array<datetime>"), Arrays.asList(1785933296123456L)));
+                new ArrowValueReader().nested(type("array<datetime>"), Arrays.asList(1785933296123456L)));
         assertEquals(Arrays.asList(1785933296123456L),
-                ArrowValueReader.read(type("array<bigint(20)>"), Arrays.asList(1785933296123456L)));
+                new ArrowValueReader().nested(type("array<bigint(20)>"), Arrays.asList(1785933296123456L)));
     }
 
     @Test
     public void testTextBecomesStringAndBytesStayBytes() {
         assertEquals(Arrays.asList("a", "b"),
-                ArrowValueReader.read(type("array<varchar(10)>"), Arrays.asList(text("a"), text("b"))));
-        List<?> bytes = (List<?>) ArrowValueReader.read(type("array<varbinary(4)>"),
+                new ArrowValueReader().nested(type("array<varchar(10)>"), Arrays.asList(text("a"), text("b"))));
+        List<?> bytes = (List<?>) new ArrowValueReader().nested(type("array<varbinary(4)>"),
                 Arrays.asList(new byte[] {1, 2, (byte) 0xff}));
         assertArrayEquals(new byte[] {1, 2, (byte) 0xff}, (byte[]) bytes.get(0));
     }
@@ -82,9 +82,9 @@ public class ArrowValueReaderTest {
     @Test
     public void testDecimalsTakeTheDeclaredScale() {
         assertEquals(Arrays.asList(new BigDecimal("1.50")),
-                ArrowValueReader.read(type("array<DECIMAL64(18,2)>"), Arrays.asList(new BigDecimal("1.5"))));
+                new ArrowValueReader().nested(type("array<DECIMAL64(18,2)>"), Arrays.asList(new BigDecimal("1.5"))));
         assertEquals(Arrays.asList(new BigDecimal("99999999999999999999999999999999999999")),
-                ArrowValueReader.read(type("array<largeint(40)>"),
+                new ArrowValueReader().nested(type("array<largeint(40)>"),
                         Arrays.asList(new BigDecimal("99999999999999999999999999999999999999"))));
     }
 
@@ -107,13 +107,13 @@ public class ArrowValueReaderTest {
     @Test
     public void testNestedMapArrivesAsEntryListAndReadsLikeTheTopLevelMap() {
         assertEquals(Arrays.asList(map("1", 10, "2", null)),
-                ArrowValueReader.read(type("array<map<int(11),int(11)>>"), Arrays.asList(entries(1, 10, 2, null))));
+                new ArrowValueReader().nested(type("array<map<int(11),int(11)>>"), Arrays.asList(entries(1, 10, 2, null))));
         Map<Object, Object> row = new LinkedHashMap<>();
         row.put("tags", entries(text("k"), 20670));
         assertEquals(map("tags", map("k", "2026-08-05")),
-                ArrowValueReader.read(type("struct<`tags` map<varchar(10),date>>"), row));
+                new ArrowValueReader().nested(type("struct<`tags` map<varchar(10),date>>"), row));
         assertEquals(Arrays.asList(map()),
-                ArrowValueReader.read(type("array<map<int(11),int(11)>>"), Arrays.asList(entries())));
+                new ArrowValueReader().nested(type("array<map<int(11),int(11)>>"), Arrays.asList(entries())));
     }
 
     /** Map keys become strings spelled per their declared type, values are read like elements. */
@@ -122,11 +122,11 @@ public class ArrowValueReaderTest {
         Map<Object, Object> intKeyed = new LinkedHashMap<>();
         intKeyed.put(1, 10);
         intKeyed.put(2, null);
-        assertEquals(map("1", 10, "2", null), ArrowValueReader.read(type("map<int(11),int(11)>"), intKeyed));
+        assertEquals(map("1", 10, "2", null), new ArrowValueReader().nested(type("map<int(11),int(11)>"), intKeyed));
 
         Map<Object, Object> dateKeyed = new LinkedHashMap<>();
         dateKeyed.put(20670, text("v"));
-        assertEquals(map("2026-08-05", "v"), ArrowValueReader.read(type("map<date,varchar(10)>"), dateKeyed));
+        assertEquals(map("2026-08-05", "v"), new ArrowValueReader().nested(type("map<date,varchar(10)>"), dateKeyed));
     }
 
     /** Struct fields come back in declared order and by name, even if the driver's map is sparse. */
@@ -135,15 +135,15 @@ public class ArrowValueReaderTest {
         Map<Object, Object> in = new LinkedHashMap<>();
         in.put("y", text("seven"));
         in.put("x", 7);
-        Object out = ArrowValueReader.read(type("struct<`x` int(11), `y` varchar(10), `z` date>"), in);
+        Object out = new ArrowValueReader().nested(type("struct<`x` int(11), `y` varchar(10), `z` date>"), in);
         assertEquals(map("x", 7, "y", "seven", "z", null), out);
         assertEquals(Arrays.asList("x", "y", "z"), new java.util.ArrayList<>(((Map<?, ?>) out).keySet()));
     }
 
     @Test
     public void testNullsPassThroughAtEveryLevel() {
-        assertNull(ArrowValueReader.read(type("array<int(11)>"), null));
-        assertEquals(Arrays.asList(1, null), ArrowValueReader.read(type("array<int(11)>"), Arrays.asList(1, null)));
+        assertNull(new ArrowValueReader().nested(type("array<int(11)>"), null));
+        assertEquals(Arrays.asList(1, null), new ArrowValueReader().nested(type("array<int(11)>"), Arrays.asList(1, null)));
     }
 
     /** End to end: neutral value into the Connect value the schema wants, structs included. */
@@ -155,7 +155,7 @@ public class ArrowValueReaderTest {
         row.put("x", 7);
         row.put("tags", entries(text("k"), 20670)); // nested, so the entry-list shape
 
-        Object neutral = ArrowValueReader.read(t, Arrays.asList(row, null));
+        Object neutral = new ArrowValueReader().nested(t, Arrays.asList(row, null));
         List<?> value = (List<?>) t.toConnectValue(s, neutral);
 
         Struct first = (Struct) value.get(0);
@@ -169,7 +169,7 @@ public class ArrowValueReaderTest {
     @Test
     public void testUnexpectedShapeIsReportedWithTheType() {
         try {
-            ArrowValueReader.read(type("array<int(11)>"), map("not", "a list"));
+            new ArrowValueReader().nested(type("array<int(11)>"), map("not", "a list"));
             fail("expected DataException");
         } catch (DataException e) {
             assertEquals(true, e.getMessage().contains("array<int>"));

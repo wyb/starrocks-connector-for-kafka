@@ -40,10 +40,10 @@ import static org.junit.Assert.fail;
  * map_column.cpp, struct_column.cpp, mysql_row_buffer.cpp, json_column.cpp), and what each must
  * become.
  */
-public class MysqlTextReaderTest {
+public class MysqlValueReaderTest {
 
     private static Object read(String type, String text) {
-        return MysqlTextReader.read(ColumnTypeParser.parse(type).get(), text, MysqlTextReader.BinaryEncoding.HEX);
+        return new MysqlValueReader().nested(ColumnTypeParser.parse(type).get(), text);
     }
 
     private static Map<String, Object> map(Object... kv) {
@@ -103,8 +103,8 @@ public class MysqlTextReaderTest {
     public void testBinaryDecodesPerSessionEncoding() {
         byte[] hex = (byte[]) ((List<?>) read("array<varbinary(4)>", "[\"0102ff\"]")).get(0);
         assertArrayEquals(new byte[] {1, 2, (byte) 0xff}, hex);
-        byte[] b64 = (byte[]) ((List<?>) MysqlTextReader.read(ColumnTypeParser.parse("array<varbinary(4)>").get(),
-                "[\"AQL/\"]", MysqlTextReader.BinaryEncoding.BASE64)).get(0);
+        byte[] b64 = (byte[]) ((List<?>) new MysqlValueReader(MysqlValueReader.BinaryEncoding.BASE64)
+                .nested(ColumnTypeParser.parse("array<varbinary(4)>").get(), "[\"AQL/\"]")).get(0);
         assertArrayEquals(new byte[] {1, 2, (byte) 0xff}, b64);
     }
 

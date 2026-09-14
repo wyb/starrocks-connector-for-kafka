@@ -293,7 +293,7 @@ public class ArrowDriverResultSetTest {
 
             try (ResultSet rs = ArrowFlightJdbcVectorSchemaRootResultSet.fromVectorSchemaRoot(root)) {
                 assertTrue(rs.next());
-                Object[] row = RowExtractor.extractRow(rs, cols, RowExtractor.newUtcCalendar(), true);
+                Object[] row = new ArrowValueReader().readRow(rs, cols);
 
                 // Canonical already: the extractor formats temporals, so the row itself is comparable.
                 assertEquals("2026-08-05", row[0]);
@@ -302,8 +302,7 @@ public class ArrowDriverResultSetTest {
 
                 for (int i = 3; i < cols.size(); i++) {
                     ColumnMeta col = cols.get(i);
-                    Object viaText = MysqlTextReader.read(col.nested, BE_TEXT.get(col.name),
-                            MysqlTextReader.SESSION_BINARY_ENCODING);
+                    Object viaText = new MysqlValueReader().nested(col.type, BE_TEXT.get(col.name));
                     assertEquals("column " + col.name + " (" + col.srColumnType + ")",
                             comparable(viaText), comparable(row[i]));
                 }
@@ -336,7 +335,7 @@ public class ArrowDriverResultSetTest {
                 TimeZone previous = TimeZone.getDefault();
                 TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
                 try {
-                    java.sql.Timestamp raw = rs.getTimestamp(2, RowExtractor.newUtcCalendar());
+                    java.sql.Timestamp raw = rs.getTimestamp(2, java.util.Calendar.getInstance(TimeZone.getTimeZone("UTC")));
                     assertEquals("2026-08-05 04:34:56.123456", TemporalText.dateTime(raw));
                     assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime(TemporalText.fromJvmWallClock(raw)));
                 } finally {

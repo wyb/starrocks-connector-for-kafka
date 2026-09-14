@@ -149,7 +149,7 @@ public class FeConnectionTest {
      */
     @Test
     public void testMysqlSessionIsPinnedToTheEncodingTheTextReaderScans() {
-        String expected = MysqlTextReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT);
+        String expected = MysqlValueReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT);
         assertTrue(FeConnection.SESSION_SETUP_SQL,
                 FeConnection.SESSION_SETUP_SQL.contains("binary_encoding_format = '" + expected + "'"));
         assertTrue(FeConnection.SESSION_SETUP_SQL,

@@ -38,16 +38,18 @@ import java.util.TimeZone;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 
 /**
- * The single funnel every value passes through on both read paths, and it had no test. The
- * getter chosen here comes from the {@link ColumnMeta} the Connect schema was built from; picking
- * a different one surfaces as a DataException at serialization time, far from the cause.
+ * The single funnel every value passes through on both read paths. The getter chosen here comes
+ * from the {@link ColumnType} the Connect schema was built from; picking a different one surfaces
+ * as a DataException at serialization time, far from the cause. Driven through the MySQL reader
+ * unless the Arrow reader is the point.
  */
-public class RowExtractorTest {
+public class ValueReaderTest {
 
     /** Records which getter was called, so a test can assert the choice and not just the value. */
     private static final class RecordingResultSet implements InvocationHandler {
@@ -87,7 +89,7 @@ public class RowExtractorTest {
     }
 
     private static ResultSet proxyFor(RecordingResultSet handler) {
-        return (ResultSet) Proxy.newProxyInstance(RowExtractorTest.class.getClassLoader(),
+        return (ResultSet) Proxy.newProxyInstance(ValueReaderTest.class.getClassLoader(),
                 new Class<?>[] {ResultSet.class}, handler);
     }
 
@@ -101,7 +103,7 @@ public class RowExtractorTest {
 
     private static Object extract(int jdbcType, Object value, RecordingResultSet handler) throws Exception {
         handler.next = value;
-        return RowExtractor.extractValue(proxyFor(handler), col(jdbcType), 1, RowExtractor.newUtcCalendar());
+        return new MysqlValueReader().read(proxyFor(handler), 1, col(jdbcType).type);
     }
 
     @Test
@@ -134,29 +136,26 @@ public class RowExtractorTest {
      */
     @Test
     public void testDecimalsAndTemporalsAreCanonicalizedHere() throws Exception {
+        ValueReader reader = new MysqlValueReader();
         RecordingResultSet h = new RecordingResultSet();
         h.next = new BigDecimal("1.5");
-        assertEquals(new BigDecimal("1.50"),
-                RowExtractor.extractValue(proxyFor(h), col(Types.DECIMAL, 2), 1, RowExtractor.newUtcCalendar()));
+        assertEquals(new BigDecimal("1.50"), reader.read(proxyFor(h), 1, col(Types.DECIMAL, 2).type));
         assertEquals(Arrays.asList("getBigDecimal"), h.calls);
 
         h = new RecordingResultSet();
         h.next = new BigDecimal("7");
-        assertEquals(new BigDecimal("7"),
-                RowExtractor.extractValue(proxyFor(h), col(Types.NUMERIC), 1, RowExtractor.newUtcCalendar()));
+        assertEquals(new BigDecimal("7"), reader.read(proxyFor(h), 1, col(Types.NUMERIC).type));
 
         h = new RecordingResultSet();
         h.next = new Date(0L);
-        assertEquals("1970-01-01",
-                RowExtractor.extractValue(proxyFor(h), col(Types.DATE), 1, RowExtractor.newUtcCalendar()));
+        assertEquals("1970-01-01", reader.read(proxyFor(h), 1, col(Types.DATE).type));
         assertEquals(Arrays.asList("getDate"), h.calls);
 
         Timestamp withMicros = new Timestamp(0L);
         withMicros.setNanos(123_456_000);
         h = new RecordingResultSet();
         h.next = withMicros;
-        assertEquals("1970-01-01 00:00:00.123456",
-                RowExtractor.extractValue(proxyFor(h), col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar()));
+        assertEquals("1970-01-01 00:00:00.123456", reader.read(proxyFor(h), 1, col(Types.TIMESTAMP).type));
         assertEquals(Arrays.asList("getTimestamp"), h.calls);
     }
 
@@ -201,13 +200,10 @@ public class RowExtractorTest {
     /**
      * Temporal reads pass an explicit UTC calendar; without it the driver uses the JVM zone. This
      * pins that we pass it, not that a driver honours it -- the Arrow Flight driver takes the
-     * calendar and still builds the value in the JVM default zone, which the arrowFlight flag undoes.
+     * calendar and still builds the value in the JVM default zone, which its reader undoes.
      */
     @Test
     public void testTemporalGettersReceiveTheUtcCalendar() throws Exception {
-        Calendar utc = RowExtractor.newUtcCalendar();
-        assertEquals("UTC", utc.getTimeZone().getID());
-
         final List<Object> seen = new ArrayList<>();
         ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[] {ResultSet.class}, (proxy, method, args) -> {
@@ -218,18 +214,22 @@ public class RowExtractorTest {
                     return "getDate".equals(method.getName()) ? new Date(0L) : new Timestamp(0L);
                 });
 
-        RowExtractor.extractValue(rs, col(Types.DATE), 1, utc);
-        RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, utc);
-        assertEquals(Arrays.asList(utc, utc), seen);
+        ValueReader reader = new MysqlValueReader();
+        reader.read(rs, 1, col(Types.DATE).type);
+        reader.read(rs, 1, col(Types.TIMESTAMP).type);
+        assertEquals(2, seen.size());
+        for (Object cal : seen) {
+            assertEquals("UTC", ((Calendar) cal).getTimeZone().getID());
+        }
     }
 
     /**
      * The Arrow driver hands back Timestamp.valueOf(digits) in the JVM zone whatever calendar it
-     * got; the transport flag routes that through fromJvmWallClock. Without the flag the value is
-     * taken as the driver gave it, which is right for MariaDB.
+     * got; the Arrow reader routes that through fromJvmWallClock. The MySQL reader takes the value
+     * as MariaDB gave it, which is right there.
      */
     @Test
-    public void testArrowFlagUndoesTheDriversZoneShift() throws Exception {
+    public void testArrowReaderUndoesItsDriversZoneShift() throws Exception {
         TimeZone previous = TimeZone.getDefault();
         TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
         try {
@@ -237,41 +237,46 @@ public class RowExtractorTest {
             ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
                     new Class<?>[] {ResultSet.class},
                     (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
-            Object viaArrow = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), true);
-            Object viaMysql = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), false);
-            assertEquals("2026-08-05 12:34:56.123456", viaArrow);
-            assertEquals("2026-08-05 04:34:56.123456", viaMysql);
+            ColumnType ts = col(Types.TIMESTAMP).type;
+            assertEquals("2026-08-05 12:34:56.123456", new ArrowValueReader().read(rs, 1, ts));
+            assertEquals("2026-08-05 04:34:56.123456", new MysqlValueReader().read(rs, 1, ts));
         } finally {
             TimeZone.setDefault(previous);
         }
     }
 
-    /** Each Calendar is per-read: Calendar is not thread-safe and the poll thread shares nothing. */
+    /** Each reader is per-read and owns its Calendar: Calendar is not thread-safe. */
     @Test
-    public void testEachUtcCalendarIsANewInstance() {
-        Calendar a = RowExtractor.newUtcCalendar();
-        Calendar b = RowExtractor.newUtcCalendar();
-        assertTrue(a != b);
-        assertEquals(TimeZone.getTimeZone("UTC"), a.getTimeZone());
+    public void testEachReaderOwnsAUtcCalendar() {
+        ValueReader a = ValueReader.forTransport(false);
+        ValueReader b = ValueReader.forTransport(false);
+        assertNotSame(a.utcCalendar(), b.utcCalendar());
+        assertEquals(TimeZone.getTimeZone("UTC"), a.utcCalendar().getTimeZone());
+    }
+
+    /** The transport picks the reader; nothing downstream has to sniff the driver. */
+    @Test
+    public void testTransportPicksTheReader() {
+        assertTrue(ValueReader.forTransport(true) instanceof ArrowValueReader);
+        assertTrue(ValueReader.forTransport(false) instanceof MysqlValueReader);
     }
 
     /**
-     * A parsed complex column is read with getObject and routed by what comes back: the MySQL
-     * driver's String goes to the text reader, the Arrow driver's List to the Arrow reader. Both
-     * end in the same neutral value.
+     * A nested column is read with getObject; the MySQL reader gets the BE text, the Arrow reader
+     * the vector's List. Both end in the same neutral value.
      */
     @Test
-    public void testNestedColumnIsRoutedByTheObjectTheDriverReturns() throws Exception {
+    public void testNestedColumnReadsTheSameThroughEitherReader() throws Exception {
         ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
 
         RecordingResultSet mysql = new RecordingResultSet();
         mysql.next = "[\"2026-08-05\",null]";
-        Object fromText = RowExtractor.extractValue(proxyFor(mysql), nested, 1, RowExtractor.newUtcCalendar());
+        Object fromText = new MysqlValueReader().read(proxyFor(mysql), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), mysql.calls);
 
         RecordingResultSet arrow = new RecordingResultSet();
         arrow.next = Arrays.asList(20670, null);
-        Object fromArrow = RowExtractor.extractValue(proxyFor(arrow), nested, 1, RowExtractor.newUtcCalendar());
+        Object fromArrow = new ArrowValueReader().read(proxyFor(arrow), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), arrow.calls);
 
         assertEquals(Arrays.asList("2026-08-05", null), fromText);
@@ -283,7 +288,7 @@ public class RowExtractorTest {
      * type id), and getArray() holds the vector's element objects. The first live run died here.
      */
     @Test
-    public void testTopLevelArrowArrayIsUnwrappedFromJavaSqlArray() throws Exception {
+    public void testArrowReaderUnwrapsATopLevelJavaSqlArray() throws Exception {
         ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
         java.sql.Array array = (java.sql.Array) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[] {java.sql.Array.class}, (proxy, method, args) ->
@@ -291,28 +296,26 @@ public class RowExtractorTest {
                                 ? new Object[] {20670, null} : null);
         RecordingResultSet h = new RecordingResultSet();
         h.next = array;
-        assertEquals(Arrays.asList("2026-08-05", null),
-                RowExtractor.extractValue(proxyFor(h), nested, 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("2026-08-05", null), new ArrowValueReader().read(proxyFor(h), 1, nested.type));
         assertEquals(Arrays.asList("getObject"), h.calls);
     }
 
-    /** A complex column whose COLUMN_TYPE did not parse keeps today's getString path. */
+    /** A complex column whose COLUMN_TYPE did not parse is OPAQUE and keeps the getString path. */
     @Test
     public void testUnparsedComplexColumnStillReadsText() throws Exception {
         ColumnMeta unparsed = new ColumnMeta("s", Types.OTHER, 0, 0, true, "struct", "struct<x int>");
         RecordingResultSet h = new RecordingResultSet();
         h.next = "{\"x\":1}";
-        assertEquals("{\"x\":1}", RowExtractor.extractValue(proxyFor(h), unparsed, 1, RowExtractor.newUtcCalendar()));
+        assertEquals("{\"x\":1}", new MysqlValueReader().read(proxyFor(h), 1, unparsed.type));
         assertEquals(Arrays.asList("getString"), h.calls);
     }
 
-    /** extractRow reads exactly the leading columns, leaving a CHANGES query's pseudo-columns. */
+    /** readRow reads exactly the leading columns, leaving a CHANGES query's pseudo-columns. */
     @Test
-    public void testExtractRowReadsOnlyTheDeclaredColumns() throws Exception {
+    public void testReadRowReadsOnlyTheDeclaredColumns() throws Exception {
         RecordingResultSet h = new RecordingResultSet();
         h.next = 42;
-        Object[] row = RowExtractor.extractRow(proxyFor(h), Arrays.asList(col(Types.INTEGER), col(Types.INTEGER)),
-                RowExtractor.newUtcCalendar());
+        Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col(Types.INTEGER), col(Types.INTEGER)));
         assertArrayEquals(new Object[] {42, 42}, row);
         assertEquals(Arrays.asList("getInt", "getInt"), h.calls);
     }

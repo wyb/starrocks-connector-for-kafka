@@ -65,7 +65,7 @@ final class FeConnection implements AutoCloseable {
      * binary and does not consult either.
      */
     static final String SESSION_SETUP_SQL = "SET binary_encoding_format = '"
-            + MysqlTextReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT)
+            + MysqlValueReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT)
             + "', binary_encoding_level = 'nested'";
 
     /**

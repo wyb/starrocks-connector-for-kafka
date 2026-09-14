@@ -23,78 +23,77 @@ package com.starrocks.connector.kafka.source;
 import org.apache.kafka.connect.errors.DataException;
 
 import java.math.BigDecimal;
-import java.util.ArrayList;
+import java.sql.ResultSet;
+import java.sql.SQLException;
+import java.sql.Timestamp;
+import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 /**
- * Turns what the Arrow Flight JDBC driver's {@code getObject()} returns for a nested column into
- * the neutral value {@link ColumnType#toConnectValue} assembles from.
+ * The Arrow Flight JDBC driver's quirks, and nothing else.
  *
- * <p>The driver hands back the vectors' own objects: {@code List} for a list, a {@code Map} of
- * field name to value for a struct, {@code Text} for varchar, and for the types StarRocks sends
- * as something else on the wire, the raw number -- an {@code Integer} of days for a DATE, a
- * {@code Long} of microseconds for a DATETIME. Those two are indistinguishable from an INT and a
- * BIGINT by class alone, which is why every step here is driven by the declared
- * {@link ColumnType} and not by what the object looks like.
+ * <p>Top level: its {@code getTimestamp(i, calendar)} ends in {@code Timestamp.valueOf(LocalDateTime)}
+ * and so builds the value in the JVM's zone whatever calendar was passed; and Avatica's
+ * {@code getObject} dispatches on the JDBC type id, so a top-level ARRAY arrives as a
+ * {@link java.sql.Array} while MAP and STRUCT arrive as the vector's {@code Map}.
  *
- * <p>A map comes in two shapes. At the top level the driver's accessor converts it to a
- * {@code Map}; nested inside a list or a struct it is whatever {@code MapVector.getObject}
- * returns, and {@code MapVector} inherits that from {@code ListVector}: a {@code List} of
- * {@code {key, value}} entry maps.
+ * <p>Nested: the vectors' own objects. {@code List} for a list, {@code Map} of field name to value
+ * for a struct, {@code Text} for varchar, and for what StarRocks sends as something else on the
+ * wire, the raw number -- an {@code Integer} of days for a DATE, a {@code Long} of microseconds for
+ * a DATETIME, indistinguishable from an INT and a BIGINT by class alone. A map nested inside a list
+ * or struct is whatever {@code MapVector.getObject} returns, which {@code MapVector} inherits from
+ * {@code ListVector}: a {@code List} of {@code {key, value}} entry maps.
  */
-final class ArrowValueReader {
+final class ArrowValueReader extends ValueReader {
 
     /** Arrow's names for the two fields of a map entry struct (MapVector.KEY_NAME / VALUE_NAME). */
     private static final String ENTRY_KEY = "key";
     private static final String ENTRY_VALUE = "value";
 
-    private ArrowValueReader() {
+    @Override
+    protected Timestamp timestamp(ResultSet rs, int index) throws SQLException {
+        Timestamp ts = super.timestamp(rs, index);
+        return ts == null ? null : TemporalText.fromJvmWallClock(ts);
     }
 
-    static Object read(ColumnType type, Object value) {
-        if (value == null) {
-            return null;
+    @Override
+    protected Object nested(ColumnType type, Object raw) {
+        if (raw instanceof java.sql.Array) {
+            try {
+                Object elements = ((java.sql.Array) raw).getArray();
+                raw = elements instanceof Object[] ? Arrays.asList((Object[]) elements) : elements;
+            } catch (SQLException e) {
+                throw new DataException("could not read the elements of " + type, e);
+            }
         }
+        return readNested(type, raw);
+    }
+
+    @Override
+    protected Map<?, ?> asMap(Object raw, ColumnType type) {
+        if (raw instanceof List && type.kind == ColumnType.Kind.MAP) {
+            Map<Object, Object> entries = new LinkedHashMap<>();
+            for (Object entry : (List<?>) raw) {
+                Map<?, ?> kv = as(Map.class, entry, type);
+                entries.put(kv.get(ENTRY_KEY), kv.get(ENTRY_VALUE));
+            }
+            return entries;
+        }
+        return super.asMap(raw, type);
+    }
+
+    @Override
+    protected Object scalar(ColumnType type, Object value) {
         switch (type.kind) {
-            case ARRAY: {
-                List<Object> out = new ArrayList<>();
-                for (Object item : as(List.class, value, type)) {
-                    out.add(read(type.element, item));
-                }
-                return out;
-            }
-            case MAP: {
-                Map<String, Object> out = new LinkedHashMap<>();
-                if (value instanceof Map) {
-                    for (Map.Entry<?, ?> e : ((Map<?, ?>) value).entrySet()) {
-                        out.put(keyText(type.key, e.getKey()), read(type.value, e.getValue()));
-                    }
-                    return out;
-                }
-                for (Object entry : as(List.class, value, type)) {
-                    Map<?, ?> kv = as(Map.class, entry, type);
-                    out.put(keyText(type.key, kv.get(ENTRY_KEY)), read(type.value, kv.get(ENTRY_VALUE)));
-                }
-                return out;
-            }
-            case STRUCT: {
-                Map<?, ?> in = as(Map.class, value, type);
-                Map<String, Object> out = new LinkedHashMap<>();
-                for (ColumnType.Field f : type.fields) {
-                    out.put(f.name, read(f.type, in.get(f.name)));
-                }
-                return out;
-            }
             case DATE:
                 return TemporalText.dateOfEpochDays(as(Number.class, value, type).intValue());
             case DATETIME:
                 return TemporalText.dateTimeOfEpochMicros(as(Number.class, value, type).longValue());
             case DECIMAL:
-                return as(BigDecimal.class, value, type).setScale(type.scale);
             case LARGEINT:
-                return as(BigDecimal.class, value, type).setScale(0);
+                return as(BigDecimal.class, value, type).setScale(type.scale);
             case STRING:
             case JSON:
                 // Text is a CharSequence; a plain String passes through unchanged.
@@ -118,29 +117,5 @@ final class ArrowValueReader {
             default:
                 throw new DataException("no Arrow reader for " + type);
         }
-    }
-
-    /** The map key as the STRING the wire schema declares, spelled per the declared key type. */
-    private static String keyText(ColumnType keyType, Object key) {
-        if (key == null) {
-            throw new DataException("null map key in a " + keyType + "-keyed map");
-        }
-        switch (keyType.kind) {
-            case DATE:
-            case DATETIME:
-            case DECIMAL:
-            case LARGEINT:
-                return String.valueOf(read(keyType, key));
-            default:
-                return key.toString();
-        }
-    }
-
-    private static <T> T as(Class<T> expected, Object value, ColumnType type) {
-        if (!expected.isInstance(value)) {
-            throw new DataException("expected " + expected.getSimpleName() + " for " + type
-                    + " but the driver returned " + value.getClass().getName());
-        }
-        return expected.cast(value);
     }
 }

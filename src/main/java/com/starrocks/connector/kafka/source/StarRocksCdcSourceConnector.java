@@ -226,7 +226,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // connector was never told about, worth saying once at startup.
                 // The nested schema comes from COLUMN_TYPE, a display string; when it does not
                 // parse the column is still captured, as text, and this says so once.
-                if (ColumnMeta.isComplex(col.srDataType) && col.nested == null) {
+                if (ColumnMeta.isComplex(col.srDataType) && col.type.kind == ColumnType.Kind.OPAQUE) {
                     LOG.warn("Column {}.{}.{} is declared as '{}', which this connector could not parse"
                                     + " into a nested schema; it will be carried as text.",
                             db, t, col.name, col.srColumnType);

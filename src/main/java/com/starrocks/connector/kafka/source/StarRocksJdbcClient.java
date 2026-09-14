@@ -29,7 +29,6 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
-import java.util.Calendar;
 import java.util.List;
 
 /**
@@ -168,11 +167,10 @@ public class StarRocksJdbcClient implements CdcClient {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement()) {
                 connection.applyStreamingFetchSize(stmt);
-                Calendar utc = RowExtractor.newUtcCalendar();
-                boolean arrowFlight = connection.isArrowFlight();
+                ValueReader reader = ValueReader.forTransport(connection.isArrowFlight());
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     while (rs.next()) {
-                        consumer.accept(RowExtractor.extractRow(rs, cols, utc, arrowFlight));
+                        consumer.accept(reader.readRow(rs, cols));
                     }
                 }
             }
@@ -197,8 +195,7 @@ public class StarRocksJdbcClient implements CdcClient {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement()) {
                 connection.applyStreamingFetchSize(stmt);
-                Calendar utc = RowExtractor.newUtcCalendar();
-                boolean arrowFlight = connection.isArrowFlight();
+                ValueReader reader = ValueReader.forTransport(connection.isArrowFlight());
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     // The last two projected columns are always __CHANGE_TYPE__ (int) and
                     // __ROW_VERSION__ (long); extractRow only covers the leading business columns,
@@ -206,7 +203,7 @@ public class StarRocksJdbcClient implements CdcClient {
                     int changeTypeIdx = cols.size() + 1;
                     int rowVersionIdx = cols.size() + 2;
                     while (rs.next()) {
-                        Object[] row = RowExtractor.extractRow(rs, cols, utc, arrowFlight);
+                        Object[] row = reader.readRow(rs, cols);
                         int changeType = rs.getInt(changeTypeIdx);
                         long rowVersion = rs.getLong(rowVersionIdx);
                         consumer.accept(row, changeType, rowVersion);

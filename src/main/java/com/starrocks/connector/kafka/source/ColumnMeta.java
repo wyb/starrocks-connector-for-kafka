@@ -51,8 +51,6 @@ public final class ColumnMeta {
      * as text -- a complex column whose COLUMN_TYPE did not parse, or a type never mapped.
      */
     final ColumnType type;
-    /** {@link #type} when it is an ARRAY, MAP or STRUCT, else null. */
-    final ColumnType nested;
 
     public ColumnMeta(String name, int jdbcType, int precision, int scale, boolean nullable) {
         this(name, jdbcType, precision, scale, nullable, null, null);
@@ -68,7 +66,6 @@ public final class ColumnMeta {
         this.srDataType = srDataType;
         this.srColumnType = srColumnType;
         this.type = typeOf(jdbcType, scale, srDataType, srColumnType);
-        this.nested = type.isNested() ? type : null;
     }
 
     static boolean isComplex(String srDataType) {
