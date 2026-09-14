@@ -128,11 +128,11 @@
 
 <h2 id="map"><span class="no">1</span>先看全景</h2>
 
-<p>13 个类分四层，外加 <code>common</code> 包的 2 个（<code>Version</code> 与 sink 共用，<code>KeyValueListParser</code> 只有 source 用）。Kafka Connect 只认识其中两个（<code>SourceConnector</code> 和 <code>SourceTask</code> 的实现），其余都是被它们调用的。</p>
+<p>18 个类分四层，外加 <code>common</code> 包的 2 个（<code>Version</code> 与 sink 共用，<code>KeyValueListParser</code> 只有 source 用）。第四层"记录映射"在复杂类型原生化之后有 6 个类：<code>ChangeRecordMapper</code> 之外是类型树（<code>ColumnTypeParser</code>/<code>ColumnType</code>）、时间文本（<code>TemporalText</code>）和两条传输各自的嵌套值读取器（<code>ArrowValueReader</code>/<code>MysqlTextReader</code>）。Kafka Connect 只认识其中两个（<code>SourceConnector</code> 和 <code>SourceTask</code> 的实现），其余都是被它们调用的。</p>
 
 <figure>
 <div class="figwrap">
-<svg viewBox="0 0 780 330" role="img" aria-label="四层结构与调用方向">
+<svg viewBox="0 0 780 424" role="img" aria-label="四层结构与调用方向">
   <defs><marker id="w1" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
     <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/></marker></defs>
 
@@ -184,9 +184,22 @@
   <text class="tm" x="404" y="309">NonTrackableException</text>
   <rect class="bxa" x="596" y="286" width="176" height="36" rx="4"/>
   <text class="tm" x="608" y="309">ChangeRecordMapper</text>
+
+  <line class="ax dash" x1="8" y1="340" x2="772" y2="340"/>
+  <text class="ts" x="8" y="362" fill="var(--accent)">类型树与嵌套值读取（ColumnMeta 构造时解析；RowExtractor 按传输分流；Mapper 据此建 schema、装配值）</text>
+  <rect class="bxg" x="8" y="370" width="146" height="36" rx="4"/>
+  <text class="tm" x="20" y="393">ColumnTypeParser</text>
+  <rect class="bxg" x="162" y="370" width="120" height="36" rx="4"/>
+  <text class="tm" x="174" y="393">ColumnType</text>
+  <rect class="bxg" x="290" y="370" width="124" height="36" rx="4"/>
+  <text class="tm" x="302" y="393">TemporalText</text>
+  <rect class="bx" x="422" y="370" width="168" height="36" rx="4"/>
+  <text class="tm" x="434" y="393">ArrowValueReader</text>
+  <rect class="bx" x="598" y="370" width="174" height="36" rx="4"/>
+  <text class="tm" x="610" y="393">MysqlTextReader</text>
 </svg>
 </div>
-<figcaption><b>图 1</b>箭头是调用方向。<code>ChangeRecordMapper</code> 单独画在下面，因为只有 Task 用它，且它完全不碰 JDBC。</figcaption>
+<figcaption><b>图 1</b>箭头是调用方向。<code>ChangeRecordMapper</code> 单独画在下面，因为只有 Task 用它，且它完全不碰 JDBC。最下一行是复杂类型原生化加进来的五个类：<code>ColumnMeta</code> 构造时调 <code>ColumnTypeParser</code> 得到 <code>ColumnType</code>；<code>RowExtractor</code> 把嵌套列按传输交给两个读取器；<code>ChangeRecordMapper</code> 用 <code>ColumnType</code> 生成 schema 并装配值，DATE/DATETIME 经 <code>TemporalText</code> 成文本。</figcaption>
 </figure>
 
 <h4>一条记录的完整旅程</h4>
@@ -196,15 +209,20 @@ Connector.taskConfigs() 表按 round-robin 切给 task
   ↓
 Task.start()           每表 fetchColumns + fetchKeyColumns，建 ChangeRecordMapper，
                        从 offset store 恢复位点（restoreOffset）
+                       （ColumnMeta 构造时用 ColumnTypeParser 把 COLUMN_TYPE 解析成类型树）
   ↓
 Task.poll()            drainPendingReleases → renewLiveBookmarks → bookmarkCreate
                        → 若 head==committed 则跳过 → streamChanges(base, head)
   ↓  StarRocksJdbcClient.streamChanges
      SqlBuilder.changesSql   拼 SQL（含强制 ORDER BY）
      FeConnection.get()      拿连接 + applyStreamingFetchSize
-     RowExtractor.extractRow 按 ColumnMeta 取值
+     RowExtractor.extractRow 标量按 ColumnMeta 选 getter；复杂列 getObject 后按传输分流：
+                             String → MysqlTextReader，其余 → ArrowValueReader；
+                             Arrow 上 DATETIME 经 TemporalText.fromJvmWallClock 逆转驱动的时区平移
   ↓
 ChangeRecordMapper.toChangeRecord   Object[] → Debezium envelope SourceRecord
+                                    （复杂列经 ColumnType.toConnectValue 装成 Struct/List/Map，
+                                      DATE/DATETIME 经 TemporalText 成文本）
   ↓
 Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后授权释放
   ↓
@@ -224,7 +242,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 <li><code>fetchTableModel</code> → 含 <code>UNQ</code> 或 <code>UNIQUE</code> 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。两种拼写都匹配，因为 FE 实际发 <code>UNIQUE_KEYS</code>，而文档里写的是 <code>UNQ_KEYS</code>；主键那一侧只需一个子串——<code>"PRIMARY"</code> 本身就含 <code>"PRI"</code>。</li>
   <li>含 <code>PRI</code> → 再查 <code>cdcPropertyEnabled</code>，未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
   <li>含 <code>DUP</code> → 记一条 WARN，见下。<code>AGG</code> 与 <code>PRI</code> 都不警告。</li>
-  <li><code>fetchColumns</code> 遍历每列，三项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；<code>isUnrecognized</code> 为真（类型名不在 <code>KNOWN_DATA_TYPES</code> 封闭集里）则记 WARN 但放行——文本能保住值，只是说明 StarRocks 长出了本连接器没听说过的类型。</li>
+  <li><code>fetchColumns</code> 遍历每列，四项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；ARRAY/MAP/STRUCT 列的 <code>COLUMN_TYPE</code> 解析失败（<code>nested == null</code>）则记 WARN 但放行——该列退化为文本，不会得到错的 schema；<code>isUnrecognized</code> 为真（类型名不在 <code>KNOWN_DATA_TYPES</code> 封闭集里）则记 WARN 但放行——文本能保住值，只是说明 StarRocks 长出了本连接器没听说过的类型。</li>
 </ol>
 <p>整段包在 <code>try/catch (SQLException)</code> 里，任何 SQL 异常都包成 <code>ConnectException</code> 并带上表名——包括"表不存在"。</p>
 
@@ -290,7 +308,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 <div class="tablewrap">
 <table>
   <tr><th>字段</th><th>含义</th></tr>
-  <tr><td><code>cols</code> / <code>pks</code> / <code>mapper</code></td><td>启动时解析一次，之后只读</td></tr>
+  <tr><td><code>cols</code> / <code>keyCols</code> / <code>mapper</code></td><td>启动时解析一次，之后只读；<code>cols</code> 里每个 <code>ColumnMeta</code> 已带解析好的 <code>nested</code></td></tr>
   <tr><td><code>snapshotDone</code></td><td>内存标志；<em>不是</em>持久 offset 里那个</td></tr>
   <tr><td><code>committedBookmark</code>（<code>volatile</code>）</td><td>下一个窗口的 base。poll 线程写、commit 线程读来把释放围栏钳到本 task 自己的位置</td></tr>
   <tr><td><code>liveBookmarks</code></td><td><code>ArrayDeque</code>，已创建未释放，最旧在前。<strong>真并发</strong></td></tr>
@@ -425,7 +443,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>fetchKeyColumns</code></td><td>读 <code>information_schema.columns</code> 里 <code>COLUMN_KEY &lt;&gt; ''</code> 的列，按 <code>ORDINAL_POSITION</code> 排序。<strong>不读 <code>tables_config.PRIMARY_KEY</code></strong>——FE 算出了每种模型的 key 列却只对 PRI/UNI 发出来（<code>InformationSchemaDataSource:343-351</code>），AGG 和 DUP 会拿到空串</td></tr>
   <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；三个方法共用 <code>fetchTableConfigRow</code></td></tr>
   <tr><td><code>cdcPropertyEnabled</code></td><td>同一行的 <code>PROPERTIES</code>——FE 用 <code>new Gson().toJson(genProps(table))</code> 写出（<code>InformationSchemaDataSource</code>），是 JSON 对象，所以按 key 取而不是在 <code>SHOW CREATE TABLE</code> 文本里做子串匹配（那个格式取决于 FE <code>PrintableMap</code> 的引号与空格，变了就静默失配）。<strong>读不出来一律抛</strong>，不能答 false——那会让 preflight 叫运维去开一个已经开着的属性</td></tr>
-  <tr><td><code>streamSnapshot</code></td><td>建 statement → <code>applyStreamingFetchSize</code> → 每行 <code>extractRow</code> 回调；异常先 <code>classify</code>——快照钉住的 bookmark 在长扫描中同样会被 drop/重写/reshard，原样抛出会让 <code>policy=resnapshot</code> 对整个快照阶段失效</td></tr>
+  <tr><td><code>streamSnapshot</code></td><td>建 statement → <code>applyStreamingFetchSize</code> → 每行 <code>extractRow</code>（带 <code>connection.isArrowFlight()</code>）回调；异常先 <code>classify</code>——快照钉住的 bookmark 在长扫描中同样会被 drop/重写/reshard，原样抛出会让 <code>policy=resnapshot</code> 对整个快照阶段失效</td></tr>
   <tr><td><code>streamChanges</code></td><td>同上，另外从 <code>cols.size()+1</code> 和 <code>+2</code> 读出两个伪列</td></tr>
 </table>
 </div>
@@ -480,7 +498,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>precision/scale 读 <code>NUMERIC_PRECISION</code>/<code>NUMERIC_SCALE</code>，不读 <code>COLUMN_SIZE</code>/<code>DECIMAL_DIGITS</code>：BE 往 <code>COLUMN_SIZE</code> 里填的是 <code>columnLength</code>，一个长度，不是精度。</p>
 
 <h3 id="RowExtractor"><span class="fn">RowExtractor</span><span class="sz">158 行</span></h3>
-<p class="role">三个静态方法。看着简单，但类型来源的收敛就发生在这里。</p>
+<p class="role">两对重载（<code>extractRow</code>/<code>extractValue</code>，带与不带 <code>arrowFlight</code>）加 <code>nested</code> 与 <code>newUtcCalendar</code>。看着简单，但类型来源的收敛就发生在这里。</p>
 <p><code>extractValue</code> 先看 <code>col.nested</code>：有就 <code>getObject()</code>，按返回对象的 class 分流——String 给 <code>MysqlTextReader</code>，其余给 <code>ArrowValueReader</code>，两条传输在这一步之后完全汇合。Arrow 上的 <code>getObject</code> 是 Avatica 的，按列的 JDBC 类型码分发：MAP/STRUCT 是 JAVA_OBJECT(2000) 拿到 vector 的 Map，而 ARRAY 是 <code>Types.ARRAY</code>(2003) 拿到 <code>java.sql.Array</code>，先 <code>getArray()</code> 解出元素对象再交给读取器（只有顶层这么包，嵌套的 list 是普通 <code>List</code>）。这一层是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 List，但 <code>ResultSet.getObject</code> 根本不走那里。其余的 switch 基于 <strong><code>col.jdbcType</code></strong>，与 <code>schemaFor</code> 同源，所以 schema 说什么类型就用什么 getter 取。<code>Types.FLOAT</code> 按 JDBC 规范走双精度，<code>Types.REAL</code> 才是单精度。</p>
 <p><code>newUtcCalendar()</code> 每次流式读新建一个：没有显式 Calendar 时驱动会按 JVM 默认时区落值，<code>TemporalText</code> 再按 UTC 取位，DATE 会印成相邻的一天、DATETIME 偏移 worker 的时差——而且是静默的，两者现在都是文本。<code>Calendar</code> 非线程安全，所以不做共享静态。</p>
 <p><code>extractRow</code> 多一个 <code>arrowFlight</code> 参数（<code>StarRocksJdbcClient</code> 从 <code>connection.isArrowFlight()</code> 传入），只影响一处：Arrow 驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值，传什么 Calendar 都一样——UTC+8 的 worker 上 12:34:56 会变成 04:34:56Z。Arrow 通道上把值交给 <code>TemporalText.fromJvmWallClock</code> 逆转回来，两条传输从此打出同一串。</p>
@@ -501,11 +519,11 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>建四个 schema 加一个 envelope，之后每条记录复用：</p>
 <ul>
   <li><code>rowSchema</code>——<strong>必须 optional</strong>，因为 <code>c</code> 和 <code>d</code> 各有一侧为 null</li>
-  <li><code>keySchema</code>——无主键时为 null</li>
+  <li><code>keySchema</code>——无 key 列时为 null</li>
   <li><code>bookmarkSchema</code> / <code>sourceSchema</code>——StarRocks 特有的 <code>{db, table, row_version, bookmark{base, head}}</code></li>
   <li><code>envelope</code>——<code>Envelope.defineSchema().withName(...).withRecord(rowSchema).withSource(sourceSchema).build()</code></li>
 </ul>
-<p>另外建一个 <code>colIndexByName</code>，供 <code>toKeyStruct</code> 按主键列名反查下标。</p>
+<p>另外建一个 <code>colIndexByName</code>，供 <code>toKeyStruct</code> 按 key 列名反查下标。</p>
 
 <div class="note">
   <span class="tag">envelope 必须用 Debezium 的，不能手拼</span>
@@ -529,11 +547,12 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </div>
 
 <h4>schemaFor(col) —— 类型映射</h4>
+<p>先看 <code>col.nested</code>：非空就是一个解析成功的 ARRAY/MAP/STRUCT，直接 <code>ColumnType.toConnectSchema(topic + "." + 列名, 可空性)</code>——ARRAY → <code>array</code>、MAP → <code>map(STRING, v)</code>、STRUCT → 按声明序的 <code>struct</code>，嵌套元素一律 optional。其余走一个基于 <code>col.jdbcType</code> 的 switch，每个分支按 <code>col.nullable</code> 选 optional 与否：整数/浮点/布尔对应 Connect 原生类型，DECIMAL 用 <code>Decimal.builder(col.scale)</code>（LARGEINT 也在这条路上，scale 0），DATE/TIMESTAMP 见下，BINARY 见下，剩下的落到 <code>textSchemaFor</code>。</p>
 <p>DATE / DATETIME 不走 Connect 的 <code>Date</code>/<code>Timestamp</code> 逻辑类型，而是 STRING + <code>com.starrocks.data.Date</code>/<code>.DateTime</code>，值由 <code>TemporalText</code> 格式化：线上看到的和 SQL 里一样，DATETIME 的微秒不再被截成毫秒（Connect 的 <code>Timestamp</code> 是 INT64 毫秒），也不给一个本无时区的类型凭空声明时区。</p>
-<p>一个基于 <code>col.jdbcType</code> 的 switch，每个分支按 <code>col.nullable</code> 选 optional 与否。DECIMAL 用 <code>Decimal.builder(col.scale)</code>，DATE/TIMESTAMP 用 Connect 的逻辑类型。</p>
+<p><code>textSchemaFor</code>：<code>json</code> 用 <code>io.debezium.data.Json</code>；<code>array</code>/<code>map</code>/<code>struct</code> 只有在 <code>COLUMN_TYPE</code> 解析失败时才到这里，保留 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code> 以示"这是没能原生化的复杂列"；其余为无名的普通 STRING。</p>
 <p>BINARY/VARBINARY/LONGVARBINARY → <strong>BYTES</strong>。此前它们和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变 U+FFFD，不可恢复。因为要两侧同时改，单独回退任何一侧都会立刻抛 <code>DataException</code>。</p>
-<p><code>col.nested</code> 非空的列直接用 <code>ColumnType.toConnectSchema(topic + "." + 列名, 可空性)</code>：ARRAY → <code>array</code>、MAP → <code>map(STRING, v)</code>、STRUCT → 按声明序的 <code>struct</code>，嵌套元素一律 optional；<code>putValue</code> 对应用 <code>toConnectValue</code> 装配。其余落到 <code>textSchemaFor</code>：<code>json</code> 用 <code>io.debezium.data.Json</code>；<code>array</code>/<code>map</code>/<code>struct</code> 只有在 <code>COLUMN_TYPE</code> 解析失败时才到这里，保留 <code>com.starrocks.data.Array</code>/<code>.Map</code>/<code>.Struct</code>；其余为无名的普通 STRING。</p>
-<p><code>putValue</code> 里唯一的特殊处理是 DECIMAL：<code>((BigDecimal) value).setScale(col.scale)</code>，因为 Connect 的 Decimal 逻辑类型要求 scale 与 schema 声明严格一致。</p>
+<p><code>putValue</code> 有三种特殊处理，顺序如此：null 直接跳过；<code>col.nested</code> 非空 → <code>toConnectValue</code> 把读取器交来的中立值装成 <code>Struct</code>/<code>List</code>/<code>Map</code>；DECIMAL → <code>setScale(col.scale)</code>，Connect 的 Decimal 要求 scale 与 schema 声明严格一致；<code>java.util.Date</code> → 按 <code>jdbcType</code> 调 <code>TemporalText.date</code>/<code>dateTime</code>。其余原样 <code>put</code>。</p>
+
 
 <h3 id="TemporalText"><span class="fn">TemporalText</span><span class="sz">89 行</span></h3>
 <p class="role">DATE / DATETIME 的唯一格式化器，两条传输共用。</p>
@@ -546,12 +565,12 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。</p>
 
 <h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">146 行</span></h3>
-<p class="role">Arrow Flight 传输的嵌套值读取器：把驱动 <code>getObject()</code> 交出的对象按声明类型转成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回非 String 时走这里。</p>
+<p class="role">Arrow Flight 传输的嵌套值读取器：把驱动 <code>getObject()</code> 交出的对象按声明类型转成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回非 String 时走这里（顶层 ARRAY 先从 <code>java.sql.Array</code> 解包成 <code>List</code>）。</p>
 <p>驱动给的是 vector 自己的对象：list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），而 DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 看和 INT/BIGINT 一模一样。map 有两种形态：顶层列由驱动的 accessor 转成 <code>Map</code>；嵌套在 list/struct 里的是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>。读取器两种都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。所以每一步都由 <code>ColumnType</code> 驱动而不是看对象长相：声明 date 才把 <code>Integer</code> 当天数，声明 int 就原样是 int。map 键按声明类型拼成字符串（date 键也格式化），struct 按声明字段顺序逐个取而不信 map 的顺序，decimal 按声明 scale 归一。形状对不上（声明数组却来了 map）抛 <code>DataException</code> 并点名类型和实际 class，那是 schema 漂移，不能猜。</p>
 
 <h3 id="MysqlTextReader"><span class="fn">MysqlTextReader</span><span class="sz">276 行</span></h3>
 <p class="role">MySQL 协议传输的嵌套值读取器：把 BE <code>put_mysql_row_buffer</code> 拼出的文本按声明类型扫描成中立值。<code>RowExtractor</code> 在 <code>getObject()</code> 返回 String 时走这里。</p>
-<p>那段文本像 JSON 但不是 JSON，所以这是一个由 <code>ColumnType</code> 驱动的扫描器而不是 JSON 解析器：数值类型的 map 键不带引号（<code>{1:2}</code>，<code>map_column.cpp:591</code>）；嵌套的 JSON 值用<strong>单引号</strong>包（<code>json_column.cpp:60</code> 传的 escape_char 是 <code>'</code>）；BOOLEAN 是 <code>1</code>/<code>0</code>（<code>fixed_length_column_base.cpp:339</code> 走 <code>push_number</code>）；字符串只转义 <code>"</code> 和 <code>\</code>，内部可以有原始控制字符；VARBINARY 按会话的 <code>binary_encoding_format</code> 是 hex 或 base64，读取器带一个 <code>BinaryEncoding</code> 参数（接线处目前传 HEX，与服务端默认一致）；浮点是 fmt 的 <code>{}</code>，<code>inf</code>/<code>nan</code> 要自己认。DATE/DATETIME 到手就是 <code>TemporalText</code> 的格式，原样透传。</p>
+<p>那段文本像 JSON 但不是 JSON，所以这是一个由 <code>ColumnType</code> 驱动的扫描器而不是 JSON 解析器：数值类型的 map 键不带引号（<code>{1:2}</code>，<code>map_column.cpp:591</code>）；嵌套的 JSON 值用<strong>单引号</strong>包（<code>json_column.cpp:60</code> 传的 escape_char 是 <code>'</code>）；BOOLEAN 是 <code>1</code>/<code>0</code>（<code>fixed_length_column_base.cpp:339</code> 走 <code>push_number</code>）；字符串只转义 <code>"</code> 和 <code>\</code>，内部可以有原始控制字符；VARBINARY 按会话的 <code>binary_encoding_format</code> 是 hex 或 base64，读取器带一个 <code>BinaryEncoding</code> 参数，接线处传 <code>SESSION_BINARY_ENCODING</code>（HEX），<code>FeConnection</code> 把会话钉在同一个值上；浮点是 fmt 的 <code>{}</code>，<code>inf</code>/<code>nan</code> 要自己认。DATE/DATETIME 到手就是 <code>TemporalText</code> 的格式，原样透传。</p>
 <p>裸 <code>null</code> 在任何位置都是 SQL NULL，带引号的 <code>"null"</code> 是字符串——区分靠开头字符，不靠类型。struct 按名取字段再按声明顺序输出，缺的字段为 null，未声明的字段名报错。任何畸形（缺括号、尾随字符、非数字、不认识的布尔值）都是带偏移量和原文的 <code>DataException</code>，不猜。</p>
 
 <h2 id="common"><span class="no">6</span>common 包</h2>
@@ -603,7 +622,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <div class="tablewrap">
 <table>
   <tr><th>文件</th><th>内容</th></tr>
-  <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
+  <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区与 LARGEINT 固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
   <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 切换两条通道</td></tr>
   <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，9 个步骤（0–8），只走 MySQL 协议。断言同源，但编号与 <code>smoke-cluster.sh</code> 并不对齐；同样播种六个嵌套元素列并按精确 JSON 断言</td></tr>
 </table>
