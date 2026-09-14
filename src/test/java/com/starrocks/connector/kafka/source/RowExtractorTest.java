@@ -92,7 +92,11 @@ public class RowExtractorTest {
     }
 
     private static ColumnMeta col(int jdbcType) {
-        return new ColumnMeta("c", jdbcType, 0, 0, true);
+        return col(jdbcType, 0);
+    }
+
+    private static ColumnMeta col(int jdbcType, int scale) {
+        return new ColumnMeta("c", jdbcType, 0, scale, true);
     }
 
     private static Object extract(int jdbcType, Object value, RecordingResultSet handler) throws Exception {
@@ -103,10 +107,6 @@ public class RowExtractorTest {
     @Test
     public void testEachTypeUsesItsOwnGetter() throws Exception {
         Object[][] cases = {
-            {Types.DECIMAL, new BigDecimal("1.5"), "getBigDecimal"},
-            {Types.NUMERIC, new BigDecimal("2.5"), "getBigDecimal"},
-            {Types.DATE, new Date(0L), "getDate"},
-            {Types.TIMESTAMP, new Timestamp(0L), "getTimestamp"},
             {Types.BIT, Boolean.TRUE, "getBoolean"},
             {Types.BOOLEAN, Boolean.TRUE, "getBoolean"},
             {Types.TINYINT, (byte) 7, "getByte"},
@@ -126,6 +126,38 @@ public class RowExtractorTest {
             assertEquals("value for jdbcType " + c[0], c[1], got);
             assertEquals("getter for jdbcType " + c[0], Arrays.asList(c[2]), h.calls);
         }
+    }
+
+    /**
+     * Decimals and temporals leave here canonical, so both transports meet in an identical row: the
+     * BigDecimal at the declared scale, DATE and DATETIME as StarRocks text with the microseconds.
+     */
+    @Test
+    public void testDecimalsAndTemporalsAreCanonicalizedHere() throws Exception {
+        RecordingResultSet h = new RecordingResultSet();
+        h.next = new BigDecimal("1.5");
+        assertEquals(new BigDecimal("1.50"),
+                RowExtractor.extractValue(proxyFor(h), col(Types.DECIMAL, 2), 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("getBigDecimal"), h.calls);
+
+        h = new RecordingResultSet();
+        h.next = new BigDecimal("7");
+        assertEquals(new BigDecimal("7"),
+                RowExtractor.extractValue(proxyFor(h), col(Types.NUMERIC), 1, RowExtractor.newUtcCalendar()));
+
+        h = new RecordingResultSet();
+        h.next = new Date(0L);
+        assertEquals("1970-01-01",
+                RowExtractor.extractValue(proxyFor(h), col(Types.DATE), 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("getDate"), h.calls);
+
+        Timestamp withMicros = new Timestamp(0L);
+        withMicros.setNanos(123_456_000);
+        h = new RecordingResultSet();
+        h.next = withMicros;
+        assertEquals("1970-01-01 00:00:00.123456",
+                RowExtractor.extractValue(proxyFor(h), col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar()));
+        assertEquals(Arrays.asList("getTimestamp"), h.calls);
     }
 
     /**
@@ -207,8 +239,8 @@ public class RowExtractorTest {
                     (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
             Object viaArrow = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), true);
             Object viaMysql = RowExtractor.extractValue(rs, col(Types.TIMESTAMP), 1, RowExtractor.newUtcCalendar(), false);
-            assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime((java.util.Date) viaArrow));
-            assertEquals("2026-08-05 04:34:56.123456", TemporalText.dateTime((java.util.Date) viaMysql));
+            assertEquals("2026-08-05 12:34:56.123456", viaArrow);
+            assertEquals("2026-08-05 04:34:56.123456", viaMysql);
         } finally {
             TimeZone.setDefault(previous);
         }

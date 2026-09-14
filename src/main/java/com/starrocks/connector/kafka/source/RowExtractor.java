@@ -20,8 +20,10 @@
 
 package com.starrocks.connector.kafka.source;
 
+import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.sql.Timestamp;
 import java.sql.Types;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -32,6 +34,11 @@ import java.util.TimeZone;
  * Reads one row into an {@code Object[]}, choosing each getter from the {@link ColumnMeta} the
  * schema was built from. Switching on {@code ResultSetMetaData.getColumnType()} would give one read
  * path two sources of truth, and on Arrow Flight the driver's account is known to be wrong.
+ *
+ * <p>The array is canonical, not raw: a DECIMAL is at its declared scale, a DATE or DATETIME is
+ * already {@link TemporalText}, a nested column is the readers' neutral value. This is where the
+ * two transports meet, so whatever they disagree on is settled here and {@link ChangeRecordMapper}
+ * only has to shape.
  */
 final class RowExtractor {
 
@@ -80,19 +87,27 @@ final class RowExtractor {
         }
         Object value;
         switch (col.jdbcType) {
+            // Connect's Decimal wants the BigDecimal at the schema's scale; the Arrow driver hands a
+            // DECIMALV2 back at scale 9 and MariaDB at the declared one.
             case Types.DECIMAL:
-            case Types.NUMERIC:
-                value = rs.getBigDecimal(index);
+            case Types.NUMERIC: {
+                BigDecimal d = rs.getBigDecimal(index);
+                value = d == null ? null : d.setScale(col.scale);
                 break;
-            case Types.DATE:
-                value = rs.getDate(index, utc);
+            }
+            case Types.DATE: {
+                java.sql.Date d = rs.getDate(index, utc);
+                value = d == null ? null : TemporalText.date(d);
                 break;
-            case Types.TIMESTAMP:
-                value = rs.getTimestamp(index, utc);
-                if (arrowFlight && value != null) {
-                    value = TemporalText.fromJvmWallClock((java.sql.Timestamp) value);
+            }
+            case Types.TIMESTAMP: {
+                Timestamp ts = rs.getTimestamp(index, utc);
+                if (arrowFlight && ts != null) {
+                    ts = TemporalText.fromJvmWallClock(ts);
                 }
+                value = ts == null ? null : TemporalText.dateTime(ts);
                 break;
+            }
             case Types.BIT:
             case Types.BOOLEAN:
                 value = rs.getBoolean(index);

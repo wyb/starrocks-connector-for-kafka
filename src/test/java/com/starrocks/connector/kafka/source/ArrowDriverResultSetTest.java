@@ -295,8 +295,9 @@ public class ArrowDriverResultSetTest {
                 assertTrue(rs.next());
                 Object[] row = RowExtractor.extractRow(rs, cols, RowExtractor.newUtcCalendar(), true);
 
-                assertEquals("2026-08-05", TemporalText.date((java.util.Date) row[0]));
-                assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime((java.util.Date) row[1]));
+                // Canonical already: the extractor formats temporals, so the row itself is comparable.
+                assertEquals("2026-08-05", row[0]);
+                assertEquals("2026-08-05 12:34:56.123456", row[1]);
                 assertEquals(new BigDecimal("99999999999999999999999999999999999999"), row[2]);
 
                 for (int i = 3; i < cols.size(); i++) {

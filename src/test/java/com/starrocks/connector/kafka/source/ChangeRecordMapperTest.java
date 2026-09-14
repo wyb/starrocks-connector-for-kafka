@@ -201,7 +201,7 @@ public class ChangeRecordMapperTest {
                 cols, Collections.emptyList());
 
         SourceRecord r = mapper.toSnapshotRecord(
-                new Object[]{new BigDecimal("1.50"), new java.util.Date(0), new java.util.Date(0), "{}"}, 1L);
+                new Object[]{new BigDecimal("1.50"), "1970-01-01", "1970-01-01 00:00:00", "{}"}, 1L);
 
         Struct value = (Struct) r.value();
         Struct after = (Struct) value.get("after");
@@ -230,24 +230,18 @@ public class ChangeRecordMapperTest {
     }
 
     /**
-     * DATETIME keeps its microseconds through the text path -- Connect's Timestamp logical type
-     * would have cut them to millis -- and a DATE key column is text in the key too.
+     * Temporals arrive already as text (RowExtractor canonicalizes them) and go through untouched,
+     * including into a DATE key column, whose key schema is STRING too.
      */
     @Test
-    public void testDateTimeKeepsMicrosecondsAndDateKeysAreText() {
+    public void testTemporalTextPassesThroughIncludingKeyColumns() {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("d", Types.DATE, 0, 0, false),
                 new ColumnMeta("ts", Types.TIMESTAMP, 0, 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t",
                 cols, Collections.singletonList("d"));
-        // UTC instants, as getTimestamp(i, utcCalendar) produces them; valueOf would use the JVM zone.
-        java.sql.Timestamp withMicros = java.sql.Timestamp.from(
-                java.time.LocalDateTime.of(2026, 8, 5, 12, 34, 56).toInstant(java.time.ZoneOffset.UTC));
-        withMicros.setNanos(123_456_000);
-        java.sql.Date day = new java.sql.Date(
-                java.time.LocalDate.of(2026, 8, 5).atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli());
 
-        SourceRecord r = mapper.toSnapshotRecord(new Object[]{day, withMicros}, 1L);
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{"2026-08-05", "2026-08-05 12:34:56.123456"}, 1L);
 
         Struct after = (Struct) ((Struct) r.value()).get("after");
         assertEquals("2026-08-05 12:34:56.123456", after.get("ts"));

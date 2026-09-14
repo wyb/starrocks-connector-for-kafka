@@ -29,7 +29,6 @@ import org.apache.kafka.connect.data.Struct;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
-import java.math.BigDecimal;
 import java.sql.Types;
 import java.time.Instant;
 import java.util.HashMap;
@@ -205,6 +204,10 @@ public final class ChangeRecordMapper {
         return idx;
     }
 
+    /**
+     * The row is already canonical ({@link RowExtractor}): decimals at the declared scale, temporals
+     * as text. Only a nested column still needs assembling into Connect's own containers.
+     */
     private static void putValue(Struct struct, ColumnMeta col, Object value) {
         if (value == null) {
             return;
@@ -212,20 +215,6 @@ public final class ChangeRecordMapper {
         if (col.nested != null) {
             struct.put(col.name, col.nested.toConnectValue(struct.schema().field(col.name).schema(), value));
             return;
-        }
-        if (isDecimalType(col.jdbcType) && value instanceof BigDecimal) {
-            struct.put(col.name, ((BigDecimal) value).setScale(col.scale));
-            return;
-        }
-        if (value instanceof java.util.Date) {
-            if (col.jdbcType == Types.DATE) {
-                struct.put(col.name, TemporalText.date((java.util.Date) value));
-                return;
-            }
-            if (col.jdbcType == Types.TIMESTAMP) {
-                struct.put(col.name, TemporalText.dateTime((java.util.Date) value));
-                return;
-            }
         }
         struct.put(col.name, value);
     }
@@ -245,10 +234,6 @@ public final class ChangeRecordMapper {
             builder.field(col.name, schemaFor(col));
         }
         return builder.build();
-    }
-
-    private static boolean isDecimalType(int jdbcType) {
-        return jdbcType == Types.DECIMAL || jdbcType == Types.NUMERIC;
     }
 
     private Schema schemaFor(ColumnMeta col) {
