@@ -149,11 +149,12 @@ public class TransportBench {
         }
         runOverMysql(mysqlCfg, mutation.replace("{db}", db).replace("{table}", table));
         long head = mysql.bookmarkCreate(db, table, holder, BOOKMARK_TTL_MS);
-        held.add(new Held(table, head, holder));
         if (head == base) {
-            report.note(table + ": the mutation published no new version, CHANGES skipped");
+            // The holder already references it, so it is the same id: not a second thing to release.
+            report.note(table + ": the mutation published no new version (does it name {db}.{table}?), CHANGES skipped");
             return;
         }
+        held.add(new Held(table, head, holder));
         for (int round = 0; round < rounds; round++) {
             for (final Transport t : order(transports, round)) {
                 Sample s = meter.measure(new Callable<Long>() {
