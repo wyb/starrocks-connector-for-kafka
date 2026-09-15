@@ -109,8 +109,14 @@ public final class SqlBuilder {
     }
 
     public static String tableConfigSql(String db, String table) {
-        return "SELECT TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
+        return "SELECT TABLE_ID, TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = " + quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
+    }
+
+    /** The references {@code holder} still has on the table, oldest bookmark first. */
+    public static String heldBookmarksSql(long tableId, String holder) {
+        return "SELECT BOOKMARK_ID FROM information_schema.table_bookmark_references WHERE TABLE_ID = " + tableId
+                + " AND HOLDER_ID = " + quoteStr(holder) + " ORDER BY BOOKMARK_ID";
     }
 
     private static String qualifiedTable(String db, String table) {

@@ -160,6 +160,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 ts.keyCols = client.fetchKeyColumns(db, t);
                 ts.mapper = new ChangeRecordMapper(db, t, ts.topic, ts.cols, ts.keyCols);
                 Map<String, Object> raw = reader == null ? null : reader.offset(OffsetState.sourcePartition(db, t));
+                adoptHeldBookmarks(ts);
                 restoreOffset(ts, raw);
                 started.add(ts);
             }
@@ -187,6 +188,28 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // table per restart until its TTL. Safe, because commit() releases strictly below the
             // durable offset, and at restore time this id is exactly that offset.
             retain(t, state.bookmarkId);
+        }
+    }
+
+    /**
+     * Re-enters every reference this holder still has on the table, so a predecessor's leftovers --
+     * heads whose windows never became durable, releases it never issued -- are released by the
+     * fence instead of pinning versions until their TTL. Best-effort: they expire either way.
+     */
+    private void adoptHeldBookmarks(TableState t) {
+        List<Long> held;
+        try {
+            held = client.fetchHeldBookmarks(db, t.table, holder);
+        } catch (SQLException e) {
+            LOG.warn("Could not list the bookmarks {} holds on {}.{}; any left by a previous task expire by "
+                    + "TTL instead of being released", holder, db, t.table, e);
+            return;
+        }
+        for (Long id : held) {
+            retain(t, id);
+        }
+        if (!held.isEmpty()) {
+            LOG.info("Adopted {} bookmark(s) {} already held on {}.{}: {}", held.size(), holder, db, t.table, held);
         }
     }
 

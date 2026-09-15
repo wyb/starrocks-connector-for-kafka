@@ -33,7 +33,7 @@ import java.util.List;
 
 /**
  * {@link CdcClient} over JDBC. The query layer only: {@link FeConnection},
- * {@link ColumnMetadataReader} and {@link RowExtractor} sit underneath it.
+ * {@link ColumnMetadataReader} and {@link ValueReader} sit underneath it.
  *
  * <p><b>Not thread-safe</b>, because {@link FeConnection} is not; drive one client from one thread.
  * Connection behaviour is covered by the integration smoke test, not by unit tests.
@@ -89,6 +89,25 @@ public class StarRocksJdbcClient implements CdcClient {
     @Override
     public void bookmarkRelease(String db, String table, long bookmarkId, String holder) throws SQLException {
         connection.executeOnLeader(SqlBuilder.bookmarkReleaseSql(db, table, bookmarkId, holder));
+    }
+
+    @Override
+    public List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException {
+        String sql = SqlBuilder.heldBookmarksSql(fetchTableConfigRow(db, table).tableId, holder);
+        try {
+            Connection c = connection.get();
+            try (Statement stmt = c.createStatement();
+                 ResultSet rs = stmt.executeQuery(sql)) {
+                List<Long> ids = new ArrayList<>();
+                while (rs.next()) {
+                    ids.add(rs.getLong("BOOKMARK_ID"));
+                }
+                return ids;
+            }
+        } catch (SQLException e) {
+            connection.closeIfBroken(e);
+            throw e;
+        }
     }
 
     @Override
@@ -234,7 +253,7 @@ public class StarRocksJdbcClient implements CdcClient {
                 if (!rs.next()) {
                     throw new SQLException("table not found: " + db + "." + table);
                 }
-                return new TableConfigRow(rs.getString("TABLE_MODEL"),
+                return new TableConfigRow(rs.getLong("TABLE_ID"), rs.getString("TABLE_MODEL"),
                         rs.getString("PROPERTIES"));
             }
         } catch (SQLException e) {
@@ -252,10 +271,12 @@ public class StarRocksJdbcClient implements CdcClient {
     }
 
     private static final class TableConfigRow {
+        final long tableId;
         final String tableModel;
         final String properties;
 
-        TableConfigRow(String tableModel, String properties) {
+        TableConfigRow(long tableId, String tableModel, String properties) {
+            this.tableId = tableId;
             this.tableModel = tableModel;
             this.properties = properties;
         }

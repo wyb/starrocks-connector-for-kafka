@@ -46,6 +46,7 @@ import java.util.Set;
  *       once, leaving the others healthy.</li>
  *   <li>{@link #fetchColumns} and {@link #fetchKeyColumns} fall back to a two-column table with no
  *       key columns.</li>
+ *   <li>{@link #fetchHeldBookmarks} answers {@link #setHeldBookmarks}, or nothing.</li>
  * </ul>
  */
 final class FakeCdcClient implements CdcClient {
@@ -63,12 +64,15 @@ final class FakeCdcClient implements CdcClient {
     private final Map<String, Long> lastHeadByTable = new HashMap<>();
     private final Map<String, List<Object[]>> queuedSnapshotRowsByTable = new HashMap<>();
     private final Map<String, List<ChangeRow>> queuedChangesByTable = new HashMap<>();
+    private final Map<String, List<Long>> heldBookmarksByTable = new HashMap<>();
     private final Set<String> failNextChangesTables = new HashSet<>();
     private final Set<String> failNextChangesAfterEmittingTables = new HashSet<>();
     /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
     SQLException bookmarkCreateFailure;
     /** When set, every bookmarkRenew fails with it. */
     SQLException bookmarkRenewFailure;
+    /** When set, every fetchHeldBookmarks fails with it -- a cluster without the reference table. */
+    SQLException heldBookmarksFailure;
     /** Thrown once by streamChanges for that table, after any queued rows -- a partial window. */
     final Map<String, SQLException> changesFailureByTable = new HashMap<>();
     /** Thrown once by streamSnapshot for that table, after any queued rows. */
@@ -86,6 +90,8 @@ final class FakeCdcClient implements CdcClient {
     final List<String> createdBookmarks = new ArrayList<>();
     final List<String> releasedBookmarks = new ArrayList<>();
     final List<String> renewedBookmarks = new ArrayList<>();
+    /** db.table:holder of every fetchHeldBookmarks call. */
+    final List<String> heldBookmarkQueries = new ArrayList<>();
     /** The ttl each renewal asked for, to catch a client that echoes the grant back. */
     final List<Long> requestedTtls = new ArrayList<>();
     /** Holder ids, verbatim, as handed to bookmarkCreate / bookmarkRelease. */
@@ -104,6 +110,11 @@ final class FakeCdcClient implements CdcClient {
 
     void setKeyColumns(String table, List<String> keyCols) {
         keyColsByTable.put(table, keyCols);
+    }
+
+    /** What the holder still references on the table when the task starts. */
+    void setHeldBookmarks(String table, Long... ids) {
+        heldBookmarksByTable.put(table, Arrays.asList(ids));
     }
 
     void enqueueHead(String table, long id) {
@@ -170,6 +181,16 @@ final class FakeCdcClient implements CdcClient {
     public void bookmarkRelease(String db, String table, long bookmarkId, String holder) {
         releasedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
         releaseHolders.add(holder);
+    }
+
+    @Override
+    public List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException {
+        heldBookmarkQueries.add(db + "." + table + ":" + holder);
+        if (heldBookmarksFailure != null) {
+            throw heldBookmarksFailure;
+        }
+        List<Long> held = heldBookmarksByTable.get(table);
+        return held != null ? new ArrayList<>(held) : new ArrayList<>();
     }
 
     @Override

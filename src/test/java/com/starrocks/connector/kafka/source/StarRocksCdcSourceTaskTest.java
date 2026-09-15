@@ -1432,6 +1432,71 @@ public class StarRocksCdcSourceTaskTest {
         assertTrue(fatal.getMessage(), fatal.getMessage().contains("items"));
     }
 
+    /**
+     * A predecessor leaves references behind: its resume point, heads whose windows never became
+     * durable, releases it never issued. Re-entered at start, the fence releases them in due
+     * course; ignored, they pin versions until their TTL.
+     */
+    @Test
+    public void testStartAdoptsTheReferencesTheHolderStillHas() throws Exception {
+        fake.setHeldBookmarks("orders", 90L, 100L, 130L);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
+        task.start(baseProps());
+
+        assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
+        assertEquals(Arrays.asList(90L, 100L, 130L), liveBookmarksOf(task));
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
+        assertEquals(100L, t.committedBookmark);
+        assertTrue(t.snapshotDone);
+
+        // The first commit releases what lies below the durable position; the rest stays pinned.
+        fake.enqueueHead("orders", 100L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Collections.singletonList("db1.orders:90:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Arrays.asList(100L, 130L), liveBookmarksOf(task));
+
+        // The predecessor's head is what create hands back on an unchanged table; once that window
+        // is durable, the resume point goes too.
+        fake.enqueueHead("orders", 130L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        assertEquals(1, task.poll().size());
+        flushOffset("orders", 130L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:100:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(130L), liveBookmarksOf(task));
+    }
+
+    /** With no durable offset the table is fresh, but the leftovers are still taken back and released. */
+    @Test
+    public void testLeftoversOfAFreshTableAreReleasedOnceTheSnapshotIsDurable() throws Exception {
+        fake.setHeldBookmarks("orders", 90L, 95L);
+        fake.enqueueHead("orders", 100L);
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
+        task.start(baseProps());
+        assertEquals(Arrays.asList(90L, 95L), liveBookmarksOf(task));
+
+        task.poll();
+        assertEquals(1, fake.snapshotCalls);
+        assertEquals(Arrays.asList(90L, 95L, 100L), liveBookmarksOf(task));
+
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:95:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
+    }
+
+    /** A cluster without the reference table must still start; the leftovers then expire by TTL. */
+    @Test
+    public void testAnUnreadableReferenceListDoesNotFailStart() throws Exception {
+        fake.heldBookmarksFailure = new SQLException("Unknown table 'table_bookmark_references'");
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
+        task.start(baseProps());
+        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
+    }
+
     // ------------------------------------------------------------------
     // Invariant 5: one table's failure never discards another table's records, whose positions
     // have already advanced in memory by the time the batch is built.

@@ -568,6 +568,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <li><span class="who">restoreOffset()</span><code>OffsetState.fromMap</code> 解码，容忍 <code>bookmark_id</code> 被反序列化成 <code>Integer</code> 或 <code>Long</code>；解不出非负数就整条丢弃回 <code>fresh()</code>，不把 <code>-1</code> 哨兵和 <code>snapshot_done</code> 配成矛盾状态。</li>
   <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）保持 fresh，下次 poll 重做整表快照。</li>
   <li><span class="who">restoreOffset()</span>把恢复出来的 bookmark <strong>重新压回 <code>liveBookmarks</code></strong>。</li>
+  <li><span class="who">start()</span>另从 <code>information_schema.table_bookmark_references</code> 取回 holder 在该表上仍持有的全部引用，一并压回 <code>liveBookmarks</code>——前一个 task 留下的、窗口未落盘的 head 和未发出的释放由此走正常围栏释放，而不是等 TTL。</li>
   <li><span class="who">poll()</span><code>head = bookmarkCreate(...)</code>；若 <code>head == committedBookmark</code> 则本轮无新版本，直接跳过（idle dedup）；否则读 <code>[_CHANGES_base_head_]</code>。</li>
 </ol>
 

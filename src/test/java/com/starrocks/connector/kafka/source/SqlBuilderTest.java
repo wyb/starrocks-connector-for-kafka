@@ -60,11 +60,19 @@ public class SqlBuilderTest {
         assertEquals("'it\\'s \\\\here'", SqlBuilder.quoteStr("it's \\here"));
     }
 
-    /** PROPERTIES rides the row the model comes from, so preflight makes one query for both. */
+    /** TABLE_ID, the model and PROPERTIES ride one row, so one query serves preflight and the reference lookup. */
     @Test
     public void testMetadataSql() {
-        assertEquals("SELECT TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
+        assertEquals("SELECT TABLE_ID, TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = 'db1' AND TABLE_NAME = 't1'", SqlBuilder.tableConfigSql("db1", "t1"));
+    }
+
+    /** The reference table is keyed by TABLE_ID; the holder is a string literal like any other. */
+    @Test
+    public void testHeldBookmarksSqlFiltersByTableIdAndHolder() {
+        assertEquals("SELECT BOOKMARK_ID FROM information_schema.table_bookmark_references"
+                + " WHERE TABLE_ID = 12345 AND HOLDER_ID = 'kc:it\\'s' ORDER BY BOOKMARK_ID",
+                SqlBuilder.heldBookmarksSql(12345L, "kc:it's"));
     }
 
     /**
