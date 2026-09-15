@@ -61,6 +61,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
     public static final String TOMBSTONES_ON_DELETE = "source.tombstones.on.delete";
     public static final String MAX_RETRIES = "source.max.retries";
+    public static final String POLL_RETRY_TIMEOUT_MS = "source.poll.retry.timeout.ms";
     public static final String CONNECT_TIMEOUT_MS = "connect.timeout.ms";
 
     // Internal task-sharding key used only to pass the assigned tables from the Connector to a Task;
@@ -211,6 +212,14 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Importance.LOW,
                         "The number of times to retry a failed source operation before giving up."
                 ).define(
+                        POLL_RETRY_TIMEOUT_MS,
+                        ConfigDef.Type.LONG,
+                        600000L,
+                        ConfigDef.Range.atLeast(-1L),
+                        ConfigDef.Importance.LOW,
+                        "How long, in milliseconds, a table's reads may keep failing across polls before the task "
+                                + "fails instead of retrying. -1 retries forever; 0 fails on the first failed poll."
+                ).define(
                         CONNECT_TIMEOUT_MS,
                         ConfigDef.Type.INT,
                         1000,
@@ -288,6 +297,10 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
 
     public int maxRetries() {
         return getInt(MAX_RETRIES);
+    }
+
+    public long pollRetryTimeoutMs() {
+        return getLong(POLL_RETRY_TIMEOUT_MS);
     }
 
     public int connectTimeoutMs() {

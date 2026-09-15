@@ -98,6 +98,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // One warning per table, not one per round, when the poll interval cannot service the lease.
         boolean warnedPollOutpacesLease = false;
         long renewBackoffMs = 0L;
+        // Monotonic ms of the first failed poll in the current run of failures; -1 after a success.
+        long firstFailureMs = -1L;
 
         TableState(String table, String topic) {
             this.table = table;
@@ -112,6 +114,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     private long ttlMs;
     private long monotonicOriginNanos = Long.MIN_VALUE;
     private long pollIntervalMs;
+    private long pollRetryTimeoutMs;
     private boolean snapshotInitial;
     private boolean tombstones;
     private boolean policyResnapshot;
@@ -136,6 +139,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         holder = config.holderId(props.getOrDefault("name", "default"));
         ttlMs = config.bookmarkTtlMs();
         pollIntervalMs = config.pollIntervalMs();
+        pollRetryTimeoutMs = config.pollRetryTimeoutMs();
         snapshotInitial = StarRocksCdcSourceConfig.SNAPSHOT_MODE_INITIAL.equals(config.snapshotMode());
         tombstones = config.tombstonesOnDelete();
         policyResnapshot = StarRocksCdcSourceConfig.NONTRACKABLE_POLICY_RESNAPSHOT.equals(config.nonTrackablePolicy());
@@ -161,8 +165,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
             tables = started;
             LOG.info("CDC source task started: tables={}, holder={}, snapshot.mode={}, nontrackable.policy={}, "
-                            + "poll.interval.ms={}, bookmark.ttl.ms={}",
-                    taskTables, holder, config.snapshotMode(), config.nonTrackablePolicy(), pollIntervalMs, ttlMs);
+                            + "poll.interval.ms={}, poll.retry.timeout.ms={}, bookmark.ttl.ms={}",
+                    taskTables, holder, config.snapshotMode(), config.nonTrackablePolicy(), pollIntervalMs,
+                    pollRetryTimeoutMs, ttlMs);
         } catch (SQLException e) {
             throw new ConnectException("Failed to start CDC source task", e);
         }
@@ -189,7 +194,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * Reads one round over every table. A table that fails is skipped, not thrown from: the batch
      * holds records whose tables have already advanced {@code committedBookmark} in memory, and
      * Connect discards the return value of a poll that throws -- those records would never reach
-     * Kafka and never be re-read. The failure surfaces only once the batch is empty.
+     * Kafka and never be re-read. The failure surfaces only once the batch is empty. Once a table
+     * has failed for {@code source.poll.retry.timeout.ms} it is fatal and thrown at once instead:
+     * the task dies either way, and a restart re-reads every table from its durable offset.
      */
     @Override
     public List<SourceRecord> poll() throws InterruptedException {
@@ -201,37 +208,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
             renewLiveBookmarks(t);
             final int emittedBefore = out.size();
             try {
-                if (!t.snapshotDone) {
-                    bootstrap(t, out);
-                    continue;
-                }
-                long head = client.bookmarkCreate(db, t.table, holder, ttlMs);
-                if (head == t.committedBookmark) {
-                    continue; // idle dedup: no new version since the last poll
-                }
-                retain(t, head);
-                final long base = t.committedBookmark;
-                final List<WindowRow> window = new ArrayList<>();
-                client.streamChanges(db, t.table, t.cols, base, head,
-                        (row, changeType, rowVersion) -> window.add(new WindowRow(
-                                t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true),
-                                changeType, rowVersion)));
-                if (window.isEmpty()) {
-                    // A version with no change rows (a compaction, say) still moves the head. Make it
-                    // the base: FE dedups create against the newest bookmark only, so releasing it
-                    // meant create + empty scan + release on every poll until a real change. The next
-                    // real window names it, so the durable offset can reach it and commit() release it.
-                    t.committedBookmark = head;
-                    LOG.debug("Empty CDC window for {}.{}: bookmark {} -> {}, base moved to head",
-                            db, t.table, base, head);
-                    continue;
-                }
-                final int windowStart = out.size();
-                appendWindow(t, out, window);
-                demoteAllButLast(out, windowStart, base);
-                t.committedBookmark = head;
-                LOG.info("Emitted CDC window for {}.{}: bookmark {} -> {}, {} record(s)",
-                        db, t.table, base, head, out.size() - emittedBefore);
+                pollTable(t, out);
+                t.firstFailureMs = -1L;
             } catch (NonTrackableException e) {
                 // These records carry this window's head; committing them would advance the durable
                 // position past a window never read to the end. Empty today -- the ORDER BY makes the
@@ -242,6 +220,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 // Partial window: every record still carries head, so an ack would declare a window
                 // durable that was never read to the end.
                 discardFrom(out, emittedBefore);
+                failUnlessRetriable(t, e);
                 if (failure == null) {
                     failure = e;
                     failedTable = t.table;
@@ -253,7 +232,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (out.isEmpty() && failure != null) {
             // Connect retries only RetriableException and kills the task for anything else. An FE
             // restart, a leader failover outlasting source.max.retries, a reset socket and a connect
-            // timeout are all survivable here; a broken config still fails in start().
+            // timeout are all survivable here; a broken config still fails in start(). Connect
+            // re-polls at once after a RetriableException, so the pacing has to happen here.
+            idleSleep(pollIntervalMs);
             throw new RetriableException("CDC poll failed for table " + failedTable, failure);
         }
         if (out.isEmpty()) {
@@ -261,6 +242,59 @@ public class StarRocksCdcSourceTask extends SourceTask {
             return null;
         }
         return out;
+    }
+
+    /** One table's turn: bootstrap, or open the window above the committed bookmark and emit it. */
+    private void pollTable(TableState t, List<SourceRecord> out) throws SQLException, NonTrackableException {
+        if (!t.snapshotDone) {
+            bootstrap(t, out);
+            return;
+        }
+        long head = client.bookmarkCreate(db, t.table, holder, ttlMs);
+        if (head == t.committedBookmark) {
+            return; // idle dedup: no new version since the last poll
+        }
+        retain(t, head);
+        final long base = t.committedBookmark;
+        final List<WindowRow> window = new ArrayList<>();
+        client.streamChanges(db, t.table, t.cols, base, head,
+                (row, changeType, rowVersion) -> window.add(new WindowRow(
+                        t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true),
+                        changeType, rowVersion)));
+        if (window.isEmpty()) {
+            // A version with no change rows (a compaction, say) still moves the head. Make it the
+            // base: FE dedups create against the newest bookmark only, so releasing it meant create
+            // + empty scan + release on every poll until a real change. The next real window names
+            // it, so the durable offset can reach it and commit() release it.
+            t.committedBookmark = head;
+            LOG.debug("Empty CDC window for {}.{}: bookmark {} -> {}, base moved to head",
+                    db, t.table, base, head);
+            return;
+        }
+        final int windowStart = out.size();
+        appendWindow(t, out, window);
+        demoteAllButLast(out, windowStart, base);
+        t.committedBookmark = head;
+        LOG.info("Emitted CDC window for {}.{}: bookmark {} -> {}, {} record(s)",
+                db, t.table, base, head, out.size() - windowStart);
+    }
+
+    /**
+     * Turns a run of failed polls fatal once it has lasted {@code source.poll.retry.timeout.ms}.
+     * Without a limit a dropped column, a revoked privilege or a disabled meta function retries
+     * forever while the task reports RUNNING.
+     */
+    private void failUnlessRetriable(TableState t, SQLException e) {
+        long now = monotonicMs();
+        if (t.firstFailureMs < 0) {
+            t.firstFailureMs = now;
+        }
+        long failingForMs = now - t.firstFailureMs;
+        if (pollRetryTimeoutMs >= 0 && failingForMs >= pollRetryTimeoutMs) {
+            throw new ConnectException("CDC reads of table " + t.table + " have failed for " + failingForMs
+                    + " ms, longer than " + StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS + "="
+                    + pollRetryTimeoutMs, e);
+        }
     }
 
     private void bootstrap(TableState t, List<SourceRecord> out) throws SQLException, NonTrackableException {

@@ -47,6 +47,7 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertNotNull;
 import static org.junit.Assert.assertNull;
+import static org.junit.Assert.assertSame;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
@@ -1274,6 +1275,161 @@ public class StarRocksCdcSourceTaskTest {
         } catch (RetriableException expected) {
             assertTrue(expected.getMessage(), expected.getMessage().contains("orders"));
         }
+    }
+
+    /**
+     * Connect re-polls at once after a RetriableException, with no delay of its own, so an outage
+     * would otherwise spin the leader statements and the WARN log as fast as the failures return.
+     */
+    @Test
+    public void testRetriableFailureWaitsAPollIntervalBeforeThrowing() throws Exception {
+        final List<Long> sleeps = new ArrayList<>();
+        StarRocksCdcSourceTask paced = new StarRocksCdcSourceTask() {
+            @Override
+            protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+                return fake;
+            }
+
+            @Override
+            long monotonicMs() {
+                return fakeNowMs;
+            }
+
+            @Override
+            void idleSleep(long ms) {
+                sleeps.add(ms);
+            }
+        };
+        paced.initialize(contextReading(durableOffsets));
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_INTERVAL_MS, "250");
+        fake.enqueueHead("orders", 100L);
+        paced.start(props);
+        paced.poll();
+        sleeps.clear();
+
+        fake.bookmarkCreateFailure = new SQLException("Communications link failure");
+        try {
+            paced.poll();
+            fail("expected the poll to surface the failure");
+        } catch (RetriableException expected) {
+            assertEquals(Collections.singletonList(250L), sleeps);
+        }
+    }
+
+    private Map<String, String> propsWithRetryTimeout(String ms) {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, ms);
+        return props;
+    }
+
+    private void pollExpectingRetriable() throws Exception {
+        try {
+            task.poll();
+            fail("expected the poll to surface the failure");
+        } catch (RetriableException expected) {
+            // still retriable
+        }
+    }
+
+    private ConnectException pollExpectingFatal() throws Exception {
+        try {
+            task.poll();
+        } catch (RetriableException stillRetriable) {
+            throw new AssertionError("still retriable: " + stillRetriable.getMessage(), stillRetriable);
+        } catch (ConnectException fatal) {
+            return fatal;
+        }
+        throw new AssertionError("expected the poll to fail the task");
+    }
+
+    /**
+     * A dropped column, a revoked privilege or a disabled meta function fails every poll for good.
+     * Retried forever, the task reports RUNNING while delivering nothing; past the timeout it fails.
+     */
+    @Test
+    public void testAFailingTableTurnsFatalAfterTheRetryTimeout() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(propsWithRetryTimeout("1000"));
+        task.poll();
+
+        fake.bookmarkCreateFailure = new SQLException("Unknown column 'gone' in 'orders'");
+        fakeNowMs = 0;
+        pollExpectingRetriable();
+        fakeNowMs = 999;
+        pollExpectingRetriable();
+        fakeNowMs = 1000;
+        ConnectException fatal = pollExpectingFatal();
+        assertTrue(fatal.getMessage(), fatal.getMessage().contains("orders"));
+        assertTrue(fatal.getMessage(), fatal.getMessage().contains(StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS));
+        assertSame(fake.bookmarkCreateFailure, fatal.getCause());
+    }
+
+    @Test
+    public void testASuccessfulPollRestartsTheFailureClock() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(propsWithRetryTimeout("1000"));
+        task.poll();
+
+        SQLException outage = new SQLException("Communications link failure");
+        fake.bookmarkCreateFailure = outage;
+        fakeNowMs = 0;
+        pollExpectingRetriable();
+        fake.bookmarkCreateFailure = null;
+        fakeNowMs = 500;
+        assertNull("recovered and idle", task.poll());
+
+        fake.bookmarkCreateFailure = outage;
+        fakeNowMs = 1400;
+        pollExpectingRetriable(); // a fresh run of failures starts here, not at 0
+        fakeNowMs = 2400;
+        pollExpectingFatal();
+    }
+
+    @Test
+    public void testRetryTimeoutMinusOneRetriesForever() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(propsWithRetryTimeout("-1"));
+        task.poll();
+
+        fake.bookmarkCreateFailure = new SQLException("Communications link failure");
+        fakeNowMs = 0;
+        pollExpectingRetriable();
+        fakeNowMs = 30L * 24 * 3600 * 1000;
+        pollExpectingRetriable();
+    }
+
+    @Test
+    public void testRetryTimeoutZeroFailsOnTheFirstFailedPoll() throws Exception {
+        fake.enqueueHead("orders", 100L);
+        task.start(propsWithRetryTimeout("0"));
+        task.poll();
+
+        fake.bookmarkCreateFailure = new SQLException("Communications link failure");
+        pollExpectingFatal();
+    }
+
+    /**
+     * Fatal means fatal even when other tables produced records this round: Connect drops the
+     * batch, but the task is dead either way and a restart re-reads every table from its durable
+     * offset, so nothing is lost.
+     */
+    @Test
+    public void testAFatalFailureIsThrownEvenWhenOtherTablesProducedRecords() throws Exception {
+        addItemsTable();
+        Map<String, String> props = twoTableProps();
+        props.put(StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, "0");
+        fake.enqueueHead("orders", 10L);
+        fake.enqueueHead("items", 20L);
+        task.start(props);
+        task.poll();
+
+        fake.enqueueHead("orders", 11L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        fake.enqueueHead("items", 21L);
+        fake.changesFailureByTable.put("items", new SQLException("Unknown column 'gone' in 'items'"));
+        ConnectException fatal = pollExpectingFatal();
+        assertTrue(fatal.getMessage(), fatal.getMessage().contains("items"));
     }
 
     // ------------------------------------------------------------------

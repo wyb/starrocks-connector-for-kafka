@@ -54,6 +54,24 @@ public class StarRocksCdcSourceConfigTest {
         }
     }
 
+    /** -1 (forever) and 0 (first failure) are meaningful; anything lower is a typo, not a policy. */
+    @Test
+    public void testPollRetryTimeoutBelowMinusOneRejected() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, "-2");
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("source.poll.retry.timeout.ms=-2 must be rejected at startup");
+        } catch (ConfigException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains(
+                    StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS));
+        }
+        for (String ok : new String[] {"-1", "0", "1"}) {
+            m.put(StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, ok);
+            assertEquals(Long.parseLong(ok), new StarRocksCdcSourceConfig(m).pollRetryTimeoutMs());
+        }
+    }
+
     @Test
     public void testDefaultsApplied() {
         StarRocksCdcSourceConfig c = new StarRocksCdcSourceConfig(base());
@@ -61,6 +79,7 @@ public class StarRocksCdcSourceConfigTest {
         assertEquals("initial", c.snapshotMode());
         assertEquals(5000L, c.pollIntervalMs());
         assertEquals(604800000L, c.bookmarkTtlMs());
+        assertEquals(600000L, c.pollRetryTimeoutMs());
         assertEquals("fail", c.nonTrackablePolicy());
         assertFalse(c.tombstonesOnDelete());
     }

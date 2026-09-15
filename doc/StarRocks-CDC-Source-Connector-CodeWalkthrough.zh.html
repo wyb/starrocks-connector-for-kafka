@@ -106,8 +106,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>主代码<b>20 个类 / 约 4100 行</b></span>
-    <span>测试<b>240 个</b></span>
+    <span>主代码<b>20 个类 / 约 4200 行</b></span>
+    <span>测试<b>247 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -275,8 +275,8 @@ for (int i = 0; i &lt; tables.size(); i++)
 <p>顺序不能反：<code>DELETE /connectors/{name}/offsets</code> 是把 offset store 里<em>每一个</em>已存 partition 映射成 <code>null</code> 交进来，其中可能有本连接器已经不再写的形状。校验放在 null 判断之前，这类残留就再也清不掉了——重置是唯一的清理入口。</p>
 <p>不校验的代价不是立刻报错，而是几分钟后：写进去的畸形 offset 要等到某个 task 重启读回来，才表现为"窗口读不出来"加"续租一直失败"，跟当初那对引号已经联系不起来。</p>
 
-<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">296 行</span></h3>
-<p class="role">一个 <code>AbstractConfig</code>：14 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
+<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">309 行</span></h3>
+<p class="role">一个 <code>AbstractConfig</code>：15 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
 
 <p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>
 
@@ -301,7 +301,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">609 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">643 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
@@ -317,6 +317,7 @@ for (int i = 0; i &lt; tables.size(); i++)
   <tr><td><code>lastRenewAttemptMs</code> / <code>renewBackoffMs</code></td><td>失败退避：全失败轮次从一个 poll 间隔起步翻倍，租约未知时封顶一分钟、已知后封顶租约/3，成功清零——没有 <code>bookmark_renew</code> 的集群不会被每 poll 热重试</td></tr>
   <tr><td><code>effectiveTtlMs</code></td><td>服务端<strong>授予</strong>的租约里最短的那个有限值。<code>-1</code> = 未知或不设限——初始值如此，全部授予都是 <code>-1</code>（无上限）时也保持如此。<strong>永远不会是 0</strong></td></tr>
   <tr><td><code>warnedPollOutpacesLease</code></td><td>"poll 间隔喂不饱租约"的 WARN 每表只记一次，不是每轮</td></tr>
+  <tr><td><code>firstFailureMs</code></td><td>本轮连续失败的起点（<code>monotonicMs</code>）；成功一次清回 -1。持续失败达到 <code>source.poll.retry.timeout.ms</code> 时 poll 抛 <code>ConnectException</code> 让 task 失败</td></tr>
 </table>
 </div>
 <p>只有 <code>liveBookmarks</code> 在监视器下：commit 线程在里面挑出低于围栏的 id，poll 线程在里面追加、并为续租取快照。<code>committedBookmark</code> 用 <code>volatile</code> 而不进监视器，因为读它的那一步（<code>Math.min</code>）不需要与 deque 的修改原子。<code>pendingReleases</code> 自带线程安全，其余字段只在 poll 线程上动。</p>
@@ -347,6 +348,7 @@ if (state.snapshotDone) {
   <li><code>demoteAllButLast(out, windowStart, base)</code>：把本窗口除最后一条以外的记录的 offset 改回 <code>base</code>。Connect 提交的是<strong>已 ack 的最长前缀</strong>而非整批，每条都带 <code>head</code> 时一条 ack 就能让整个窗口显得已持久化。</li>
   <li>成功后 <code>committedBookmark = head</code>，记一条 INFO。</li>
 </ol>
+<p>第 3 步起的正文在 <code>pollTable(t, out)</code> 里；<code>poll()</code> 本身只剩遍历、异常处理和节流。</p>
 
 <div class="note warn">
   <span class="tag">墓碑只跟真删除，不跟 UPDATE 的前半截</span>
@@ -360,8 +362,8 @@ if (state.snapshotDone) {
   <p>FE 的 <code>bookmark_create</code> 只拿<strong>最新一个</strong> bookmark 去重，等价条件是各分区 visible version 相同。交还 head 之后，我们持有的 base 对新版本永远不等价，于是每轮都是新建 bookmark、一次空的 CHANGES 扫描、再释放——leader 每轮写两条 edit log，直到下一条真实变更。有过写入之后闲置的表基本都处在这个状态，因为最后一个版本通常是 compaction。</p>
   <p>留下 head 并把内存里的 <code>committedBookmark</code> 推到它：下一轮 create 命中 AlreadyAtLatest 返回同一个 id，走 idle 去重；下一个真实窗口以它为 base，记录带上它，持久 offset 就能到达它，fence 也就能释放它。不多钉版本：FE 的 fence version 取 id 最小的存活 bookmark，旧 base 在持久 offset 越过之前一直存活。重启时持久 offset 仍是旧 base，(旧 base, head] 重扫一次，结果还是空。</p>
 </div>
-<p>捕获 <code>NonTrackableException</code> → 先 <code>discardFrom</code> 丢弃本表本轮已产出的记录，再 <code>applyPolicy</code>。捕获 <code>SQLException</code> → 同样 <code>discardFrom</code>（demote 之前每条记录都带 <code>head</code>，一条 ack 就会让读了一半的窗口显得已持久化），记 WARN，然后<strong>跳过这张表继续遍历下一张</strong>，只留下第一个失败。</p>
-<p>不在这里抛，是因为抛异常会让 Connect 丢掉整批返回值，而排在前面的表此刻已经把 <code>committedBookmark</code> 推到了新 head——那批记录既进不了 Kafka，也不会被重读。只有<strong>整批为空</strong>时才把第一个失败包成 <code>RetriableException</code> 抛出（Connect 只对这一种重试，其余一律杀 task）；否则先把已产出的记录交出去，失败的表下一轮重试。</p>
+<p>捕获 <code>NonTrackableException</code> → 先 <code>discardFrom</code> 丢弃本表本轮已产出的记录，再 <code>applyPolicy</code>。捕获 <code>SQLException</code> → 同样 <code>discardFrom</code>（demote 之前每条记录都带 <code>head</code>，一条 ack 就会让读了一半的窗口显得已持久化），记 WARN，然后<strong>跳过这张表继续遍历下一张</strong>，只留下第一个失败。跳过之前先记下这张表连续失败的起点（<code>firstFailureMs</code>）；持续失败达到 <code>source.poll.retry.timeout.ms</code> 就地抛 <code>ConnectException</code> 让 task 失败——批次里其它表的记录随之丢弃，但 task 一死重启就从各自的持久 offset 重读，不丢数据。没有这个上限，列被 drop、权限被收回这类永久错误会让 task 永远 RUNNING 却什么也不交付。</p>
+<p>不在这里抛，是因为抛异常会让 Connect 丢掉整批返回值，而排在前面的表此刻已经把 <code>committedBookmark</code> 推到了新 head——那批记录既进不了 Kafka，也不会被重读。只有<strong>整批为空</strong>时才把第一个失败包成 <code>RetriableException</code> 抛出（Connect 只对这一种重试，其余一律杀 task）；否则先把已产出的记录交出去，失败的表下一轮重试。抛之前先 <code>idleSleep(pollIntervalMs)</code>：Connect 收到 RetriableException 后不等待、立刻再 poll，不自己限速就是一个刷 WARN 的紧循环。</p>
 <p>全部表都没产出记录、也没有失败时 <code>Thread.sleep(pollIntervalMs)</code> 并返回 <code>null</code>——Connect 的约定是 null 表示"这轮没有数据"。</p>
 
 <h4>bootstrap(t, out)</h4>
@@ -585,14 +587,14 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <div class="tablewrap">
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
-  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>50</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
+  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>56</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>ColumnMetadataReaderTest</code></td><td>15</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 走 Decimal 且 scale 钉为 0、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>12</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact、MySQL 会话钉住的二进制编码与文本读取器一致而 Arrow 不设。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>10</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中</td></tr>
-  <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>12</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
+  <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>13</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>TemporalTextTest</code></td><td>6</td><td>DATE 与 DATETIME 的文本逐位对齐 StarRocks：小数只在非零时出现且恒为六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分、Arrow 用的天数/微秒入口与 Date 入口一致、<code>fromJvmWallClock</code> 是 <code>valueOf</code> 的逆</td></tr>
   <tr><td><code>ArrowValueReaderTest</code></td><td>9</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错</td></tr>
   <tr><td><code>ColumnMetaTest</code></td><td>7</td><td>每种 <code>jdbcType</code> 落到哪个种类、DECIMAL 保留声明 scale、<code>bigint unsigned</code> 是 LARGEINT 且 schema scale 为 0、<code>json</code> 是 JSON 种类、解析成功的复杂列 <code>type.isNested()</code>、解析失败是带 StarRocks 逻辑名的 OPAQUE 文本且可空性来自列、未识别类型是无名文本</td></tr>
