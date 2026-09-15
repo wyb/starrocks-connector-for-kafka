@@ -30,6 +30,9 @@ import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
 import java.sql.Types;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Calendar;
@@ -318,5 +321,47 @@ public class ValueReaderTest {
         Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col(Types.INTEGER), col(Types.INTEGER)));
         assertArrayEquals(new Object[] {42, 42}, row);
         assertEquals(Arrays.asList("getInt", "getInt"), h.calls);
+    }
+
+    // -- DATE and DATETIME text, digit for digit what StarRocks prints. Fixtures are built as UTC
+    // instants, the way getTimestamp(i, utcCalendar) hands them over; Timestamp.valueOf would read
+    // the digits in the JVM's default zone instead.
+
+    private static Timestamp at(String seconds, int nanos) {
+        Timestamp ts = Timestamp.from(LocalDateTime.parse(seconds.replace(' ', 'T')).toInstant(ZoneOffset.UTC));
+        ts.setNanos(nanos);
+        return ts;
+    }
+
+    private static Date on(String day) {
+        return new Date(LocalDate.parse(day).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli());
+    }
+
+    @Test
+    public void testDateTextIsIsoCalendarDate() {
+        assertEquals("1970-01-01", ValueReader.dateText(new java.util.Date(0L)));
+        assertEquals("2026-08-05", ValueReader.dateText(on("2026-08-05")));
+    }
+
+    /** The fraction is printed only when it is non-zero, and then always as six digits. */
+    @Test
+    public void testDateTimeTextFractionFollowsStarRocks() {
+        assertEquals("2026-08-05 12:34:56", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 0)));
+        assertEquals("2026-08-05 12:34:56.123456", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 123_456_000)));
+        assertEquals("2026-08-05 12:34:56.120000", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 120_000_000)));
+    }
+
+    /** A plain java.util.Date carries millis only; they become the first three fraction digits. */
+    @Test
+    public void testPlainDateUsesItsMillis() {
+        assertEquals("1970-01-01 00:00:01.500000", ValueReader.dateTimeText(new java.util.Date(1_500L)));
+        assertEquals("1970-01-01 00:00:00", ValueReader.dateTimeText(new java.util.Date(0L)));
+    }
+
+    /** Before the epoch the seconds and the fraction must still be split with floor semantics. */
+    @Test
+    public void testBeforeEpochSplitsWithFloorSemantics() {
+        assertEquals("1969-12-31", ValueReader.dateText(new java.util.Date(-1L)));
+        assertEquals("1969-12-31 23:59:59.999000", ValueReader.dateTimeText(new java.util.Date(-1L)));
     }
 }

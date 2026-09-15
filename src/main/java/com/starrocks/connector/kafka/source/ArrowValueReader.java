@@ -26,6 +26,9 @@ import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.LocalDate;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -55,7 +58,7 @@ final class ArrowValueReader extends ValueReader {
     @Override
     protected Timestamp timestamp(ResultSet rs, int index) throws SQLException {
         Timestamp ts = super.timestamp(rs, index);
-        return ts == null ? null : TemporalText.fromJvmWallClock(ts);
+        return ts == null ? null : fromJvmWallClock(ts);
     }
 
     @Override
@@ -88,9 +91,9 @@ final class ArrowValueReader extends ValueReader {
     protected Object scalar(ColumnType type, Object value) {
         switch (type.kind) {
             case DATE:
-                return TemporalText.dateOfEpochDays(as(Number.class, value, type).intValue());
+                return dateOfEpochDays(as(Number.class, value, type).intValue());
             case DATETIME:
-                return TemporalText.dateTimeOfEpochMicros(as(Number.class, value, type).longValue());
+                return dateTimeOfEpochMicros(as(Number.class, value, type).longValue());
             case DECIMAL:
             case LARGEINT:
                 return as(BigDecimal.class, value, type).setScale(type.scale);
@@ -117,5 +120,29 @@ final class ArrowValueReader extends ValueReader {
             default:
                 throw new DataException("no Arrow reader for " + type);
         }
+    }
+
+    /** Arrow's date32: days since the epoch. */
+    static String dateOfEpochDays(int days) {
+        return LocalDate.ofEpochDay(days).toString();
+    }
+
+    /** Arrow's timestamp(MICRO): microseconds since the epoch. */
+    static String dateTimeOfEpochMicros(long micros) {
+        Timestamp ts = new Timestamp(Math.floorDiv(micros, 1_000L));
+        ts.setNanos((int) (Math.floorMod(micros, 1_000_000L) * 1_000L));
+        return dateTimeText(ts);
+    }
+
+    /**
+     * Undo the driver's zone shift. Its timestamp accessor ends in {@code Timestamp.valueOf(LocalDateTime)},
+     * which reads the stored digits in the JVM's default zone whatever Calendar was passed (a UTC+8
+     * worker turns 12:34:56 into the instant 04:34:56Z). {@code toLocalDateTime()} in that same zone
+     * hands the digits back; re-anchoring them in UTC is what {@link #dateTimeText} expects. Not
+     * invertible inside a DST gap -- the one hour a year a DST-zone worker can still print a shifted value.
+     */
+    static Timestamp fromJvmWallClock(Timestamp shifted) {
+        LocalDateTime digits = shifted.toLocalDateTime();
+        return Timestamp.from(digits.toInstant(ZoneOffset.UTC));
     }
 }

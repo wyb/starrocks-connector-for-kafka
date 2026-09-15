@@ -214,13 +214,13 @@ public class ChangeRecordMapperTest {
 
         Schema dateSchema = rowSchema.field("dt").schema();
         assertEquals(Schema.Type.STRING, dateSchema.type());
-        assertEquals(TemporalText.DATE_LOGICAL_NAME, dateSchema.name());
+        assertEquals(ColumnType.DATE_LOGICAL_NAME, dateSchema.name());
         assertTrue(dateSchema.isOptional());
         assertEquals("1970-01-01", after.get("dt"));
 
         Schema tsSchema = rowSchema.field("ts").schema();
         assertEquals(Schema.Type.STRING, tsSchema.type());
-        assertEquals(TemporalText.DATETIME_LOGICAL_NAME, tsSchema.name());
+        assertEquals(ColumnType.DATETIME_LOGICAL_NAME, tsSchema.name());
         assertTrue(tsSchema.isOptional());
         assertEquals("1970-01-01 00:00:00", after.get("ts"));
 
@@ -234,7 +234,7 @@ public class ChangeRecordMapperTest {
      * including into a DATE key column, whose key schema is STRING too.
      */
     @Test
-    public void testTemporalTextPassesThroughIncludingKeyColumns() {
+    public void testDateTextPassesThroughIncludingKeyColumns() {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("d", Types.DATE, 0, 0, false),
                 new ColumnMeta("ts", Types.TIMESTAMP, 0, 0, true));
@@ -344,7 +344,7 @@ public class ChangeRecordMapperTest {
         Struct stValue = (Struct) after.get("st");
         assertEquals(7, stValue.get("x"));
         assertEquals("2026-08-05", stValue.get("d"));
-        assertEquals(TemporalText.DATE_LOGICAL_NAME, stValue.schema().field("d").schema().name());
+        assertEquals(ColumnType.DATE_LOGICAL_NAME, stValue.schema().field("d").schema().name());
 
         // The fallback: still STRING, still named, nullability still from the column.
         assertEquals("com.starrocks.data.Struct", rowSchema.field("s").schema().name());

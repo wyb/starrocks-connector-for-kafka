@@ -107,7 +107,7 @@ public class ColumnTypeParserTest {
         assertEquals("t.s", s.name());
         assertEquals("x", s.fields().get(0).name());
         assertEquals("a`b", s.fields().get(2).name());
-        assertEquals(TemporalText.DATE_LOGICAL_NAME, s.field("a`b").schema().name());
+        assertEquals(ColumnType.DATE_LOGICAL_NAME, s.field("a`b").schema().name());
     }
 
     @Test
@@ -118,7 +118,7 @@ public class ColumnTypeParserTest {
         Schema inner = s.valueSchema().valueSchema();
         assertEquals(Schema.Type.STRUCT, inner.type());
         assertEquals("t.deep.element.value", inner.name());
-        assertEquals(TemporalText.DATETIME_LOGICAL_NAME,
+        assertEquals(ColumnType.DATETIME_LOGICAL_NAME,
                 inner.field("ys").schema().valueSchema().name());
     }
 

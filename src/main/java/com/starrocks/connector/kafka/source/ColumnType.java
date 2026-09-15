@@ -44,6 +44,10 @@ import java.util.StringJoiner;
  */
 final class ColumnType {
 
+    /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text, as ValueReader prints it. */
+    static final String DATE_LOGICAL_NAME = "com.starrocks.data.Date";
+    static final String DATETIME_LOGICAL_NAME = "com.starrocks.data.DateTime";
+
     enum Kind {
         BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, LARGEINT, FLOAT, DOUBLE, DECIMAL,
         STRING, BYTES, DATE, DATETIME, JSON,
@@ -156,10 +160,10 @@ final class ColumnType {
                 b = SchemaBuilder.bytes();
                 break;
             case DATE:
-                b = SchemaBuilder.string().name(TemporalText.DATE_LOGICAL_NAME).version(1);
+                b = SchemaBuilder.string().name(DATE_LOGICAL_NAME).version(1);
                 break;
             case DATETIME:
-                b = SchemaBuilder.string().name(TemporalText.DATETIME_LOGICAL_NAME).version(1);
+                b = SchemaBuilder.string().name(DATETIME_LOGICAL_NAME).version(1);
                 break;
             case JSON:
                 b = SchemaBuilder.string().name(Json.LOGICAL_NAME).version(1);

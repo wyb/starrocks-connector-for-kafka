@@ -26,6 +26,9 @@ import java.math.BigDecimal;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Timestamp;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.LinkedHashMap;
@@ -35,7 +38,7 @@ import java.util.TimeZone;
 
 /**
  * Reads one row out of a {@link ResultSet} into the canonical {@code Object[]} the mapper shapes:
- * decimals at the declared scale, DATE and DATETIME as {@link TemporalText}, nested columns as the
+ * decimals at the declared scale, DATE and DATETIME as the text StarRocks prints, nested columns as the
  * neutral value ({@code List}, {@code Map<String, Object>} for both maps and structs, canonical
  * scalars). Every decision is driven by the column's {@link ColumnType}, never by what the driver
  * says a column is.
@@ -108,12 +111,12 @@ abstract class ValueReader {
             }
             case DATE: {
                 java.sql.Date d = rs.getDate(index, utc);
-                value = d == null ? null : TemporalText.date(d);
+                value = d == null ? null : dateText(d);
                 break;
             }
             case DATETIME: {
                 Timestamp ts = timestamp(rs, index);
-                value = ts == null ? null : TemporalText.dateTime(ts);
+                value = ts == null ? null : dateTimeText(ts);
                 break;
             }
             // getString would charset-decode and lose the bytes; the schema side says BYTES.
@@ -142,6 +145,30 @@ abstract class ValueReader {
     /** Package-visible for tests: the calendar this instance hands to temporal getters. */
     Calendar utcCalendar() {
         return utc;
+    }
+
+    // DATE and DATETIME as the text StarRocks itself prints: 2026-08-05 and 2026-08-05 12:34:56, with
+    // .ffffff appended only when the microseconds are not zero (BE timestamp::to_string). Values are
+    // read with the UTC calendar, so an instant's UTC fields are the stored digits; DATETIME has no
+    // zone and none is claimed here. One formatter for both transports.
+
+    private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    static String dateText(java.util.Date value) {
+        return utcSeconds(value.getTime()).toLocalDate().toString();
+    }
+
+    static String dateTimeText(java.util.Date value) {
+        long micros = value instanceof Timestamp
+                ? ((Timestamp) value).getNanos() / 1_000L
+                : Math.floorMod(value.getTime(), 1_000L) * 1_000L;
+        String text = SECONDS.format(utcSeconds(value.getTime()));
+        return micros == 0 ? text : String.format("%s.%06d", text, micros);
+    }
+
+    // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.
+    private static LocalDateTime utcSeconds(long epochMillis) {
+        return LocalDateTime.ofEpochSecond(Math.floorDiv(epochMillis, 1_000L), 0, ZoneOffset.UTC);
     }
 
     /** The transport's raw form of a nested column to the neutral value. */

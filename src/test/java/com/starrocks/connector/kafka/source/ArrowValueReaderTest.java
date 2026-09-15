@@ -26,10 +26,13 @@ import org.apache.kafka.connect.errors.DataException;
 import org.junit.Test;
 
 import java.math.BigDecimal;
+import java.sql.Timestamp;
+import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.TimeZone;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -174,6 +177,32 @@ public class ArrowValueReaderTest {
         } catch (DataException e) {
             assertEquals(true, e.getMessage().contains("array<int>"));
             assertEquals(true, e.getMessage().contains("LinkedHashMap"));
+        }
+    }
+
+    /** The epoch-based entry points agree with the Date-based text of the base reader. */
+    @Test
+    public void testEpochDaysAndMicrosMatchTheDateText() {
+        assertEquals("2026-08-05", ArrowValueReader.dateOfEpochDays(20670));
+        assertEquals("1969-12-31", ArrowValueReader.dateOfEpochDays(-1));
+        assertEquals("2026-08-05 12:34:56.123456", ArrowValueReader.dateTimeOfEpochMicros(1785933296123456L));
+        assertEquals("2026-08-05 12:34:56", ArrowValueReader.dateTimeOfEpochMicros(1785933296000000L));
+        assertEquals("1969-12-31 23:59:59.999999", ArrowValueReader.dateTimeOfEpochMicros(-1L));
+    }
+
+    /** valueOf(LocalDateTime) then fromJvmWallClock must give the digits back, nanos included. */
+    @Test
+    public void testFromJvmWallClockUndoesValueOf() {
+        TimeZone previous = TimeZone.getDefault();
+        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
+        try {
+            LocalDateTime digits = LocalDateTime.of(2026, 8, 5, 12, 34, 56, 123_456_000);
+            Timestamp shifted = Timestamp.valueOf(digits);            // what the Arrow driver does
+            assertEquals("2026-08-05 04:34:56.123456", ValueReader.dateTimeText(shifted));
+            assertEquals("2026-08-05 12:34:56.123456",
+                    ValueReader.dateTimeText(ArrowValueReader.fromJvmWallClock(shifted)));
+        } finally {
+            TimeZone.setDefault(previous);
         }
     }
 }

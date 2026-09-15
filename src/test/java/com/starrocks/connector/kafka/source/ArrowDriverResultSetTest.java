@@ -336,8 +336,8 @@ public class ArrowDriverResultSetTest {
                 TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
                 try {
                     java.sql.Timestamp raw = rs.getTimestamp(2, java.util.Calendar.getInstance(TimeZone.getTimeZone("UTC")));
-                    assertEquals("2026-08-05 04:34:56.123456", TemporalText.dateTime(raw));
-                    assertEquals("2026-08-05 12:34:56.123456", TemporalText.dateTime(TemporalText.fromJvmWallClock(raw)));
+                    assertEquals("2026-08-05 04:34:56.123456", ValueReader.dateTimeText(raw));
+                    assertEquals("2026-08-05 12:34:56.123456", ValueReader.dateTimeText(ArrowValueReader.fromJvmWallClock(raw)));
                 } finally {
                     TimeZone.setDefault(previous);
                 }

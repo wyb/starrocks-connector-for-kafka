@@ -81,7 +81,7 @@ final class MysqlValueReader extends ValueReader {
             case JSON:
             case DATE:
             case DATETIME:
-                // Dates arrive already in TemporalText's format.
+                // Dates arrive already in the text the base reader prints.
                 return token;
             case BYTES:
                 return binary == BinaryEncoding.BASE64 ? Base64.getDecoder().decode(token) : hex(token);

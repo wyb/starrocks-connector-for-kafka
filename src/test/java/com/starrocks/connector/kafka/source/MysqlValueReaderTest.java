@@ -84,7 +84,7 @@ public class MysqlValueReaderTest {
                 read("array<varchar(20)>", "[\"a\\\"b\",\"c\\\\d\",\"line1\nline2\",\"\"]"));
     }
 
-    /** DATE and DATETIME are already in TemporalText's format and pass through untouched. */
+    /** DATE and DATETIME arrive already in the text the base reader prints and pass through untouched. */
     @Test
     public void testTemporalsPassThrough() {
         assertEquals(Arrays.asList("2026-08-05"), read("array<date>", "[\"2026-08-05\"]"));
