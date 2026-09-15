@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>20 个类 / 约 4100 行</b></span>
-    <span>测试<b>239 个</b></span>
+    <span>测试<b>240 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -301,7 +301,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">622 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">609 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
@@ -342,7 +342,7 @@ if (state.snapshotDone) {
   <li><code>!snapshotDone</code> → 走 <code>bootstrap(t, out)</code> 然后 <code>continue</code>。</li>
   <li><code>head = bookmarkCreate(...)</code>；<code>head == committedBookmark</code> → 本轮无新版本，<code>continue</code>（idle dedup）。</li>
   <li>否则 <code>head</code> 入 <code>liveBookmarks</code>，<code>streamChanges(base, head)</code>。回调<strong>不直接写 <code>out</code></strong>，而是把每行连同 <code>changeType</code> 和 <code>rowVersion</code> 缓冲进一个 <code>WindowRow</code> 列表——墓碑要不要发，得看完整个窗口才知道。</li>
-  <li><strong>窗口为空</strong>（本次 publish 没产生变更行，例如一次 compaction）→ <code>releaseUnusedHead(t, head)</code> 把刚建的 bookmark 交还，位置留在 <code>base</code>，<code>continue</code>。</li>
+  <li><strong>窗口为空</strong>（本次 publish 没产生变更行，例如一次 compaction）→ 不发记录，但 <code>committedBookmark = head</code>，head 留在 <code>liveBookmarks</code>，<code>continue</code>。</li>
   <li>否则 <code>appendWindow</code> 展开进 <code>out</code>，只在<strong>真删除</strong>后面追加墓碑。</li>
   <li><code>demoteAllButLast(out, windowStart, base)</code>：把本窗口除最后一条以外的记录的 offset 改回 <code>base</code>。Connect 提交的是<strong>已 ack 的最长前缀</strong>而非整批，每条都带 <code>head</code> 时一条 ack 就能让整个窗口显得已持久化。</li>
   <li>成功后 <code>committedBookmark = head</code>，记一条 INFO。</li>
@@ -356,9 +356,9 @@ if (state.snapshotDone) {
 </div>
 
 <div class="note warn">
-  <span class="tag">空窗口的 head 必须交还</span>
-  <p>head 推进了但一行没有时，<strong>没有任何记录携带这个 head</strong>，于是持久 offset 永远到不了它，<code>commit()</code> 的 <code>fence = min(durable, committedBookmark)</code> 也永远越不过它——每来一次这样的 publish 就泄漏一个 bookmark，<code>renewLiveBookmarks</code> 每轮的续租次数还跟着一起涨。</p>
-  <p>代价是这类表每轮多一次 leader 语句（创建 + 释放，而不是只创建）。换来的是存活集恒定而不是无界增长。</p>
+  <span class="tag">空窗口的 head 留下当 base，不交还</span>
+  <p>FE 的 <code>bookmark_create</code> 只拿<strong>最新一个</strong> bookmark 去重，等价条件是各分区 visible version 相同。交还 head 之后，我们持有的 base 对新版本永远不等价，于是每轮都是新建 bookmark、一次空的 CHANGES 扫描、再释放——leader 每轮写两条 edit log，直到下一条真实变更。有过写入之后闲置的表基本都处在这个状态，因为最后一个版本通常是 compaction。</p>
+  <p>留下 head 并把内存里的 <code>committedBookmark</code> 推到它：下一轮 create 命中 AlreadyAtLatest 返回同一个 id，走 idle 去重；下一个真实窗口以它为 base，记录带上它，持久 offset 就能到达它，fence 也就能释放它。不多钉版本：FE 的 fence version 取 id 最小的存活 bookmark，旧 base 在持久 offset 越过之前一直存活。重启时持久 offset 仍是旧 base，(旧 base, head] 重扫一次，结果还是空。</p>
 </div>
 <p>捕获 <code>NonTrackableException</code> → 先 <code>discardFrom</code> 丢弃本表本轮已产出的记录，再 <code>applyPolicy</code>。捕获 <code>SQLException</code> → 同样 <code>discardFrom</code>（demote 之前每条记录都带 <code>head</code>，一条 ack 就会让读了一半的窗口显得已持久化），记 WARN，然后<strong>跳过这张表继续遍历下一张</strong>，只留下第一个失败。</p>
 <p>不在这里抛，是因为抛异常会让 Connect 丢掉整批返回值，而排在前面的表此刻已经把 <code>committedBookmark</code> 推到了新 head——那批记录既进不了 Kafka，也不会被重读。只有<strong>整批为空</strong>时才把第一个失败包成 <code>RetriableException</code> 抛出（Connect 只对这一种重试，其余一律杀 task）；否则先把已产出的记录交出去，失败的表下一轮重试。</p>
@@ -585,7 +585,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <div class="tablewrap">
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
-  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>49</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
+  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>50</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）。含重启续读、孤儿 bookmark 回归、畸形 offset 恢复为 fresh</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>ColumnMetadataReaderTest</code></td><td>15</td><td>类型映射封闭集、BOOLEAN 与 tinyint 的区分、LARGEINT 走 Decimal 且 scale 钉为 0、不可导出类型判定、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假</td></tr>

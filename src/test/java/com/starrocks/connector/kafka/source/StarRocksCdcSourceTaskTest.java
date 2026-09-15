@@ -426,7 +426,7 @@ public class StarRocksCdcSourceTaskTest {
      */
     @Test
     public void testCommitNeverReleasesTheDurableBookmark() throws Exception {
-        // (a) Four bookmarks live, acked only through B2=101: B1=100 is releasable, B2 is not.
+        // Four bookmarks live, acked only through B2=101: B1=100 is releasable, B2 is not.
         fake.enqueueHead("orders", 100L); // B1
         fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
         task.start(baseProps());
@@ -467,47 +467,47 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
-        // (b) Zero-row windows: two polls move the head without emitting any record, so no newer
-        // offset can ever become durable. Each head is handed straight back -- keeping it would
-        // pin a bookmark the fence can never reach -- while the acked bookmark, which is now the
-        // oldest live one, must survive: releasing "all but the newest" here would release it.
-        FakeCdcClient zeroRowFake = new FakeCdcClient();
-        zeroRowFake.setColumns("orders", ORDERS_COLS);
-        zeroRowFake.setKeyColumns("orders", ORDERS_KEYS);
-        Map<Map<String, String>, Map<String, Object>> zeroRowOffsets = new HashMap<>();
-        StarRocksCdcSourceTask zeroRowTask = newBareTask(zeroRowFake);
-        zeroRowTask.initialize(contextReading(zeroRowOffsets));
+    }
 
-        zeroRowFake.enqueueHead("orders", 200L); // acked bookmark
-        zeroRowFake.enqueueSnapshotRows("orders", rows(new Object[]{7, 700L}));
-        zeroRowTask.start(baseProps());
-        for (SourceRecord r : zeroRowTask.poll()) {
-            zeroRowTask.commitRecord(r, null);
-        }
+    /**
+     * A version with no change rows -- a compaction, say -- still moves the head. Releasing that
+     * head re-ran create, an empty scan and release on every poll until a real change, because FE
+     * dedups create against the newest bookmark only. Kept as the in-memory base it makes the next
+     * poll idle, and the next real window names it, so the fence can release it in due course.
+     */
+    @Test
+    public void testEmptyWindowMovesTheBaseToItsHeadInsteadOfReleasingIt() throws Exception {
+        fake.enqueueHead("orders", 200L);
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{7, 700L}));
+        task.start(baseProps());
+        task.poll();
 
-        zeroRowFake.enqueueHead("orders", 201L);
-        assertNull(zeroRowTask.poll()); // window folded to zero rows: nothing emitted
-        zeroRowFake.enqueueHead("orders", 202L);
-        assertNull(zeroRowTask.poll());
+        fake.enqueueHead("orders", 201L);
+        assertNull("an empty window emits nothing", task.poll());
+        assertEquals(Collections.singletonList("200_201"), fake.streamedWindows);
+        assertTrue("the empty head must stay live: " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
+        assertEquals(Arrays.asList(200L, 201L), liveBookmarksOf(task));
 
-        assertEquals("an empty window's head must not be retained", Collections.singletonList(200L),
-                liveBookmarksOf(zeroRowTask));
-        assertEquals(Arrays.asList("db1.orders:201:kc:c1", "db1.orders:202:kc:c1"),
-                zeroRowFake.releasedBookmarks);
+        // Unchanged table: create hands 201 back, which is now the base, so nothing is scanned.
+        assertNull(task.poll());
+        assertEquals("the next poll must be idle", Collections.singletonList("200_201"), fake.streamedWindows);
 
-        // Run several commit cycles so the one-cycle release lag is fully paid off: the acked
-        // bookmark must still be there afterwards, because it is the oldest live one.
-        for (int cycle = 0; cycle < 3; cycle++) {
-            zeroRowTask.commit();
-            zeroRowTask.poll();
-        }
+        // The next real window opens from the empty head, and its records name it as the base...
+        fake.enqueueHead("orders", 202L);
+        fake.enqueueChanges("orders",
+                new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L),
+                new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
+        List<SourceRecord> out = task.poll();
+        assertEquals(Arrays.asList("200_201", "201_202"), fake.streamedWindows);
+        assertEquals(201L, bookmarkOf(out.get(0)));
+        assertEquals(202L, bookmarkOf(out.get(1)));
 
-        // Further empty polls keep handing their head back, so the release list grows; what must
-        // hold however many cycles run is that the acked bookmark is not among them and is still
-        // live. Asserting the list verbatim here would only pin the fake's reuse of released ids.
-        assertFalse("the durable bookmark must never be released",
-                zeroRowFake.releasedBookmarks.contains("db1.orders:200:kc:c1"));
-        assertEquals(Collections.singletonList(200L), liveBookmarksOf(zeroRowTask));
+        // ...so once that window is durable, the old base and the empty head are both released.
+        flushOffset("orders", 202L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:200:kc:c1", "db1.orders:201:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(202L), liveBookmarksOf(task));
     }
 
     // ------------------------------------------------------------------

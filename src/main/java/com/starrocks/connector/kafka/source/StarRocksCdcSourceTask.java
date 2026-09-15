@@ -51,7 +51,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *       See {@link #commit()} and {@link #durableBookmarkOf}.</li>
  *   <li>Snapshot rows carry {@code snapshot_done=false}, change records {@code true}, so a crash
  *       mid-snapshot redoes it whole rather than resuming a half-delivered one.</li>
- *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window.</li>
+ *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window, and
+ *       an empty window makes its head the committed bookmark so the next poll is idle again.</li>
  *   <li>Only a window's last record carries its head. See {@link #demoteAllButLast}.</li>
  *   <li>One table's failure never discards another's records. See {@link #poll()}.</li>
  *   <li>A tombstone follows a real deletion only, never the delete half of an update.
@@ -216,11 +217,13 @@ public class StarRocksCdcSourceTask extends SourceTask {
                                 t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true),
                                 changeType, rowVersion)));
                 if (window.isEmpty()) {
-                    // A publish with no change rows -- a compaction, say -- still moves the head.
-                    // Keeping it would pin a bookmark no record carries, so the durable offset can
-                    // never reach it and commit()'s fence can never release it: one leaked bookmark
-                    // per poll. Hand it back and stay at base; the next poll reopens a wider window.
-                    releaseUnusedHead(t, head);
+                    // A version with no change rows (a compaction, say) still moves the head. Make it
+                    // the base: FE dedups create against the newest bookmark only, so releasing it
+                    // meant create + empty scan + release on every poll until a real change. The next
+                    // real window names it, so the durable offset can reach it and commit() release it.
+                    t.committedBookmark = head;
+                    LOG.debug("Empty CDC window for {}.{}: bookmark {} -> {}, base moved to head",
+                            db, t.table, base, head);
                     continue;
                 }
                 final int windowStart = out.size();
@@ -332,22 +335,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
                     && !updatedKeys.contains(Arrays.asList(w.record.key(), w.rowVersion))) {
                 out.add(t.mapper.tombstoneFor(w.record));
             }
-        }
-    }
-
-    /**
-     * Hands back a bookmark no record will carry. Best-effort: on failure it stays in
-     * {@code liveBookmarks}, gets renewed like any other, and falls back to its TTL.
-     */
-    private void releaseUnusedHead(TableState t, long head) {
-        try {
-            client.bookmarkRelease(db, t.table, head, holder);
-            synchronized (t.liveBookmarks) {
-                t.liveBookmarks.remove(Long.valueOf(head));
-            }
-        } catch (Exception e) {
-            LOG.warn("Failed to release the empty window's bookmark {} for {}.{} (holder {}); it stays "
-                    + "pinned until its TTL expires", head, db, t.table, holder, e);
         }
     }
 
