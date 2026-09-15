@@ -622,6 +622,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区与 LARGEINT 固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
   <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 切换两条通道</td></tr>
   <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，9 个步骤（0–8），只走 MySQL 协议。断言同源，但编号与 <code>smoke-cluster.sh</code> 并不对齐；同样播种六个嵌套元素列并按精确 JSON 断言</td></tr>
+  <tr><td><code>bench-cluster.sh</code></td><td>两条传输的端到端对比：同一张表、同样的 worker 设置，每条传输各起一个 connect-standalone，按 topic 末尾 offset 计时快照与 CHANGES 两个阶段，再从 JMX 读 <code>poll-batch-avg/max-time-ms</code>、采样 worker 的 RSS 与 CPU。只测读取路径的微基准是 <code>TransportBench</code>：一个只按名字才会被选中的 JUnit 类，直接驱动 <code>StarRocksJdbcClient</code>，同一 bookmark 下两条传输轮流读快照和同一个 CHANGES 窗口，另测空闲轮询的 <code>bookmark_create</code> 延迟</td></tr>
 </table>
 </div>
 

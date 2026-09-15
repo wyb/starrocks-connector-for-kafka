@@ -42,6 +42,42 @@ assertions over the Arrow Flight SQL transport instead of the MySQL protocol. It
 the `--add-opens` flag Arrow needs into the worker JVM. Running both settings is the only way to
 know a transport change has not moved the delete-before-insert ordering or the temporal reads.
 
+## Transport benchmark
+
+Two entry points compare the MySQL protocol with Arrow Flight SQL on the same cluster. Neither
+is part of `mvn test`.
+
+`TransportBench` (a JUnit class under `src/test/java`, selected only by name) drives
+`StarRocksJdbcClient` directly: for every table it pins one bookmark, reads the snapshot at it
+over both transports, alternating which goes first, and if `bench.mutation.sql` is given runs
+that once and reads the resulting CHANGES window over both. It also times `bookmark_create` on
+an unchanged table, the idle poll's fixed cost, per transport. It reports p50 and min wall time,
+rows/s, process CPU, allocation and RSS, and writes the same table to `target/transport-bench.txt`.
+
+```bash
+mvn -q test -Dtest=TransportBench \
+  -Dbench.mysql.url='jdbc:mysql://fe-leader:9030' \
+  -Dbench.arrow.url='jdbc:arrow-flight-sql://fe-leader:9408?useEncryption=false' \
+  -Dbench.db=perf -Dbench.tables=scalar_wide,nested,binary,datetime \
+  -Dbench.rounds=5 -Dbench.mutation.sql='UPDATE {db}.{table} SET v = v + 1'
+```
+
+`bench-cluster.sh` is the end-to-end half: it generates a table (or uses `BENCH_DB`/`BENCH_TABLE`),
+runs one `connect-standalone` worker per transport with identical settings, and times the
+snapshot and the CHANGES phase by polling the topic's end offsets. It also reads Connect's own
+`poll-batch-avg/max-time-ms` over JMX and samples the worker's RSS and CPU. Everything after
+`poll()` is the same on both sides, so a small gap here next to a large one in `TransportBench`
+means the pipeline, not the transport, is the bottleneck.
+
+```bash
+SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
+KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
+BENCH_ROWS=1000000 ./bench-cluster.sh
+```
+
+Knobs are listed at the top of the script. The snapshot is one poll batch, so `BENCH_HEAP`
+(default 4g) has to hold the whole table on both sides, or the run measures GC instead.
+
 The rest of this page covers the Docker variant.
 
 ## Prerequisites
@@ -108,6 +144,7 @@ this assertion fails.
 | `docker-compose.yml` | StarRocks (shared-data) + Kafka (KRaft single node); image tags overridable |
 | `source.properties` | Connector config, mounted into the Kafka container |
 | `smoke.sh` | The run: preflight, seed, start worker, mutate, consume, assert, restart, assert |
+| `bench-cluster.sh` | End-to-end transport benchmark against existing clusters; see above |
 
 `common.sh` deliberately holds only what is byte-identical between the two
 harnesses. `sr_sql`, `cleanup`, `start_worker` and `stop_worker` share names but
