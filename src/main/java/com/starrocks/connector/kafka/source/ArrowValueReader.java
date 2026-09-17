@@ -135,11 +135,8 @@ final class ArrowValueReader extends ValueReader {
     }
 
     /**
-     * Undo the driver's zone shift. Its timestamp accessor ends in {@code Timestamp.valueOf(LocalDateTime)},
-     * which reads the stored digits in the JVM's default zone whatever Calendar was passed (a UTC+8
-     * worker turns 12:34:56 into the instant 04:34:56Z). {@code toLocalDateTime()} in that same zone
-     * hands the digits back; re-anchoring them in UTC is what {@link #dateTimeText} expects. Not
-     * invertible inside a DST gap -- the one hour a year a DST-zone worker can still print a shifted value.
+     * Undo the driver's zone shift: its timestamp accessor ends in {@code Timestamp.valueOf(LocalDateTime)},
+     * which reads the stored digits in the JVM zone whatever Calendar was passed. Not invertible inside a DST gap.
      */
     static Timestamp fromJvmWallClock(Timestamp shifted) {
         LocalDateTime digits = shifted.toLocalDateTime();

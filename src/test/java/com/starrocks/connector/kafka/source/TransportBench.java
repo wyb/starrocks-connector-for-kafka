@@ -45,23 +45,14 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
- * Snapshot, CHANGES and bookmark_create latency over both transports against one cluster: the
- * same tables, the same bookmark, the same JVM, transports alternating round by round. Not a
- * unit test: it runs only when both URLs are given, and surefire's default includes never pick
- * it up, so {@code mvn test -Dtest=TransportBench -Dbench.mysql.url=... -Dbench.arrow.url=...}
- * is the only way in -- which also gives it the --add-opens the Arrow driver needs.
+ * Snapshot, CHANGES and bookmark_create latency over both transports: same tables, same bookmark,
+ * same JVM, transports alternating round by round. Runs only when both URLs are given, via
+ * {@code mvn test -Dtest=TransportBench -Dbench.mysql.url=... -Dbench.arrow.url=...}.
  *
- * <p>Properties: {@code bench.mysql.url}, {@code bench.arrow.url}, {@code bench.db},
- * {@code bench.tables} (comma-separated), {@code bench.user} (root), {@code bench.password}
- * (empty), {@code bench.rounds} (5; the first is warm-up and dropped), {@code bench.meta.iterations}
- * (20), {@code bench.mutation.sql} (optional: run once per table over the MySQL URL with
- * {@code {db}} and {@code {table}} substituted; both transports then read the same CHANGES window).
- *
- * <p>Numbers: wall time per round (p50 and min over the kept rounds), rows per second from the
- * p50, process CPU seconds (all threads: the Arrow driver decodes on gRPC threads), bytes
- * allocated on every live thread, and the process RSS after the round (Arrow's buffers are
- * off-heap, so heap numbers alone would flatter it). Printed, and written to
- * {@code target/transport-bench.txt}.
+ * <p>Properties: {@code bench.db}, {@code bench.tables} (csv), {@code bench.user} (root),
+ * {@code bench.password}, {@code bench.rounds} (5, first dropped), {@code bench.meta.iterations} (20),
+ * {@code bench.mutation.sql} (run once per table with {@code {db}}/{@code {table}} substituted; both
+ * transports then read the same CHANGES window). Output also goes to {@code target/transport-bench.txt}.
  */
 public class TransportBench {
 
@@ -177,10 +168,7 @@ public class TransportBench {
         }
     }
 
-    /**
-     * The idle poll's fixed cost: bookmark_create on an unchanged table, which returns the held id.
-     * One holder per transport so each does the creating call once and the rest are the idle path.
-     */
+    /** The idle poll's fixed cost: bookmark_create on an unchanged table. One holder per transport. */
     private void benchCreateLatency(String db, String table, List<Transport> transports, String holder,
                                     int iterations, Report report, List<Held> held) throws Exception {
         for (Transport t : transports) {

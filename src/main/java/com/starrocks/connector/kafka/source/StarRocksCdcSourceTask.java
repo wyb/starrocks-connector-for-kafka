@@ -51,8 +51,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  *       See {@link #commit()} and {@link #durableBookmarkOf}.</li>
  *   <li>Snapshot rows carry {@code snapshot_done=false}, change records {@code true}, so a crash
  *       mid-snapshot redoes it whole rather than resuming a half-delivered one.</li>
- *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window, and
- *       an empty window makes its head the committed bookmark so the next poll is idle again.</li>
+ *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window; an
+ *       empty window's head becomes the committed bookmark.</li>
  *   <li>Only a window's last record carries its head. See {@link #demoteAllButLast}.</li>
  *   <li>One table's failure never discards another's records. See {@link #poll()}.</li>
  *   <li>A tombstone follows a real deletion only, never the delete half of an update.
@@ -192,9 +192,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Re-enters every reference this holder still has on the table, so a predecessor's leftovers --
-     * heads whose windows never became durable, releases it never issued -- are released by the
-     * fence instead of pinning versions until their TTL. Best-effort: they expire either way.
+     * Re-enters every reference this holder still has on the table, so a predecessor's leftovers
+     * are released by the fence instead of expiring by TTL. Best-effort.
      */
     private void adoptHeldBookmarks(TableState t) {
         List<Long> held;
@@ -217,9 +216,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * Reads one round over every table. A table that fails is skipped, not thrown from: the batch
      * holds records whose tables have already advanced {@code committedBookmark} in memory, and
      * Connect discards the return value of a poll that throws -- those records would never reach
-     * Kafka and never be re-read. The failure surfaces only once the batch is empty. Once a table
-     * has failed for {@code source.poll.retry.timeout.ms} it is fatal and thrown at once instead:
-     * the task dies either way, and a restart re-reads every table from its durable offset.
+     * Kafka and never be re-read. The failure surfaces only once the batch is empty, except a table
+     * failing for longer than {@code source.poll.retry.timeout.ms}: that is fatal and thrown at once.
      */
     @Override
     public List<SourceRecord> poll() throws InterruptedException {
@@ -253,10 +251,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
         }
         if (out.isEmpty() && failure != null) {
-            // Connect retries only RetriableException and kills the task for anything else. An FE
-            // restart, a leader failover outlasting source.max.retries, a reset socket and a connect
-            // timeout are all survivable here; a broken config still fails in start(). Connect
-            // re-polls at once after a RetriableException, so the pacing has to happen here.
+            // Connect retries only RetriableException and kills the task for anything else; it also
+            // re-polls at once after one, so the pacing has to happen here.
             idleSleep(pollIntervalMs);
             throw new RetriableException("CDC poll failed for table " + failedTable, failure);
         }
@@ -285,10 +281,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
                         t.mapper.toChangeRecord(row, changeType, rowVersion, base, head, true),
                         changeType, rowVersion)));
         if (window.isEmpty()) {
-            // A version with no change rows (a compaction, say) still moves the head. Make it the
-            // base: FE dedups create against the newest bookmark only, so releasing it meant create
-            // + empty scan + release on every poll until a real change. The next real window names
-            // it, so the durable offset can reach it and commit() release it.
+            // A version with no change rows (a compaction, say) still moves the head. Keep it as the
+            // base: FE dedups create against the newest bookmark only, so releasing it meant create,
+            // empty scan and release on every poll. The next real window names it, so the fence can release it.
             t.committedBookmark = head;
             LOG.debug("Empty CDC window for {}.{}: bookmark {} -> {}, base moved to head",
                     db, t.table, base, head);
@@ -303,9 +298,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Turns a run of failed polls fatal once it has lasted {@code source.poll.retry.timeout.ms}.
-     * Without a limit a dropped column, a revoked privilege or a disabled meta function retries
-     * forever while the task reports RUNNING.
+     * Turns a run of failed polls fatal once it has lasted {@code source.poll.retry.timeout.ms};
+     * without a limit a dropped column or a revoked privilege retries forever as RUNNING.
      */
     private void failUnlessRetriable(TableState t, SQLException e) {
         long now = monotonicMs();

@@ -147,10 +147,9 @@ abstract class ValueReader {
         return utc;
     }
 
-    // DATE and DATETIME as the text StarRocks itself prints: 2026-08-05 and 2026-08-05 12:34:56, with
-    // .ffffff appended only when the microseconds are not zero (BE timestamp::to_string). Values are
-    // read with the UTC calendar, so an instant's UTC fields are the stored digits; DATETIME has no
-    // zone and none is claimed here. One formatter for both transports.
+    // DATE and DATETIME as the text StarRocks prints: 2026-08-05 and 2026-08-05 12:34:56, .ffffff only
+    // when the microseconds are not zero (BE timestamp::to_string). Values come through the UTC
+    // calendar, so an instant's UTC fields are the stored digits.
 
     private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
 

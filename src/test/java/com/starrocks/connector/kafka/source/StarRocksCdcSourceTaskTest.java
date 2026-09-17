@@ -471,10 +471,8 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     /**
-     * A version with no change rows -- a compaction, say -- still moves the head. Releasing that
-     * head re-ran create, an empty scan and release on every poll until a real change, because FE
-     * dedups create against the newest bookmark only. Kept as the in-memory base it makes the next
-     * poll idle, and the next real window names it, so the fence can release it in due course.
+     * An empty window's head is kept as the base: released, it was re-created and re-scanned on
+     * every poll, since FE dedups create against the newest bookmark only.
      */
     @Test
     public void testEmptyWindowMovesTheBaseToItsHeadInsteadOfReleasingIt() throws Exception {
@@ -1277,10 +1275,7 @@ public class StarRocksCdcSourceTaskTest {
         }
     }
 
-    /**
-     * Connect re-polls at once after a RetriableException, with no delay of its own, so an outage
-     * would otherwise spin the leader statements and the WARN log as fast as the failures return.
-     */
+    /** Connect re-polls at once after a RetriableException, so the pause has to be ours. */
     @Test
     public void testRetriableFailureWaitsAPollIntervalBeforeThrowing() throws Exception {
         final List<Long> sleeps = new ArrayList<>();
@@ -1343,10 +1338,7 @@ public class StarRocksCdcSourceTaskTest {
         throw new AssertionError("expected the poll to fail the task");
     }
 
-    /**
-     * A dropped column, a revoked privilege or a disabled meta function fails every poll for good.
-     * Retried forever, the task reports RUNNING while delivering nothing; past the timeout it fails.
-     */
+    /** A permanent error (dropped column, revoked privilege) must end as FAILED, not RUNNING forever. */
     @Test
     public void testAFailingTableTurnsFatalAfterTheRetryTimeout() throws Exception {
         fake.enqueueHead("orders", 100L);
@@ -1409,11 +1401,7 @@ public class StarRocksCdcSourceTaskTest {
         pollExpectingFatal();
     }
 
-    /**
-     * Fatal means fatal even when other tables produced records this round: Connect drops the
-     * batch, but the task is dead either way and a restart re-reads every table from its durable
-     * offset, so nothing is lost.
-     */
+    /** Fatal even when other tables produced records: a restart re-reads them from the durable offset. */
     @Test
     public void testAFatalFailureIsThrownEvenWhenOtherTablesProducedRecords() throws Exception {
         addItemsTable();
@@ -1432,11 +1420,7 @@ public class StarRocksCdcSourceTaskTest {
         assertTrue(fatal.getMessage(), fatal.getMessage().contains("items"));
     }
 
-    /**
-     * A predecessor leaves references behind: its resume point, heads whose windows never became
-     * durable, releases it never issued. Re-entered at start, the fence releases them in due
-     * course; ignored, they pin versions until their TTL.
-     */
+    /** A predecessor's leftover references are re-entered at start, so the fence releases them. */
     @Test
     public void testStartAdoptsTheReferencesTheHolderStillHas() throws Exception {
         fake.setHeldBookmarks("orders", 90L, 100L, 130L);

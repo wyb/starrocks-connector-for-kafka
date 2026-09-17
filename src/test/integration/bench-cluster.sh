@@ -29,12 +29,9 @@
 #   BENCH_JMX_PORT       worker JMX port for the Connect metrics     (default 9999)
 #   KEEP_ON_FAILURE      set to 1 to keep the db and topics for triage
 #
-# What it reports per transport: worker start to first record, first record to the last
-# snapshot record, the CHANGES phase from the mutation's commit to the last record, rows/s
-# for both, the worker's poll-batch-avg/max-time-ms and record totals from JMX, and the
-# worker's peak RSS and CPU seconds. Everything in the pipeline after poll() -- JSON
-# conversion, the producer, the broker -- is identical on both sides, so a small gap here
-# with a large gap in TransportBench means the pipeline, not the transport, is the bottleneck.
+# Reports per transport: time to first record, snapshot and CHANGES durations and rows/s, Connect's
+# poll-batch-avg/max-time-ms from JMX, worker peak RSS and CPU. Everything after poll() is identical
+# on both sides, so a small gap here next to a large one in TransportBench means the pipeline is the bottleneck.
 #
 set -euo pipefail
 export LC_NUMERIC=C
@@ -140,8 +137,7 @@ note "StarRocks and Kafka reachable; transports: $BENCH_TRANSPORTS"
 step "1. data"
 if [ "$OWN_DB" = 1 ]; then
   sr_sql "CREATE DATABASE $DB;"
-  # Scalars, a DATETIME and one ARRAY: representative, not exhaustive. Shape-specific gaps
-  # (nested types, VARBINARY) are TransportBench's job; this run measures the pipeline.
+  # Representative, not exhaustive: shape-specific gaps are TransportBench's job.
   sr_sql "CREATE TABLE $DB.$TABLE (id BIGINT NOT NULL, v BIGINT, d DECIMAL(18,2), s VARCHAR(64),
                                    dt DATETIME, a ARRAY<INT>)
           PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS $BENCH_BUCKETS

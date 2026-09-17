@@ -299,7 +299,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">666 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">660 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
@@ -427,7 +427,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h2 id="access"><span class="no">4</span>数据访问层</h2>
 
-<h3 id="CdcClient"><span class="fn">CdcClient</span><span class="sz">94 行</span></h3>
+<h3 id="CdcClient"><span class="fn">CdcClient</span><span class="sz">90 行</span></h3>
 <p class="role">11 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
 <p>使用者分布并不对称：<code>fetchTableModel</code>/<code>cdcPropertyEnabled</code> 只有 Connector 用，<code>fetchKeyColumns</code>/<code>fetchHeldBookmarks</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余四个（<code>bookmarkCreate</code>、<code>bookmarkRelease</code>、<code>fetchColumns</code>、<code>close</code>）两边都用。</p>
 <p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
@@ -501,7 +501,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>isUnrecognized</code> 是第三个静态方法：类型名不在 <code>KNOWN_DATA_TYPES</code> 里即为真。这个集合逐条镜像 <code>toJdbcType</code> 的 case——switch 自己分不出"有意按文本承载"和"没见过"，两者都是 <code>OTHER</code>。加一个 case 就得加一个名字。</p>
 <p>precision/scale 读 <code>NUMERIC_PRECISION</code>/<code>NUMERIC_SCALE</code>，不读 <code>COLUMN_SIZE</code>/<code>DECIMAL_DIGITS</code>：BE 往 <code>COLUMN_SIZE</code> 里填的是 <code>columnLength</code>，一个长度，不是精度。</p>
 
-<h3 id="ValueReader"><span class="fn">ValueReader</span><span class="sz">254 行</span></h3>
+<h3 id="ValueReader"><span class="fn">ValueReader</span><span class="sz">253 行</span></h3>
 <p class="role">每次流式读一个实例，把 <code>ResultSet</code> 的一行读成<strong>规范化</strong>的 <code>Object[]</code>。取值方式和转换规则全部由 <code>ColumnType</code> 决定；两条传输的差别被压进两个子类。</p>
 <p><strong>标量走类型化 getter。</strong>这是 JDBC 自己的跨驱动转换契约，也是唯一能把 UTC Calendar 交给驱动的地方，所以两个驱动交出同样的东西：BOOLEAN→<code>getBoolean</code>、整数各归各的 getter、FLOAT→<code>getFloat</code>、DOUBLE→<code>getDouble</code>、DECIMAL/LARGEINT→<code>getBigDecimal</code> 后 <code>setScale(声明 scale)</code>（Arrow 把 DECIMALV2 按 scale 9 交回、MariaDB 按声明值，在这里抹平），DATE→<code>getDate(i, utc)</code>→<code>dateText</code>，DATETIME→<code>timestamp()</code>（子类可覆写）→<code>dateTimeText</code>，BYTES→<code>getBytes</code>（<code>getString</code> 会按字符集解码、非法序列变 U+FFFD），STRING/JSON/OPAQUE→<code>getString</code>。<code>wasNull</code> 在 getter <em>之后</em>统一纠正——基本类型 getter 对 NULL 返回 0/false。</p>
 <p><strong>DATE / DATETIME 的文本在基类。</strong><code>dateText</code>/<code>dateTimeText</code> 输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>Timestamp.getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 只有毫秒可用。两条传输只此一处格式化；Arrow 专用的天数/微秒入口和时区逆运算在 <code>ArrowValueReader</code>。测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
@@ -513,7 +513,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>内部的 <code>Scanner</code> 先把文本切成<strong>类型无关</strong>的原始树：<code>[…]</code> 是 <code>List</code>，<code>{k:v,…}</code> 是按键记号索引的 <code>LinkedHashMap</code>，引号里的是字符串记号（单双引号皆可——嵌套 JSON 用单引号包，<code>json_column.cpp:60</code>；只转义 <code>"</code> 与 <code>\</code>，内部允许原始控制字符），裸 <code>null</code> 是 null，其余裸记号原样保留。此时 <code>{1:2}</code> 的裸键（<code>map_column.cpp:591</code>）、<code>'{"a": 1}'</code>、<code>"0102ff"</code> 都只是记号，"它是什么类型"由 <code>scalar(kind, 记号)</code> 按声明类型决定：<code>1</code>/<code>0</code> 是布尔（<code>fixed_length_column_base.cpp:339</code> 走 <code>push_number</code>）、<code>inf</code>/<code>nan</code> 是浮点（fmt 的拼法，Java 不认）、hex 或 base64 解成 <code>byte[]</code>（按 <code>SESSION_BINARY_ENCODING</code>，<code>FeConnection</code> 把会话钉在同一个值上）、date/datetime/json/string 原样。这和 Arrow 侧"<code>Integer</code> 是天数还是 int 由类型说了算"是同一个解法。</p>
 <p>出错都是带原文的 <code>DataException</code>：分词错误带偏移量；转换错误（非数字、不认识的布尔值、未声明的 struct 字段）由 <code>nested()</code> 统一补上原文再抛。带引号的 <code>"null"</code> 是字符串，裸的才是 SQL NULL。</p>
 
-<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">148 行</span></h3>
+<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">145 行</span></h3>
 <p class="role">Arrow Flight JDBC 驱动的怪癖，且只有怪癖。</p>
 <p><strong>顶层两处。</strong>驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值、传什么 Calendar 都一样（UTC+8 的 worker 上 12:34:56 变成 04:34:56Z），<code>timestamp()</code> 覆写后经自己的 <code>fromJvmWallClock</code> 逆转（用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定；DST 跳变那一小时不可逆，是唯一残留）；Avatica 的 <code>getObject</code> 按 JDBC 类型码分发，ARRAY(2003) 拿到 <code>java.sql.Array</code>、MAP/STRUCT(2000) 拿到 vector 的 <code>Map</code>，<code>nested()</code> 先把 <code>Array</code> 用 <code>getArray()</code> 解成 <code>List</code>。这两条都是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 <code>List</code>，但 <code>ResultSet.getObject</code> 根本不走那里。</p>
 <p><strong>嵌套值是 vector 自己的对象。</strong>list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 和 INT/BIGINT 一模一样，所以 <code>scalar()</code> 只看声明类型，再由 <code>dateOfEpochDays</code>/<code>dateTimeOfEpochMicros</code> 换成基类那种文本。嵌套的 map 是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>，<code>asMap()</code> 覆写后两种形态都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。</p>
