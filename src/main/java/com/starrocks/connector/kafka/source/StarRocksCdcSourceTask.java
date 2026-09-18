@@ -122,11 +122,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
     // Package-visible so tests can reach a started task's per-table state directly.
     List<TableState> tables;
 
-    /** Test injection point: test subclasses override to return a scripted fake. */
-    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
-        return new StarRocksJdbcClient(cfg);
-    }
-
     @Override
     public String version() {
         return Version.get();
@@ -210,6 +205,20 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (!held.isEmpty()) {
             LOG.info("Adopted {} bookmark(s) {} already held on {}.{}: {}", held.size(), holder, db, t.table, held);
         }
+    }
+
+    private static List<String> parseTaskTables(String raw) {
+        List<String> result = new ArrayList<>();
+        if (raw == null) {
+            return result;
+        }
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed);
+            }
+        }
+        return result;
     }
 
     /**
@@ -297,23 +306,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 db, t.table, base, head, out.size() - windowStart);
     }
 
-    /**
-     * Turns a run of failed polls fatal once it has lasted {@code source.poll.retry.timeout.ms};
-     * without a limit a dropped column or a revoked privilege retries forever as RUNNING.
-     */
-    private void failUnlessRetriable(TableState t, SQLException e) {
-        long now = monotonicMs();
-        if (t.firstFailureMs < 0) {
-            t.firstFailureMs = now;
-        }
-        long failingForMs = now - t.firstFailureMs;
-        if (pollRetryTimeoutMs >= 0 && failingForMs >= pollRetryTimeoutMs) {
-            throw new ConnectException("CDC reads of table " + t.table + " have failed for " + failingForMs
-                    + " ms, longer than " + StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS + "="
-                    + pollRetryTimeoutMs, e);
-        }
-    }
-
     private void bootstrap(TableState t, List<SourceRecord> out) throws SQLException, NonTrackableException {
         long b0 = client.bookmarkCreate(db, t.table, holder, ttlMs);
         retain(t, b0);
@@ -344,26 +336,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Retains a bookmark, ignoring one already held. {@code bookmark_create} returns the holder's
-     * existing bookmark on an unchanged table, so after a resnapshot {@link #bootstrap} reopens the
-     * failed window's id; held twice, it would be released twice.
-     */
-    private static void retain(TableState t, long bookmarkId) {
-        synchronized (t.liveBookmarks) {
-            if (!t.liveBookmarks.contains(bookmarkId)) {
-                t.liveBookmarks.addLast(bookmarkId);
-            }
-        }
-    }
-
-    /** Truncates {@code out} back to the size it had before the current table's window. */
-    private static void discardFrom(List<SourceRecord> out, int from) {
-        if (out.size() > from) {
-            out.subList(from, out.size()).clear();
-        }
-    }
-
-    /**
      * Appends the window, following each <em>real</em> deletion with a tombstone when tombstones are
      * on. StarRocks renders an update as DELETE(before) + INSERT(after) at one row version, so a
      * delete whose key comes back as an insert at that same version is half an update, not a
@@ -390,21 +362,57 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Issues the releases {@link #commit()} authorized, on the poll thread because all JDBC lives
-     * there. Best-effort: a failure leaks one pinned version until its TTL, hence the WARN.
+     * Leaves only the window's last record carrying {@code head}; the rest carry {@code base}.
+     * Connect commits the longest <em>acked prefix</em>, not the batch, so with every record naming
+     * {@code head} an ack of the first alone declared the window durable and a crash dropped the
+     * rest -- 4999 of 5000, measured. Naming {@code base} costs a re-read bounded by one window.
      */
-    private void drainPendingReleases(TableState t) {
-        Long id;
-        while ((id = t.pendingReleases.poll()) != null) {
-            try {
-                client.bookmarkRelease(db, t.table, id, holder);
-                // INFO, not DEBUG: the only external sign reclamation is keeping up. Without it
-                // "no failures" and "nothing attempted" look identical.
-                LOG.info("Released bookmark {} for {}.{}", id, db, t.table);
-            } catch (Exception e) {
-                LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
-                        + "expires", id, db, t.table, holder, e);
+    private static void demoteAllButLast(List<SourceRecord> out, int windowStart, long base) {
+        if (out.size() - windowStart < 2) {
+            return;
+        }
+        Map<String, Object> baseOffset = OffsetState.sourceOffset(base, true);
+        for (int i = windowStart; i < out.size() - 1; i++) {
+            SourceRecord r = out.get(i);
+            out.set(i, new SourceRecord(r.sourcePartition(), baseOffset, r.topic(),
+                    r.keySchema(), r.key(), r.valueSchema(), r.value()));
+        }
+    }
+
+    /**
+     * Retains a bookmark, ignoring one already held. {@code bookmark_create} returns the holder's
+     * existing bookmark on an unchanged table, so after a resnapshot {@link #bootstrap} reopens the
+     * failed window's id; held twice, it would be released twice.
+     */
+    private static void retain(TableState t, long bookmarkId) {
+        synchronized (t.liveBookmarks) {
+            if (!t.liveBookmarks.contains(bookmarkId)) {
+                t.liveBookmarks.addLast(bookmarkId);
             }
+        }
+    }
+
+    /** Truncates {@code out} back to the size it had before the current table's window. */
+    private static void discardFrom(List<SourceRecord> out, int from) {
+        if (out.size() > from) {
+            out.subList(from, out.size()).clear();
+        }
+    }
+
+    /**
+     * Turns a run of failed polls fatal once it has lasted {@code source.poll.retry.timeout.ms};
+     * without a limit a dropped column or a revoked privilege retries forever as RUNNING.
+     */
+    private void failUnlessRetriable(TableState t, SQLException e) {
+        long now = monotonicMs();
+        if (t.firstFailureMs < 0) {
+            t.firstFailureMs = now;
+        }
+        long failingForMs = now - t.firstFailureMs;
+        if (pollRetryTimeoutMs >= 0 && failingForMs >= pollRetryTimeoutMs) {
+            throw new ConnectException("CDC reads of table " + t.table + " have failed for " + failingForMs
+                    + " ms, longer than " + StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS + "="
+                    + pollRetryTimeoutMs, e);
         }
     }
 
@@ -443,45 +451,22 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Leaves only the window's last record carrying {@code head}; the rest carry {@code base}.
-     * Connect commits the longest <em>acked prefix</em>, not the batch, so with every record naming
-     * {@code head} an ack of the first alone declared the window durable and a crash dropped the
-     * rest -- 4999 of 5000, measured. Naming {@code base} costs a re-read bounded by one window.
+     * Issues the releases {@link #commit()} authorized, on the poll thread because all JDBC lives
+     * there. Best-effort: a failure leaks one pinned version until its TTL, hence the WARN.
      */
-    private static void demoteAllButLast(List<SourceRecord> out, int windowStart, long base) {
-        if (out.size() - windowStart < 2) {
-            return;
+    private void drainPendingReleases(TableState t) {
+        Long id;
+        while ((id = t.pendingReleases.poll()) != null) {
+            try {
+                client.bookmarkRelease(db, t.table, id, holder);
+                // INFO, not DEBUG: the only external sign reclamation is keeping up. Without it
+                // "no failures" and "nothing attempted" look identical.
+                LOG.info("Released bookmark {} for {}.{}", id, db, t.table);
+            } catch (Exception e) {
+                LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
+                        + "expires", id, db, t.table, holder, e);
+            }
         }
-        Map<String, Object> baseOffset = OffsetState.sourceOffset(base, true);
-        for (int i = windowStart; i < out.size() - 1; i++) {
-            SourceRecord r = out.get(i);
-            out.set(i, new SourceRecord(r.sourcePartition(), baseOffset, r.topic(),
-                    r.keySchema(), r.key(), r.valueSchema(), r.value()));
-        }
-    }
-
-    /** Overridden in tests so idle polls do not really sleep. */
-    void idleSleep(long ms) throws InterruptedException {
-        Thread.sleep(ms);
-    }
-
-    /**
-     * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
-     * a real TTL. Wall time would let a backward clock step stretch an interval past the lease it
-     * paces. Measured from the first reading because nanoTime's origin may be negative, which would
-     * sink {@code lastRenewMs} below the {@code -1} sentinel and disable the pacing gate.
-     */
-    long monotonicMs() {
-        long n = nanoTime();
-        if (monotonicOriginNanos == Long.MIN_VALUE) {
-            monotonicOriginNanos = n;
-        }
-        return (n - monotonicOriginNanos) / 1_000_000L;
-    }
-
-    /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
-    long nanoTime() {
-        return System.nanoTime();
     }
 
     /**
@@ -644,17 +629,32 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    private static List<String> parseTaskTables(String raw) {
-        List<String> result = new ArrayList<>();
-        if (raw == null) {
-            return result;
+    /** Test injection point: test subclasses override to return a scripted fake. */
+    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+        return new StarRocksJdbcClient(cfg);
+    }
+
+    /** Overridden in tests so idle polls do not really sleep. */
+    void idleSleep(long ms) throws InterruptedException {
+        Thread.sleep(ms);
+    }
+
+    /**
+     * Monotonic milliseconds, overridden in tests to drive the renewal schedule without waiting out
+     * a real TTL. Wall time would let a backward clock step stretch an interval past the lease it
+     * paces. Measured from the first reading because nanoTime's origin may be negative, which would
+     * sink {@code lastRenewMs} below the {@code -1} sentinel and disable the pacing gate.
+     */
+    long monotonicMs() {
+        long n = nanoTime();
+        if (monotonicOriginNanos == Long.MIN_VALUE) {
+            monotonicOriginNanos = n;
         }
-        for (String part : raw.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
-        }
-        return result;
+        return (n - monotonicOriginNanos) / 1_000_000L;
+    }
+
+    /** Seam for the one property {@link #monotonicMs} cannot show on a JVM whose origin is positive. */
+    long nanoTime() {
+        return System.nanoTime();
     }
 }

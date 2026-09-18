@@ -579,6 +579,31 @@ public class StarRocksCdcSourceTaskTest {
     }
 
     @Test
+    public void testTombstoneEmittedAfterDeleteWhenEnabled() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE, "true");
+        fake.enqueueHead("orders", 100L);
+        task.start(props);
+        task.poll();
+
+        fake.enqueueHead("orders", 101L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 1, 5001L));
+        List<SourceRecord> out = task.poll();
+
+        assertNotNull(out);
+        assertEquals(2, out.size());
+        SourceRecord deleteRecord = out.get(0);
+        Struct value = (Struct) deleteRecord.value();
+        assertEquals("d", value.getString("op"));
+
+        SourceRecord tombstone = out.get(1);
+        assertNull(tombstone.value());
+        assertNull(tombstone.valueSchema());
+        assertEquals(deleteRecord.key(), tombstone.key());
+        assertFalse(deleteRecord == tombstone);
+    }
+
+    @Test
     public void testCommitReleasesNothingBeforeAnyFlush() throws Exception {
         fake.enqueueHead("orders", 100L);
         fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
@@ -704,6 +729,67 @@ public class StarRocksCdcSourceTaskTest {
         pollToFlushReleases();
         assertEquals(Collections.singletonList("db1.orders:11952:kc:c1"), fake.releasedBookmarks);
         assertEquals(Collections.singletonList(11955L), liveBookmarksOf(task));
+    }
+
+    /** A predecessor's leftover references are re-entered at start, so the fence releases them. */
+    @Test
+    public void testStartAdoptsTheReferencesTheHolderStillHas() throws Exception {
+        fake.setHeldBookmarks("orders", 90L, 100L, 130L);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
+        task.start(baseProps());
+
+        assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
+        assertEquals(Arrays.asList(90L, 100L, 130L), liveBookmarksOf(task));
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
+        assertEquals(100L, t.committedBookmark);
+        assertTrue(t.snapshotDone);
+
+        // The first commit releases what lies below the durable position; the rest stays pinned.
+        fake.enqueueHead("orders", 100L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Collections.singletonList("db1.orders:90:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Arrays.asList(100L, 130L), liveBookmarksOf(task));
+
+        // The predecessor's head is what create hands back on an unchanged table; once that window
+        // is durable, the resume point goes too.
+        fake.enqueueHead("orders", 130L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        assertEquals(1, task.poll().size());
+        flushOffset("orders", 130L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:100:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(130L), liveBookmarksOf(task));
+    }
+
+    /** With no durable offset the table is fresh, but the leftovers are still taken back and released. */
+    @Test
+    public void testLeftoversOfAFreshTableAreReleasedOnceTheSnapshotIsDurable() throws Exception {
+        fake.setHeldBookmarks("orders", 90L, 95L);
+        fake.enqueueHead("orders", 100L);
+        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
+        task.start(baseProps());
+        assertEquals(Arrays.asList(90L, 95L), liveBookmarksOf(task));
+
+        task.poll();
+        assertEquals(1, fake.snapshotCalls);
+        assertEquals(Arrays.asList(90L, 95L, 100L), liveBookmarksOf(task));
+
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:95:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
+    }
+
+    /** A cluster without the reference table must still start; the leftovers then expire by TTL. */
+    @Test
+    public void testAnUnreadableReferenceListDoesNotFailStart() throws Exception {
+        fake.heldBookmarksFailure = new SQLException("Unknown table 'table_bookmark_references'");
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
+        task.start(baseProps());
+        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
     }
 
     // ------------------------------------------------------------------
@@ -1255,6 +1341,11 @@ public class StarRocksCdcSourceTaskTest {
         other.stop();
     }
 
+    // ------------------------------------------------------------------
+    // Poll failures: a SQLException is retried after a pause, and turns fatal once it has
+    // lasted source.poll.retry.timeout.ms.
+    // ------------------------------------------------------------------
+
     /**
      * A transient FE failure must not kill the task. Connect retries only RetriableException;
      * anything else is logged as "will not recover until manually restarted", which would turn
@@ -1418,67 +1509,6 @@ public class StarRocksCdcSourceTaskTest {
         fake.changesFailureByTable.put("items", new SQLException("Unknown column 'gone' in 'items'"));
         ConnectException fatal = pollExpectingFatal();
         assertTrue(fatal.getMessage(), fatal.getMessage().contains("items"));
-    }
-
-    /** A predecessor's leftover references are re-entered at start, so the fence releases them. */
-    @Test
-    public void testStartAdoptsTheReferencesTheHolderStillHas() throws Exception {
-        fake.setHeldBookmarks("orders", 90L, 100L, 130L);
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
-        task.start(baseProps());
-
-        assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
-        assertEquals(Arrays.asList(90L, 100L, 130L), liveBookmarksOf(task));
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-        assertEquals(100L, t.committedBookmark);
-        assertTrue(t.snapshotDone);
-
-        // The first commit releases what lies below the durable position; the rest stays pinned.
-        fake.enqueueHead("orders", 100L);
-        task.commit();
-        pollToFlushReleases();
-        assertEquals(Collections.singletonList("db1.orders:90:kc:c1"), fake.releasedBookmarks);
-        assertEquals(Arrays.asList(100L, 130L), liveBookmarksOf(task));
-
-        // The predecessor's head is what create hands back on an unchanged table; once that window
-        // is durable, the resume point goes too.
-        fake.enqueueHead("orders", 130L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
-        assertEquals(1, task.poll().size());
-        flushOffset("orders", 130L);
-        task.commit();
-        pollToFlushReleases();
-        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:100:kc:c1"), fake.releasedBookmarks);
-        assertEquals(Collections.singletonList(130L), liveBookmarksOf(task));
-    }
-
-    /** With no durable offset the table is fresh, but the leftovers are still taken back and released. */
-    @Test
-    public void testLeftoversOfAFreshTableAreReleasedOnceTheSnapshotIsDurable() throws Exception {
-        fake.setHeldBookmarks("orders", 90L, 95L);
-        fake.enqueueHead("orders", 100L);
-        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
-        task.start(baseProps());
-        assertEquals(Arrays.asList(90L, 95L), liveBookmarksOf(task));
-
-        task.poll();
-        assertEquals(1, fake.snapshotCalls);
-        assertEquals(Arrays.asList(90L, 95L, 100L), liveBookmarksOf(task));
-
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
-        task.commit();
-        pollToFlushReleases();
-        assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:95:kc:c1"), fake.releasedBookmarks);
-        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
-    }
-
-    /** A cluster without the reference table must still start; the leftovers then expire by TTL. */
-    @Test
-    public void testAnUnreadableReferenceListDoesNotFailStart() throws Exception {
-        fake.heldBookmarksFailure = new SQLException("Unknown table 'table_bookmark_references'");
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
-        task.start(baseProps());
-        assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
     }
 
     // ------------------------------------------------------------------
@@ -1756,34 +1786,5 @@ public class StarRocksCdcSourceTaskTest {
         List<SourceRecord> out = task.poll();
         assertNotNull(out);
         assertEquals(1, out.size());
-    }
-
-    // ------------------------------------------------------------------
-    // Tombstones on delete, when enabled.
-    // ------------------------------------------------------------------
-
-    @Test
-    public void testTombstoneEmittedAfterDeleteWhenEnabled() throws Exception {
-        Map<String, String> props = baseProps();
-        props.put(StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE, "true");
-        fake.enqueueHead("orders", 100L);
-        task.start(props);
-        task.poll();
-
-        fake.enqueueHead("orders", 101L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 1, 5001L));
-        List<SourceRecord> out = task.poll();
-
-        assertNotNull(out);
-        assertEquals(2, out.size());
-        SourceRecord deleteRecord = out.get(0);
-        Struct value = (Struct) deleteRecord.value();
-        assertEquals("d", value.getString("op"));
-
-        SourceRecord tombstone = out.get(1);
-        assertNull(tombstone.value());
-        assertNull(tombstone.valueSchema());
-        assertEquals(deleteRecord.key(), tombstone.key());
-        assertFalse(deleteRecord == tombstone);
     }
 }

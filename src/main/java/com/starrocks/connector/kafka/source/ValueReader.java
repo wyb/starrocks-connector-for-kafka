@@ -142,34 +142,6 @@ abstract class ValueReader {
         return rs.getTimestamp(index, utc);
     }
 
-    /** Package-visible for tests: the calendar this instance hands to temporal getters. */
-    Calendar utcCalendar() {
-        return utc;
-    }
-
-    // DATE and DATETIME as the text StarRocks prints: 2026-08-05 and 2026-08-05 12:34:56, .ffffff only
-    // when the microseconds are not zero (BE timestamp::to_string). Values come through the UTC
-    // calendar, so an instant's UTC fields are the stored digits.
-
-    private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-
-    static String dateText(java.util.Date value) {
-        return utcSeconds(value.getTime()).toLocalDate().toString();
-    }
-
-    static String dateTimeText(java.util.Date value) {
-        long micros = value instanceof Timestamp
-                ? ((Timestamp) value).getNanos() / 1_000L
-                : Math.floorMod(value.getTime(), 1_000L) * 1_000L;
-        String text = SECONDS.format(utcSeconds(value.getTime()));
-        return micros == 0 ? text : String.format("%s.%06d", text, micros);
-    }
-
-    // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.
-    private static LocalDateTime utcSeconds(long epochMillis) {
-        return LocalDateTime.ofEpochSecond(Math.floorDiv(epochMillis, 1_000L), 0, ZoneOffset.UTC);
-    }
-
     /** The transport's raw form of a nested column to the neutral value. */
     protected abstract Object nested(ColumnType type, Object raw);
 
@@ -249,5 +221,33 @@ abstract class ValueReader {
                     + " but the driver returned " + raw.getClass().getName());
         }
         return expected.cast(raw);
+    }
+
+    // DATE and DATETIME as the text StarRocks prints: 2026-08-05 and 2026-08-05 12:34:56, .ffffff only
+    // when the microseconds are not zero (BE timestamp::to_string). Values come through the UTC
+    // calendar, so an instant's UTC fields are the stored digits.
+
+    private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
+
+    static String dateText(java.util.Date value) {
+        return utcSeconds(value.getTime()).toLocalDate().toString();
+    }
+
+    static String dateTimeText(java.util.Date value) {
+        long micros = value instanceof Timestamp
+                ? ((Timestamp) value).getNanos() / 1_000L
+                : Math.floorMod(value.getTime(), 1_000L) * 1_000L;
+        String text = SECONDS.format(utcSeconds(value.getTime()));
+        return micros == 0 ? text : String.format("%s.%06d", text, micros);
+    }
+
+    // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.
+    private static LocalDateTime utcSeconds(long epochMillis) {
+        return LocalDateTime.ofEpochSecond(Math.floorDiv(epochMillis, 1_000L), 0, ZoneOffset.UTC);
+    }
+
+    /** Package-visible for tests: the calendar this instance hands to temporal getters. */
+    Calendar utcCalendar() {
+        return utc;
     }
 }
