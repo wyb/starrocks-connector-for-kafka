@@ -143,6 +143,21 @@ public class ArrowValueReaderTest {
         assertEquals(Arrays.asList("x", "y", "z"), new java.util.ArrayList<>(((Map<?, ?>) out).keySet()));
     }
 
+    /** A field the type does not declare is schema drift, reported by name. */
+    @Test
+    public void testUndeclaredStructFieldIsRejected() {
+        Map<Object, Object> in = new LinkedHashMap<>();
+        in.put("x", 7);
+        in.put("w", 8);
+        try {
+            new ArrowValueReader().nested(type("struct<`x` int(11)>"), in);
+            fail("expected DataException");
+        } catch (DataException e) {
+            assertEquals(true, e.getMessage().contains("'w'"));
+            assertEquals(true, e.getMessage().contains("struct<x:int>"));
+        }
+    }
+
     @Test
     public void testNullsPassThroughAtEveryLevel() {
         assertNull(new ArrowValueReader().nested(type("array<int(11)>"), null));

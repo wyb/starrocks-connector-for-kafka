@@ -172,7 +172,7 @@ abstract class ValueReader {
             case STRUCT: {
                 Map<?, ?> in = asMap(raw, type);
                 for (Object name : in.keySet()) {
-                    if (!isDeclared(type, name)) {
+                    if (!type.fieldNames.contains(name)) {
                         throw new DataException("struct field '" + name + "' is not declared in " + type);
                     }
                 }
@@ -195,15 +195,6 @@ abstract class ValueReader {
             throw new DataException("null map key in a " + keyType + "-keyed map");
         }
         return String.valueOf(key);
-    }
-
-    private static boolean isDeclared(ColumnType struct, Object name) {
-        for (ColumnType.Field f : struct.fields) {
-            if (f.name.equals(name)) {
-                return true;
-            }
-        }
-        return false;
     }
 
     protected List<?> asList(Object raw, ColumnType type) {

@@ -28,9 +28,11 @@ import org.apache.kafka.connect.data.Struct;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.StringJoiner;
 
 /**
@@ -74,6 +76,7 @@ final class ColumnType {
     final ColumnType key;       // MAP, as declared
     final ColumnType value;     // MAP
     final List<Field> fields;   // STRUCT, declared order
+    final Set<String> fieldNames;   // STRUCT, for the reader's membership check
     /** OPAQUE only: the schema name that says what the text is, or null for a plain string. */
     final String logicalName;
 
@@ -85,6 +88,11 @@ final class ColumnType {
         this.key = key;
         this.value = value;
         this.fields = fields;
+        Set<String> names = new HashSet<>();
+        for (Field f : fields) {
+            names.add(f.name);
+        }
+        this.fieldNames = Collections.unmodifiableSet(names);
         this.logicalName = logicalName;
     }
 

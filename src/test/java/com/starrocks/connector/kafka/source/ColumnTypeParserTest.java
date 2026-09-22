@@ -25,6 +25,8 @@ import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.junit.Test;
 
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Optional;
 
 import static org.junit.Assert.assertEquals;
@@ -120,6 +122,14 @@ public class ColumnTypeParserTest {
         assertEquals("t.deep.element.value", inner.name());
         assertEquals(ColumnType.DATETIME_LOGICAL_NAME,
                 inner.field("ys").schema().valueSchema().name());
+    }
+
+    /** The reader checks a driver's field names against this set, so it must mirror the declaration. */
+    @Test
+    public void testStructFieldNamesMirrorTheDeclaration() {
+        assertEquals(new HashSet<>(Arrays.asList("x", "y", "a`b")),
+                parse("struct<`x` int(11), `y` varchar(10), `a``b` date>").fieldNames);
+        assertTrue(parse("array<int(11)>").fieldNames.isEmpty());
     }
 
     /** Names must be unique per nested struct or the Avro converter rejects the record schema. */
