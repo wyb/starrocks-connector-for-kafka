@@ -88,35 +88,35 @@ final class ArrowValueReader extends ValueReader {
     }
 
     @Override
-    protected Object scalar(ColumnType type, Object value) {
+    protected Object leaf(ColumnType type, Object raw) {
         switch (type.kind) {
             case DATE:
-                return dateOfEpochDays(as(Number.class, value, type).intValue());
+                return dateOfEpochDays(as(Number.class, raw, type).intValue());
             case DATETIME:
-                return dateTimeOfEpochMicros(as(Number.class, value, type).longValue());
+                return dateTimeOfEpochMicros(as(Number.class, raw, type).longValue());
             case DECIMAL:
             case LARGEINT:
-                return as(BigDecimal.class, value, type).setScale(type.scale);
+                return as(BigDecimal.class, raw, type).setScale(type.scale);
             case STRING:
             case JSON:
                 // Text is a CharSequence; a plain String passes through unchanged.
-                return value.toString();
+                return raw.toString();
             case BYTES:
-                return as(byte[].class, value, type);
+                return as(byte[].class, raw, type);
             case BOOLEAN:
-                return as(Boolean.class, value, type);
+                return as(Boolean.class, raw, type);
             case TINYINT:
-                return as(Number.class, value, type).byteValue();
+                return as(Number.class, raw, type).byteValue();
             case SMALLINT:
-                return as(Number.class, value, type).shortValue();
+                return as(Number.class, raw, type).shortValue();
             case INT:
-                return as(Number.class, value, type).intValue();
+                return as(Number.class, raw, type).intValue();
             case BIGINT:
-                return as(Number.class, value, type).longValue();
+                return as(Number.class, raw, type).longValue();
             case FLOAT:
-                return as(Number.class, value, type).floatValue();
+                return as(Number.class, raw, type).floatValue();
             case DOUBLE:
-                return as(Number.class, value, type).doubleValue();
+                return as(Number.class, raw, type).doubleValue();
             default:
                 throw new DataException("no Arrow reader for " + type);
         }

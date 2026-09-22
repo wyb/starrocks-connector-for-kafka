@@ -47,7 +47,7 @@ import java.util.TimeZone;
  * UTC calendar can be handed to the driver -- so they read the same on both transports. Nested
  * columns have no typed getter; {@code getObject} hands over whatever the driver has, and the
  * transport's subclass turns that into the neutral value. The recursion over ARRAY, MAP and STRUCT
- * lives here; a subclass supplies {@link #scalar} for its raw leaves and may widen
+ * lives here; a subclass supplies {@link #leaf} for its raw leaves and may widen
  * {@link #asMap}.
  *
  * <p>One instance per streaming read: the calendar is not thread-safe.
@@ -145,8 +145,8 @@ abstract class ValueReader {
     /** The transport's raw form of a nested column to the neutral value. */
     protected abstract Object nested(ColumnType type, Object raw);
 
-    /** The transport's raw form of a nested scalar to the canonical scalar. */
-    protected abstract Object scalar(ColumnType type, Object raw);
+    /** A leaf of the raw tree -- an element, a map key or value, a struct field -- to the canonical scalar. */
+    protected abstract Object leaf(ColumnType type, Object raw);
 
     /** The recursion both transports share, once they have a raw tree of lists, maps and leaves. */
     protected final Object readNested(ColumnType type, Object raw) {
@@ -184,13 +184,13 @@ abstract class ValueReader {
                 return out;
             }
             default:
-                return scalar(type, raw);
+                return leaf(type, raw);
         }
     }
 
     /** The map key as the STRING the wire schema declares, spelled per the declared key type. */
     private String keyText(ColumnType keyType, Object rawKey) {
-        Object key = rawKey == null ? null : scalar(keyType, rawKey);
+        Object key = rawKey == null ? null : leaf(keyType, rawKey);
         if (key == null) {
             throw new DataException("null map key in a " + keyType + "-keyed map");
         }

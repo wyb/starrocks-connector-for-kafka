@@ -74,7 +74,7 @@ final class MysqlValueReader extends ValueReader {
     }
 
     @Override
-    protected Object scalar(ColumnType type, Object raw) {
+    protected Object leaf(ColumnType type, Object raw) {
         String token = as(String.class, raw, type);
         switch (type.kind) {
             case STRING:
