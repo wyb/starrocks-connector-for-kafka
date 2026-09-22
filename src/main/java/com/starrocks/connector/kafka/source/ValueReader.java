@@ -74,12 +74,6 @@ abstract class ValueReader {
     Object read(ResultSet rs, int index, ColumnType type) throws SQLException {
         Object value;
         switch (type.kind) {
-            case ARRAY:
-            case MAP:
-            case STRUCT: {
-                Object raw = rs.getObject(index);
-                return raw == null || rs.wasNull() ? null : nested(type, raw);
-            }
             case BOOLEAN:
                 value = rs.getBoolean(index);
                 break;
@@ -123,6 +117,12 @@ abstract class ValueReader {
             case BYTES:
                 value = rs.getBytes(index);
                 break;
+            case ARRAY:
+            case MAP:
+            case STRUCT: {
+                Object raw = rs.getObject(index);
+                return raw == null || rs.wasNull() ? null : nested(type, raw);
+            }
             case STRING:
             case JSON:
             case OPAQUE:
