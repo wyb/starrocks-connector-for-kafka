@@ -230,7 +230,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">327 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">314 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -255,7 +255,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <div class="note warn">
   <span class="tag">probeBookmarkFunctions 的 holder 必须独立</span>
-  <p>它用 <code>config.holderId(name) + ":preflight"</code>，TTL 60 秒。不能复用 task 的 holder：<code>bookmark_create</code> 对同一 holder 是幂等的，表没变化时会返回<em>已存在</em>的那个 bookmark，于是探针的释放会把 task 正在用的位点删掉。常量 <code>PROBE_HOLDER_SUFFIX</code> 存在的唯一理由就是这个。</p>
+  <p>它用 <code>config.holderId() + ":preflight"</code>，TTL 60 秒。不能复用 task 的 holder：<code>bookmark_create</code> 对同一 holder 是幂等的，表没变化时会返回<em>已存在</em>的那个 bookmark，于是探针的释放会把 task 正在用的位点删掉。常量 <code>PROBE_HOLDER_SUFFIX</code> 存在的唯一理由就是这个。</p>
   <p>释放是 best-effort——能证明开关打开的是<em>创建</em>；泄漏的探测 bookmark 60 秒内自己过期。</p>
 </div>
 
@@ -274,15 +274,16 @@ for (int i = 0; i &lt; tables.size(); i++)
 <p>覆写后逐条校验：offset 为 <code>null</code> 表示重置，<strong>先于一切校验放行</strong>；否则 partition 必须带非空字符串 <code>db</code> 和 <code>table</code>，<code>bookmark_id</code> 必须是非负 <code>Number</code>，<code>snapshot_done</code> 必须是 <code>Boolean</code>。任一项不满足抛 <code>ConnectException</code>，整个改写请求失败。错误信息里带上值的<em>类型</em>——<code>String 11955</code> 和 <code>Integer 11955</code> 打印出来一模一样。</p>
 <p>顺序不能反：<code>DELETE /connectors/{name}/offsets</code> 是把 offset store 里<em>每一个</em>已存 partition 映射成 <code>null</code> 交进来，其中可能有本连接器已经不再写的形状。校验放在 null 判断之前，这类残留就再也清不掉了——重置是唯一的清理入口。</p>
 <p>不校验的代价不是立刻报错，而是几分钟后：写进去的畸形 offset 要等到某个 task 重启读回来，才表现为"窗口读不出来"加"续租一直失败"，跟当初那对引号已经联系不起来。</p>
+<p>文件按 Connect 调用它的顺序排：<code>version</code>/<code>taskClass</code>/<code>config</code>，校验期的 <code>exactlyOnceSupport</code>，<code>start</code> 及其两个检查（<code>preflightCheckTable</code> 在前，<code>probeBookmarkFunctions</code> 在后，与调用顺序一致），<code>taskConfigs</code>，<code>alterOffsets</code> 与两个校验助手，<code>stop</code>；测试注入点 <code>createClient</code> 放最后，与 Task 相同。</p>
 
-<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">311 行</span></h3>
+<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">312 行</span></h3>
 <p class="role">一个 <code>AbstractConfig</code>：15 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
 
 <p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>
 
 <ul>
   <li><strong><code>topicFor(table)</code></strong>：先查 <code>starrocks.table2topic.map</code>，没有映射才回落到 <code>&lt;prefix&gt;.&lt;db&gt;.&lt;table&gt;</code>。</li>
-  <li><strong><code>holderId(connectorName)</code></strong>：返回 <code>"kc:" + name</code>。这是 bookmark 在服务端的持有者标识，同名 connector 重启后仍认领同一批 bookmark。</li>
+  <li><strong><code>holderId()</code></strong>：返回 <code>"kc:" + name</code>，name 取自 Connect 放进 props 的连接器名。这是 bookmark 在服务端的持有者标识，同名 connector 重启后仍认领同一批 bookmark。</li>
   <li><strong><code>source.poll.retry.timeout.ms</code></strong>：<code>ConfigDef.Range.atLeast(-1)</code>——<code>-1</code>（永远重试）和 <code>0</code>（首次失败即停）都有含义，再小就是笔误。</li>
   <li>构造函数里跑<strong>三道校验</strong>：<code>rejectEmptyTableList()</code>——<code>ConfigDef</code> 只查键在不在，一个全是逗号和空白的值会通过却命名了零张表，一处笔误就成了"什么都不发的 source"；<code>rejectDuplicateTableNames()</code>——见下；以及 <code>rejectNoSnapshotWithResnapshot()</code>。三者都在 <code>start()</code> 才跑，Connect 默认的 <code>validate()</code> 不构造这个类，REST 预校验看不到它们。</li>
 </ul>

@@ -49,26 +49,18 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
 
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceConnector.class);
 
-    // The two CDC metadata pseudo-columns appended to every CHANGES projection; see
-    // StarRocksJdbcClient#streamChanges. A captured table must not declare a real column with
-    // either name, or the two would be indistinguishable downstream.
+    /** The pseudo-columns every CHANGES projection appends (see {@code StarRocksJdbcClient#streamChanges});
+     *  a real column of either name would be indistinguishable from them downstream. */
     private static final String CHANGE_TYPE_COLUMN = "__CHANGE_TYPE__";
     private static final String ROW_VERSION_COLUMN = "__ROW_VERSION__";
 
-    // TTL of the throwaway preflight bookmark. Short, because it is released immediately and only
-    // needs to survive its own round trip: if the release fails, it expires on its own shortly.
+    /** The probe's bookmark is released right after creation; if that fails it expires on its own. */
     private static final long PROBE_BOOKMARK_TTL_MS = 60_000L;
 
-    // Suffix that makes the preflight probe's holder id distinct from the one the tasks use.
-    // See probeBookmarkFunctions() for why the two must never be the same string.
+    /** Keeps the probe's holder apart from the tasks'; {@link #probeBookmarkFunctions} says why. */
     private static final String PROBE_HOLDER_SUFFIX = ":preflight";
 
     private Map<String, String> props;
-
-    /** Test injection point: test subclasses override to return a scripted fake. */
-    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
-        return new StarRocksJdbcClient(cfg);
-    }
 
     @Override
     public String version() {
@@ -117,14 +109,95 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             for (String t : tables) {
                 preflightCheckTable(client, db, t);
             }
-            if (!tables.isEmpty()) {
-                probeBookmarkFunctions(client, config, db, tables.get(0));
-            }
+            probeBookmarkFunctions(client, config, db, tables.get(0));
         } finally {
             client.close();
         }
         LOG.info("CDC source connector preflight passed for {} table(s) in database {}: {}",
                 tables.size(), db, tables);
+    }
+
+    /**
+     * Runs every preflight check for one table, wrapping any {@link SQLException} raised while
+     * probing it (including "table not found") into a {@link ConnectException} that names the
+     * table.
+     */
+    private void preflightCheckTable(CdcClient client, String db, String table) {
+        try {
+            String model = client.fetchTableModel(db, table);
+            // Empty, not null, is what "unknown" looks like: InformationSchemaDataSource sets
+            // table_model only after casting to OlapTable, so a view or an external table leaves the
+            // thrift field unset and the BE fills the column with "". Treating that as permission
+            // would let every check below pass and the table fail later, at bookmark_create.
+            if (model == null || model.trim().isEmpty()) {
+                throw new ConnectException(
+                        "could not determine the table model of " + db + "." + table
+                                + " (information_schema.tables_config reports it empty), so this connector"
+                                + " cannot tell whether the table is capturable. Views, materialized views"
+                                + " and external tables have no table model; capture the base table instead.");
+            }
+            // TABLE_MODEL is KeysType.toString(), so the live value is "UNIQUE_KEYS"; some docs
+            // spell it "UNQ_KEYS". Both are checked so the guard cannot go inert against either.
+            if (model.contains("UNQ") || model.contains("UNIQUE")) {
+                throw new ConnectException(
+                        "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
+            }
+            // AGG needs no warning: rows sharing an aggregate key are folded into one, so the key
+            // identifies a row exactly as a primary key does. DUP's key is a sort key and admits
+            // duplicates, which is fine for partitioning but not for compaction.
+            if (model.contains("DUP")) {
+                LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
+                        + "and are not unique, so several rows can share one Kafka key. Partitioning "
+                        + "and per-key ordering still hold; log compaction does not -- it would drop "
+                        + "rows that are not duplicates, and with {}=true a tombstone would delete "
+                        + "every row sharing the deleted row's key.",
+                        db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
+            }
+            // "PRIMARY_KEYS" contains "PRI". && short-circuits, so cdcPropertyEnabled's query runs
+            // only for a primary key table.
+            if (model.contains("PRI") && !client.cdcPropertyEnabled(db, table)) {
+                throw new ConnectException(
+                        "primary key table " + db + "." + table + " does not have change data capture enabled; "
+                                + "run: ALTER TABLE " + db + "." + table
+                                + " SET (\"enable_change_data_capture\" = \"true\")");
+            }
+            for (ColumnMeta col : client.fetchColumns(db, table)) {
+                // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
+                // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
+                // lowercase __change_type__ would leave our bare projection reading the user's column.
+                if (CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name) || ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
+                    throw new ConnectException(
+                            "table " + db + "." + table + " has a column named " + col.name
+                                    + " which collides with a CDC metadata column");
+                }
+                // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can interpret.
+                if (ColumnMeta.isNonExportable(col.srDataType)) {
+                    throw new ConnectException(
+                            "table " + db + "." + table + " has column '" + col.name + "' of type "
+                                    + col.srDataType + ", whose value cannot be exported by a SELECT"
+                                    + " -- it is an aggregate sketch, not a value. Capture a view that"
+                                    + " projects only the columns you need, or remove this column from"
+                                    + " the captured table.");
+                }
+                // COLUMN_TYPE is a display string; when it does not parse the column is still
+                // captured, as text, and this says so once.
+                if (ColumnMeta.isComplex(col.srDataType) && col.type.kind == ColumnType.Kind.OPAQUE) {
+                    LOG.warn("Column {}.{}.{} is declared as '{}', which this connector could not parse"
+                                    + " into a nested schema; it will be carried as text.",
+                            db, table, col.name, col.srColumnType);
+                }
+                // Not fatal -- text preserves the value -- but StarRocks grew a type this connector
+                // was never told about, worth saying once at startup.
+                if (ColumnMeta.isUnrecognized(col.srDataType)) {
+                    LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
+                                    + " recognise; it will be carried as text. This usually means StarRocks"
+                                    + " added a type.",
+                            db, table, col.name, col.srDataType, col.srColumnType);
+                }
+            }
+        } catch (SQLException e) {
+            throw new ConnectException("Failed CDC preflight check for table " + db + "." + table, e);
+        }
     }
 
     /**
@@ -138,7 +211,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * it, failing every restart of an idle table with "bookmark not found".
      */
     private void probeBookmarkFunctions(CdcClient client, StarRocksCdcSourceConfig config, String db, String table) {
-        String holder = config.holderId(props.getOrDefault("name", "default")) + PROBE_HOLDER_SUFFIX;
+        String holder = config.holderId() + PROBE_HOLDER_SUFFIX;
         long bookmarkId;
         try {
             bookmarkId = client.bookmarkCreate(db, table, holder, PROBE_BOOKMARK_TTL_MS);
@@ -157,101 +230,10 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
         }
     }
 
-    /**
-     * Runs every preflight check for one table, wrapping any {@link SQLException} raised while
-     * probing it (including "table not found") into a {@link ConnectException} that names the
-     * table.
-     */
-    private void preflightCheckTable(CdcClient client, String db, String t) {
-        try {
-            String model = client.fetchTableModel(db, t);
-            // Empty, not null, is what "unknown" looks like: InformationSchemaDataSource sets
-            // table_model only after casting to OlapTable, so a view or an external table leaves the
-            // thrift field unset and the BE fills the column with "". Treating that as permission
-            // would let every check below pass and the table fail later, at bookmark_create.
-            if (model == null || model.trim().isEmpty()) {
-                throw new ConnectException(
-                        "could not determine the table model of " + db + "." + t
-                                + " (information_schema.tables_config reports it empty), so this connector"
-                                + " cannot tell whether the table is capturable. Views, materialized views"
-                                + " and external tables have no table model; capture the base table instead.");
-            }
-            // TABLE_MODEL is KeysType.toString(), so the live value is "UNIQUE_KEYS"; some docs
-            // spell it "UNQ_KEYS". Both are checked so the guard cannot go inert against either.
-            if (model.contains("UNQ") || model.contains("UNIQUE")) {
-                throw new ConnectException(
-                        "table " + db + "." + t + " uses UNIQUE KEY model, which CHANGES does not support");
-            }
-            // "PRIMARY" itself contains "PRI", so the shorter test alone covers both spellings.
-            // UNIQUE above needs two because "UNIQUE_KEYS" does not contain "UNQ".
-            // AGG needs no warning: rows sharing an aggregate key are folded into one, so the key
-            // identifies a row exactly as a primary key does. DUP's key is a sort key and admits
-            // duplicates, which is fine for partitioning but not for compaction.
-            if (model.contains("DUP")) {
-                LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
-                        + "and are not unique, so several rows can share one Kafka key. Partitioning "
-                        + "and per-key ordering still hold; log compaction does not -- it would drop "
-                        + "rows that are not duplicates, and with {}=true a tombstone would delete "
-                        + "every row sharing the deleted row's key.",
-                        db, t, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
-            }
-            // && short-circuits, so cdcPropertyEnabled's query runs only for a primary key table.
-            if (model.contains("PRI") && !client.cdcPropertyEnabled(db, t)) {
-                throw new ConnectException(
-                        "primary key table " + db + "." + t + " does not have change data capture enabled; "
-                                + "run: ALTER TABLE " + db + "." + t
-                                + " SET (\"enable_change_data_capture\" = \"true\")");
-            }
-            for (ColumnMeta col : client.fetchColumns(db, t)) {
-                // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
-                // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
-                // lowercase __change_type__ would leave our bare projection reading the user's column.
-                if (CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name) || ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
-                    throw new ConnectException(
-                            "table " + db + "." + t + " has a column named " + col.name
-                                    + " which collides with a CDC metadata column");
-                }
-                // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can
-                // interpret. Without this the connector starts happily and streams that non-value
-                // forever, which from the outside looks like working.
-                if (ColumnMeta.isNonExportable(col.srDataType)) {
-                    throw new ConnectException(
-                            "table " + db + "." + t + " has column '" + col.name + "' of type "
-                                    + col.srDataType + ", whose value cannot be exported by a SELECT"
-                                    + " -- it is an aggregate sketch, not a value. Capture a view that"
-                                    + " projects only the columns you need, or remove this column from"
-                                    + " the captured table.");
-                }
-                // Not fatal -- text preserves the value -- but it means StarRocks grew a type this
-                // connector was never told about, worth saying once at startup.
-                // The nested schema comes from COLUMN_TYPE, a display string; when it does not
-                // parse the column is still captured, as text, and this says so once.
-                if (ColumnMeta.isComplex(col.srDataType) && col.type.kind == ColumnType.Kind.OPAQUE) {
-                    LOG.warn("Column {}.{}.{} is declared as '{}', which this connector could not parse"
-                                    + " into a nested schema; it will be carried as text.",
-                            db, t, col.name, col.srColumnType);
-                }
-                if (ColumnMeta.isUnrecognized(col.srDataType)) {
-                    LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
-                                    + " recognise; it will be carried as text. This usually means StarRocks"
-                                    + " added a type.",
-                            db, t, col.name, col.srDataType, col.srColumnType);
-                }
-            }
-        } catch (SQLException e) {
-            throw new ConnectException("Failed CDC preflight check for table " + db + "." + t, e);
-        }
-    }
-
+    /** Round-robin: table i goes to task i mod min(maxTasks, tables). The config rejects an empty list. */
     @Override
     public List<Map<String, String>> taskConfigs(int maxTasks) {
         List<String> tables = new StarRocksCdcSourceConfig(props).tableNames();
-        if (tables.isEmpty()) {
-            // Unreachable: the config constructor above rejects a table list that names nothing,
-            // so this branch only survives a future change that relaxes that.
-            return new ArrayList<>();
-        }
-
         int groups = Math.min(maxTasks, tables.size());
         List<List<String>> groupTables = new ArrayList<>(groups);
         for (int i = 0; i < groups; i++) {
@@ -323,5 +305,10 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
 
     @Override
     public void stop() {
+    }
+
+    /** Test injection point: test subclasses override to return a scripted fake. */
+    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+        return new StarRocksJdbcClient(cfg);
     }
 }

@@ -253,8 +253,9 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         return topicPrefix() + "." + databaseName() + "." + table;
     }
 
-    public String holderId(String connectorName) {
-        return "kc:" + connectorName;
+    /** The bookmark holder of this connector's tasks, from the connector name Connect puts in the properties. */
+    public String holderId() {
+        return "kc:" + originalsStrings().getOrDefault("name", "default");
     }
 
     public String jdbcUrl() {

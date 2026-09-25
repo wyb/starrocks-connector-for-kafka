@@ -324,7 +324,7 @@ public class StarRocksCdcSourceConnectorTest {
         newConnector(fake).start(props);
 
         // The holder StarRocksCdcSourceTask#start would compute for this same connector name.
-        String taskHolder = new StarRocksCdcSourceConfig(props).holderId("c1");
+        String taskHolder = new StarRocksCdcSourceConfig(props).holderId();
         assertEquals("kc:c1", taskHolder);
 
         assertEquals(1, fake.createHolders.size());

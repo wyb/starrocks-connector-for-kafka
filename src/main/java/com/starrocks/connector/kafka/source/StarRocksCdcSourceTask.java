@@ -131,7 +131,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     public void start(Map<String, String> props) {
         config = new StarRocksCdcSourceConfig(props);
         db = config.databaseName();
-        holder = config.holderId(props.getOrDefault("name", "default"));
+        holder = config.holderId();
         ttlMs = config.bookmarkTtlMs();
         pollIntervalMs = config.pollIntervalMs();
         pollRetryTimeoutMs = config.pollRetryTimeoutMs();
