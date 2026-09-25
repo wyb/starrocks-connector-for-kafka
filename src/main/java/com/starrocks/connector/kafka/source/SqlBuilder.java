@@ -43,22 +43,6 @@ public final class SqlBuilder {
         return "'" + escaped + "'";
     }
 
-    public static String snapshotSql(String db, String table, List<String> cols, long bookmarkId) {
-        return "SELECT " + quoteCols(cols) + " FROM " + qualifiedTable(db, table) +
-                " [_BOOKMARK_" + bookmarkId + "_]";
-    }
-
-    /**
-     * The ORDER BY is a correctness invariant. The BE emits version-descending with INSERT
-     * ahead of DELETE inside a version; passed through, an UPDATE would apply as insert-then-delete
-     * and the row would vanish downstream.
-     */
-    public static String changesSql(String db, String table, List<String> cols, long base, long head) {
-        return "SELECT " + quoteCols(cols) + ",__CHANGE_TYPE__,__ROW_VERSION__ FROM " +
-                qualifiedTable(db, table) + " [_CHANGES_" + base + "_" + head + "_]" +
-                " ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC";
-    }
-
     /** The ttl goes in as a decimal string, not a number. */
     public static String bookmarkCreateSql(String db, String table, String holder, long ttlMs) {
         return "SELECT bookmark_create(" + quoteStr(db) + "," + quoteStr(table) + "," +
@@ -77,6 +61,12 @@ public final class SqlBuilder {
                 quoteStr(Long.toString(bookmarkId)) + "," + quoteStr(holder) + ")";
     }
 
+    /** The references {@code holder} still has on the table, oldest bookmark first. */
+    public static String heldBookmarksSql(long tableId, String holder) {
+        return "SELECT BOOKMARK_ID FROM information_schema.table_bookmark_references WHERE TABLE_ID = " + tableId
+                + " AND HOLDER_ID = " + quoteStr(holder) + " ORDER BY BOOKMARK_ID";
+    }
+
     /**
      * Both type columns are projected: {@code DATA_TYPE} is StarRocks' type name ("array", "hll")
      * and {@code COLUMN_TYPE} carries the nesting ("array&lt;int&gt;") and BOOLEAN's "tinyint(1)".
@@ -91,11 +81,6 @@ public final class SqlBuilder {
     }
 
     /**
-     * {@code PROPERTIES} is the table's property map as JSON (FE builds it with
-     * {@code Gson().toJson(table.getProperties())}), which is why the CDC property is read from here
-     * rather than matched in {@code SHOW CREATE TABLE} text.
-     */
-    /**
      * The key columns of any table model, in declaration order. {@code tables_config.PRIMARY_KEY} is
      * not usable here: FE computes the key columns for every model but publishes them only for
      * PRIMARY_KEYS and UNIQUE_KEYS, leaving AGG and DUP tables with an empty string. {@code
@@ -107,15 +92,31 @@ public final class SqlBuilder {
                 + " ORDER BY ORDINAL_POSITION";
     }
 
+    /**
+     * {@code PROPERTIES} is the table's property map as JSON (FE builds it with
+     * {@code Gson().toJson(table.getProperties())}), which is why the CDC property is read from here
+     * rather than matched in {@code SHOW CREATE TABLE} text. {@code TABLE_ID} keys
+     * {@link #heldBookmarksSql}.
+     */
     public static String tableConfigSql(String db, String table) {
         return "SELECT TABLE_ID, TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = " + quoteStr(db) + " AND TABLE_NAME = " + quoteStr(table);
     }
 
-    /** The references {@code holder} still has on the table, oldest bookmark first. */
-    public static String heldBookmarksSql(long tableId, String holder) {
-        return "SELECT BOOKMARK_ID FROM information_schema.table_bookmark_references WHERE TABLE_ID = " + tableId
-                + " AND HOLDER_ID = " + quoteStr(holder) + " ORDER BY BOOKMARK_ID";
+    public static String snapshotSql(String db, String table, List<String> cols, long bookmarkId) {
+        return "SELECT " + quoteCols(cols) + " FROM " + qualifiedTable(db, table) +
+                " [_BOOKMARK_" + bookmarkId + "_]";
+    }
+
+    /**
+     * The ORDER BY is a correctness invariant. The BE emits version-descending with INSERT
+     * ahead of DELETE inside a version; passed through, an UPDATE would apply as insert-then-delete
+     * and the row would vanish downstream.
+     */
+    public static String changesSql(String db, String table, List<String> cols, long base, long head) {
+        return "SELECT " + quoteCols(cols) + ",__CHANGE_TYPE__,__ROW_VERSION__ FROM " +
+                qualifiedTable(db, table) + " [_CHANGES_" + base + "_" + head + "_]" +
+                " ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC";
     }
 
     private static String qualifiedTable(String db, String table) {
