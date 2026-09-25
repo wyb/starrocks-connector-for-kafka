@@ -132,11 +132,11 @@ public final class ColumnMeta {
     private static String fallbackLogicalName(String srDataType) {
         switch (normalize(srDataType)) {
             case "array":
-                return "com.starrocks.data.Array";
+                return ColumnType.ARRAY_LOGICAL_NAME;
             case "map":
-                return "com.starrocks.data.Map";
+                return ColumnType.MAP_LOGICAL_NAME;
             case "struct":
-                return "com.starrocks.data.Struct";
+                return ColumnType.STRUCT_LOGICAL_NAME;
             default:
                 return null;
         }

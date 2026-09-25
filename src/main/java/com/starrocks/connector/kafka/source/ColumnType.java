@@ -49,6 +49,10 @@ final class ColumnType {
     /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text, as ValueReader prints it. */
     static final String DATE_LOGICAL_NAME = "com.starrocks.data.Date";
     static final String DATETIME_LOGICAL_NAME = "com.starrocks.data.DateTime";
+    /** Logical names of an OPAQUE complex column: the text BE renders, which is not JSON. */
+    static final String ARRAY_LOGICAL_NAME = "com.starrocks.data.Array";
+    static final String MAP_LOGICAL_NAME = "com.starrocks.data.Map";
+    static final String STRUCT_LOGICAL_NAME = "com.starrocks.data.Struct";
 
     enum Kind {
         BOOLEAN, TINYINT, SMALLINT, INT, BIGINT, LARGEINT, FLOAT, DOUBLE, DECIMAL,
