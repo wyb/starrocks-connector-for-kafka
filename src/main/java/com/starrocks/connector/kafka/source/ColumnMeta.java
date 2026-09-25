@@ -28,13 +28,15 @@ import java.util.Set;
 /**
  * Immutable metadata for one captured column, as {@code information_schema.columns} describes it,
  * folded at construction into the one {@link ColumnType} the schema and the value readers use.
- *
- * <p>Only the server's description, never a driver's: over the MySQL protocol
- * {@link java.sql.ResultSetMetaData} cannot tell an ARRAY, a JSON or an HLL sketch from a VARCHAR,
- * and the Arrow Flight driver calls every column NOT NULL with no scale. Two descriptions would also
- * mean one table producing two schemas depending on the URL scheme.
+ * Only the server's description, never a driver's; {@link ColumnMetaReader} says why.
  */
 public final class ColumnMeta {
+    /** The closed set FE's {@code Type.toMysqlDataTypeString} emits; a name outside it means StarRocks grew a type. */
+    private static final Set<String> KNOWN_DATA_TYPES = new HashSet<>(Arrays.asList(
+            "tinyint", "smallint", "int", "bigint", "bigint unsigned", "float", "double", "decimal",
+            "char", "varchar", "date", "datetime", "binary", "varbinary",
+            "array", "map", "struct", "json", "hll", "bitmap", "percentile"));
+
     public final String name;
     public final boolean nullable;
     /** {@code DATA_TYPE}, normalized: "array", "json", "hll", "bigint unsigned"... null when the server was not asked. */
@@ -47,12 +49,6 @@ public final class ColumnMeta {
      * text -- a complex column whose COLUMN_TYPE did not parse, or a type never mapped.
      */
     final ColumnType type;
-
-    /** The closed set FE's {@code Type.toMysqlDataTypeString} emits; a name outside it means StarRocks grew a type. */
-    private static final Set<String> KNOWN_DATA_TYPES = new HashSet<>(Arrays.asList(
-            "tinyint", "smallint", "int", "bigint", "bigint unsigned", "float", "double", "decimal",
-            "char", "varchar", "date", "datetime", "binary", "varbinary",
-            "array", "map", "struct", "json", "hll", "bitmap", "percentile"));
 
     /** @param scale {@code NUMERIC_SCALE}; DECIMAL is the only type that reads it. */
     public ColumnMeta(String name, String srDataType, String srColumnType, int scale, boolean nullable) {
