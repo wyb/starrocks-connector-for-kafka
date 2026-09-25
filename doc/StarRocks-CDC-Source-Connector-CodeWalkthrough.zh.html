@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>19 个类 / 约 4000 行</b></span>
-    <span>测试<b>248 个</b></span>
+    <span>测试<b>239 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -588,7 +588,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>SqlBuilderTest</code></td><td>11</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中、<code>tables_config</code> 一行带 <code>TABLE_ID</code>、引用查询按 <code>TABLE_ID + HOLDER_ID</code> 过滤</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>13</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot、poll 重试超时小于 -1），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>ArrowValueReaderTest</code></td><td>12</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、未声明的 struct 字段点名报错、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错、天数/微秒入口与基类的 Date 入口一致、<code>fromJvmWallClock</code> 是 <code>valueOf</code> 的逆</td></tr>
-  \g<1>每种服务端类型名落到哪个种类、BOOLEAN 靠 <code>tinyint(1)</code> 与 tinyint 区分、大小写与空白不敏感、DECIMAL 保留声明 scale、<code>bigint unsigned</code> 是 LARGEINT 且 schema scale 恒为 0、<code>json</code> 是 JSON 种类、解析成功的复杂列 <code>type.isNested()</code>、解析失败是带 StarRocks 逻辑名的 OPAQUE 文本且可空性来自列、未识别类型与未询问服务端的列都是无名文本、<code>toString</code> 即启动日志的列格式、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假、不可导出类型判定\g<2>
+  <tr><td><code>ColumnMetaTest</code></td><td>8</td><td>每种服务端类型名落到哪个种类（含解析成功的复杂列）、BOOLEAN 靠 <code>tinyint(1)</code> 与 tinyint 区分、大小写与空白不敏感、<code>toString</code> 即启动日志的列格式、DECIMAL 取 <code>NUMERIC_SCALE</code> 而 LARGEINT 恒为 scale 0、映射不了的都是文本（解析失败的复杂列带逻辑名，未识别与未询问的无名）、<code>isUnrecognized</code> 是已知集合的补集、只有聚合草图不可导出</td></tr>
   <tr><td><code>ColumnTypeParserTest</code></td><td>14</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、字段名集合与声明一致、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlValueReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlValueReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>

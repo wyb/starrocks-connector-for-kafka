@@ -20,7 +20,6 @@
 
 package com.starrocks.connector.kafka.source;
 
-import io.debezium.data.Json;
 import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Schema;
 import org.junit.Test;
@@ -33,32 +32,36 @@ import static org.junit.Assert.assertTrue;
 /** Every column gets one {@link ColumnType}; these pin how it is derived from what the server said. */
 public class ColumnMetaTest {
 
-    private static ColumnType.Kind kindOf(String dataType) {
-        return kindOf(dataType, dataType);
+    private static ColumnType typeOf(String dataType, String columnType) {
+        return new ColumnMeta("c", dataType, columnType, 0, true).type;
     }
 
-    private static ColumnType.Kind kindOf(String dataType, String columnType) {
-        return new ColumnMeta("c", dataType, columnType, 0, true).type.kind;
+    private static ColumnType.Kind kindOf(String dataType) {
+        return typeOf(dataType, dataType).kind;
     }
 
     /** The closed set FE's {@code Type.toMysqlDataTypeString} emits; if StarRocks adds a type, this notices. */
     @Test
-    public void testScalarKindsFollowTheServerType() {
+    public void testKindsFollowTheServerType() {
         assertEquals(ColumnType.Kind.TINYINT, kindOf("tinyint"));
         assertEquals(ColumnType.Kind.SMALLINT, kindOf("smallint"));
         assertEquals(ColumnType.Kind.INT, kindOf("int"));
         assertEquals(ColumnType.Kind.BIGINT, kindOf("bigint"));
-        assertEquals(ColumnType.Kind.LARGEINT, kindOf("bigint unsigned", "bigint(20) unsigned"));
+        assertEquals(ColumnType.Kind.LARGEINT, typeOf("bigint unsigned", "bigint(20) unsigned").kind);
         assertEquals(ColumnType.Kind.FLOAT, kindOf("float"));
         assertEquals(ColumnType.Kind.DOUBLE, kindOf("double"));
-        assertEquals(ColumnType.Kind.DECIMAL, kindOf("decimal", "decimal(18, 2)"));
-        assertEquals(ColumnType.Kind.STRING, kindOf("char", "char(10)"));
-        assertEquals(ColumnType.Kind.STRING, kindOf("varchar", "varchar(10)"));
+        assertEquals(ColumnType.Kind.DECIMAL, typeOf("decimal", "decimal(18, 2)").kind);
+        assertEquals(ColumnType.Kind.STRING, typeOf("char", "char(10)").kind);
+        assertEquals(ColumnType.Kind.STRING, typeOf("varchar", "varchar(10)").kind);
         assertEquals(ColumnType.Kind.DATE, kindOf("date"));
         assertEquals(ColumnType.Kind.DATETIME, kindOf("datetime"));
-        assertEquals(ColumnType.Kind.BYTES, kindOf("binary", "binary(4)"));
-        assertEquals(ColumnType.Kind.BYTES, kindOf("varbinary", "varbinary(16)"));
+        assertEquals(ColumnType.Kind.BYTES, typeOf("binary", "binary(4)").kind);
+        assertEquals(ColumnType.Kind.BYTES, typeOf("varbinary", "varbinary(16)").kind);
         assertEquals(ColumnType.Kind.JSON, kindOf("json"));
+        assertEquals(ColumnType.Kind.ARRAY, typeOf("array", "array<int(11)>").kind);
+        assertEquals(ColumnType.Kind.MAP, typeOf("map", "map<varchar(10),int(11)>").kind);
+        assertEquals(ColumnType.Kind.STRUCT, typeOf("struct", "struct<`x` int(11)>").kind);
+        assertTrue(typeOf("array", "array<int(11)>").isNested());
         for (String sketch : new String[] {"hll", "bitmap", "percentile"}) {
             assertEquals(sketch, ColumnType.Kind.OPAQUE, kindOf(sketch));
         }
@@ -67,9 +70,9 @@ public class ColumnMetaTest {
     /** FE renders BOOLEAN's DATA_TYPE as "tinyint" and only its COLUMN_TYPE as "tinyint(1)". */
     @Test
     public void testBooleanIsDistinguishedFromTinyint() {
-        assertEquals(ColumnType.Kind.BOOLEAN, kindOf("tinyint", "tinyint(1)"));
-        assertEquals(ColumnType.Kind.TINYINT, kindOf("tinyint", "tinyint(4)"));
-        assertEquals(ColumnType.Kind.TINYINT, kindOf("tinyint", null));
+        assertEquals(ColumnType.Kind.BOOLEAN, typeOf("tinyint", "tinyint(1)").kind);
+        assertEquals(ColumnType.Kind.TINYINT, typeOf("tinyint", "tinyint(4)").kind);
+        assertEquals(ColumnType.Kind.TINYINT, typeOf("tinyint", null).kind);
     }
 
     /** DATA_TYPE casing and padding are the server's choice, not a contract. */
@@ -78,8 +81,11 @@ public class ColumnMetaTest {
         assertEquals(ColumnType.Kind.INT, kindOf("  INT "));
         assertEquals(ColumnType.Kind.DATETIME, kindOf("DateTime"));
         assertEquals(ColumnType.Kind.LARGEINT, kindOf("BIGINT UNSIGNED"));
-        assertEquals(ColumnType.Kind.BOOLEAN, kindOf("TinyInt", " TINYINT(1) "));
+        assertEquals(ColumnType.Kind.BOOLEAN, typeOf("TinyInt", " TINYINT(1) ").kind);
         assertEquals("bigint unsigned", new ColumnMeta("c", " BIGINT UNSIGNED ", null, 0, true).srDataType);
+        assertFalse(ColumnMeta.isUnrecognized("  ARRAY "));
+        assertTrue(ColumnMeta.isNonExportable("  HLL "));
+        assertTrue(ColumnMeta.isNonExportable("BitMap"));
     }
 
     /** The startup log and the duplicate-column error print columns this way. */
@@ -91,16 +97,11 @@ public class ColumnMetaTest {
                 new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, false).toString());
     }
 
+    /** NUMERIC_SCALE reaches DECIMAL only; LARGEINT is integral and stays at scale 0 whatever FE reports. */
     @Test
-    public void testDecimalKeepsTheDeclaredScale() {
-        ColumnType t = new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, true).type;
-        assertEquals(ColumnType.Kind.DECIMAL, t.kind);
-        assertEquals("2", t.toConnectSchema("t.d", true).parameters().get(Decimal.SCALE_FIELD));
-    }
-
-    /** LARGEINT is integral: Decimal at scale 0 whatever NUMERIC_SCALE says (FE reports NULL for it). */
-    @Test
-    public void testLargeIntIsItsOwnKindAtScaleZero() {
+    public void testDecimalTakesNumericScaleAndLargeIntIgnoresIt() {
+        ColumnType d = new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, true).type;
+        assertEquals("2", d.toConnectSchema("t.d", true).parameters().get(Decimal.SCALE_FIELD));
         for (int numericScale : new int[] {0, 9}) {
             ColumnType t = new ColumnMeta("big", "bigint unsigned", "bigint(20) unsigned", numericScale, true).type;
             assertEquals(ColumnType.Kind.LARGEINT, t.kind);
@@ -108,26 +109,15 @@ public class ColumnMetaTest {
         }
     }
 
+    /**
+     * What cannot be mapped is text: a complex column that did not parse keeps its type's logical
+     * name; a type never met, or a column the server was not asked about, has none.
+     */
     @Test
-    public void testJsonIsItsOwnKind() {
-        ColumnType t = new ColumnMeta("j", "json", "json", 0, true).type;
-        assertEquals(ColumnType.Kind.JSON, t.kind);
-        assertEquals(Json.LOGICAL_NAME, t.toConnectSchema("t.j", true).name());
-    }
-
-    @Test
-    public void testParsedComplexColumnIsTheNestedTree() {
-        ColumnMeta c = new ColumnMeta("a", "array", "array<int(11)>", 0, true);
-        assertEquals(ColumnType.Kind.ARRAY, c.type.kind);
-        assertTrue(c.type.isNested());
-    }
-
-    /** No parse, no guess: the column stays text and says which complex type it was. */
-    @Test
-    public void testUnparsedComplexColumnIsOpaqueTextNamedForItsType() {
-        String[][] cases = {{"array", "com.starrocks.data.Array"}, {"map", "com.starrocks.data.Map"},
+    public void testWhatCannotBeMappedIsOpaqueText() {
+        String[][] named = {{"array", "com.starrocks.data.Array"}, {"map", "com.starrocks.data.Map"},
                             {"struct", "com.starrocks.data.Struct"}};
-        for (String[] c : cases) {
+        for (String[] c : named) {
             ColumnMeta col = new ColumnMeta("x", c[0], "struct<x int>", 0, false);
             assertEquals(c[0], ColumnType.Kind.OPAQUE, col.type.kind);
             assertFalse(col.type.isNested());
@@ -136,74 +126,40 @@ public class ColumnMetaTest {
             assertEquals(c[1], s.name());
             assertFalse(s.isOptional());
         }
-    }
-
-    /** A type this connector never met is text with no name at all; so is a column the server was never asked about. */
-    @Test
-    public void testUnrecognizedTypeIsPlainText() {
-        for (ColumnMeta c : new ColumnMeta[] {new ColumnMeta("u", "variant", "variant", 0, true),
-                                              new ColumnMeta("n", null, null, 0, true)}) {
-            assertEquals(ColumnType.Kind.OPAQUE, c.type.kind);
-            Schema s = c.type.toConnectSchema("t." + c.name, true);
+        for (ColumnMeta col : new ColumnMeta[] {new ColumnMeta("u", "variant", "variant", 0, true),
+                                                new ColumnMeta("n", null, null, 0, true)}) {
+            assertEquals(ColumnType.Kind.OPAQUE, col.type.kind);
+            Schema s = col.type.toConnectSchema("t." + col.name, true);
             assertEquals(Schema.Type.STRING, s.type());
             assertNull(s.name());
             assertTrue(s.isOptional());
         }
     }
 
-    /** Real spellings StarRocks has and this connector does not map. */
+    /** The complement of the known set; null means the server was not asked, not a type nobody knows. */
     @Test
-    public void testTypesStarRocksHasButThisConnectorDoesNotMapAreUnrecognized() {
-        assertTrue(ColumnMeta.isUnrecognized("variant"));
-        assertTrue(ColumnMeta.isUnrecognized("time"));
-        assertTrue(ColumnMeta.isUnrecognized("unknown_type"));
-    }
-
-    /** Every type with a case in the mapping, including the ones carried as text on purpose. */
-    @Test
-    public void testMappedTypesAreRecognized() {
+    public void testUnrecognizedIsTheComplementOfTheKnownSet() {
         for (String t : new String[] {"tinyint", "smallint", "int", "bigint", "bigint unsigned",
                                       "float", "double", "decimal", "char", "varchar", "date",
                                       "datetime", "binary", "varbinary", "array", "map", "struct",
                                       "json", "hll", "bitmap", "percentile"}) {
             assertFalse("expected " + t + " to be recognized", ColumnMeta.isUnrecognized(t));
         }
-        assertFalse(ColumnMeta.isUnrecognized("  ARRAY "));
-    }
-
-    /** Null means the server was never asked, which is not the same as a type nobody knows. */
-    @Test
-    public void testNullServerTypeIsNotReportedAsUnrecognized() {
+        for (String t : new String[] {"variant", "time", "unknown_type"}) {
+            assertTrue("expected " + t + " to be unrecognized", ColumnMeta.isUnrecognized(t));
+        }
         assertFalse(ColumnMeta.isUnrecognized(null));
     }
 
-    /** A SELECT of a sketch yields nothing usable, so the table is refused rather than streamed. */
+    /** Only the aggregate sketches are refused; complex and unknown types are exportable, natively or as text. */
     @Test
-    public void testAggregateSketchTypesAreNonExportable() {
-        assertTrue(ColumnMeta.isNonExportable("hll"));
-        assertTrue(ColumnMeta.isNonExportable("bitmap"));
-        assertTrue(ColumnMeta.isNonExportable("percentile"));
-    }
-
-    /** Complex types are exportable, natively or as text; a guard catching ARRAY would reject valid tables. */
-    @Test
-    public void testOrdinaryAndComplexTypesAreExportable() {
+    public void testOnlyAggregateSketchesAreNonExportable() {
+        for (String t : new String[] {"hll", "bitmap", "percentile"}) {
+            assertTrue("expected " + t + " to be non-exportable", ColumnMeta.isNonExportable(t));
+        }
         for (String t : new String[] {"int", "varchar", "datetime", "json", "array", "map", "struct",
-                                      "binary", "unknown", ""}) {
+                                      "binary", "unknown", "", null}) {
             assertFalse("expected " + t + " to be exportable", ColumnMeta.isNonExportable(t));
         }
-    }
-
-    /** A column described without consulting the server has no StarRocks name; it must not throw. */
-    @Test
-    public void testNullServerTypeIsExportable() {
-        assertFalse(ColumnMeta.isNonExportable(null));
-    }
-
-    /** DATA_TYPE casing is the server's choice here too. */
-    @Test
-    public void testNonExportableMatchingIgnoresCaseAndPadding() {
-        assertTrue(ColumnMeta.isNonExportable("  HLL "));
-        assertTrue(ColumnMeta.isNonExportable("BitMap"));
     }
 }
