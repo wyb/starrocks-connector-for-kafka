@@ -128,7 +128,7 @@
 
 <h2 id="map"><span class="no">1</span>先看全景</h2>
 
-<p>17 个类分四层，外加 <code>common</code> 包的 2 个（<code>Version</code> 与 sink 共用，<code>KeyValueListParser</code> 只有 source 用）。数据访问层在复杂类型原生化之后多了 <code>ValueReader</code> 及其两个传输子类（<code>MysqlValueReader</code>/<code>ArrowValueReader</code>）——取值与转换都在这里，按 <code>ColumnType</code> 办事；记录映射层是 <code>ChangeRecordMapper</code> 加类型树（<code>ColumnTypeParser</code>/<code>ColumnType</code>）；DATE/DATETIME 的文本格式住在 <code>ValueReader</code> 基类里，Arrow 专用的换算在它的子类里。</p>
+<p>18 个类分四层，外加 <code>common</code> 包的 2 个（<code>Version</code> 与 sink 共用，<code>KeyValueListParser</code> 只有 source 用）。数据访问层在复杂类型原生化之后多了 <code>ValueReader</code> 及其两个传输子类（<code>MysqlValueReader</code>/<code>ArrowValueReader</code>）——取值与转换都在这里，按 <code>ColumnType</code> 办事；记录映射层是 <code>ChangeRecordMapper</code> 加类型树（<code>ColumnTypeParser</code>/<code>ColumnType</code>）；DATE/DATETIME 的文本格式住在 <code>ValueReader</code> 基类里，Arrow 专用的换算在它的子类里。</p>
 
 <figure>
 <div class="figwrap">
@@ -242,8 +242,8 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 <ol>
     <li><code>fetchTableConfig</code> 的 <code>model</code> 为空（<code>null</code> 或空串）→ <strong>直接拒绝</strong>。视图、物化视图、外表不是 <code>OlapTable</code>，<code>InformationSchemaDataSource</code> 不会给它们设 <code>table_model</code>，BE 把未设置的 thrift 字段填成 <code>""</code>——所以"未知"长得像空串而不是 null。把它当放行会让后面每一项检查都通过，表最终死在 <code>bookmark_create</code>。</li>
 <li><code>model</code> 含 <code>UNQ</code> 或 <code>UNIQUE</code> 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。两种拼写都匹配，因为 FE 实际发 <code>UNIQUE_KEYS</code>，而文档里写的是 <code>UNQ_KEYS</code>；主键那一侧只需一个子串——<code>"PRIMARY"</code> 本身就含 <code>"PRI"</code>。</li>
-  <li>含 <code>PRI</code> → 再看 <code>cdcEnabled()</code>（到这一步才解析同一行的 <code>PROPERTIES</code>），未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
   <li>含 <code>DUP</code> → 记一条 WARN，见下。<code>AGG</code> 与 <code>PRI</code> 都不警告。</li>
+  <li>含 <code>PRI</code> → 再看 <code>cdcEnabled()</code>（到这一步才解析同一行的 <code>PROPERTIES</code>），未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
   <li><code>fetchColumns</code> 遍历每列，四项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；ARRAY/MAP/STRUCT 列的 <code>COLUMN_TYPE</code> 解析失败（<code>type.kind == OPAQUE</code>）则记 WARN 但放行——该列退化为文本，不会得到错的 schema；<code>isUnrecognized</code> 为真（类型名不在 <code>KNOWN_DATA_TYPES</code> 封闭集里）则记 WARN 但放行——文本能保住值，只是说明 StarRocks 长出了本连接器没听说过的类型。</li>
 </ol>
 <p>整段包在 <code>try/catch (SQLException)</code> 里，任何 SQL 异常都包成 <code>ConnectException</code> 并带上表名——包括"表不存在"。</p>
@@ -281,7 +281,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 <h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">312 行</span></h3>
 <p class="role">一个 <code>AbstractConfig</code>：15 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
 
-<p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>
+<p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有四处：</p>
 
 <ul>
   <li><strong><code>topicFor(table)</code></strong>：先查 <code>starrocks.table2topic.map</code>，没有映射才回落到 <code>&lt;prefix&gt;.&lt;db&gt;.&lt;table&gt;</code>。</li>
@@ -459,9 +459,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>streamChanges</code></td><td>同上，另外从 <code>cols.size()+1</code> 和 <code>+2</code> 读出两个伪列</td></tr>
 </table>
 </div>
-<p>每个查询方法都以 <code>catch (SQLException e) { connection.closeIfBroken(e); throw e; }</code> 收尾——连接坏了就丢掉，下次 <code>get()</code> 会重建；两个流式方法在丢连接和抛出之间多一步 <code>classify</code>。</p>
+<p>直接发查询的方法（<code>fetch*</code>、<code>stream*</code>）都以 <code>catch (SQLException e) { connection.closeIfBroken(e); throw e; }</code> 收尾——连接坏了就丢掉，下次 <code>get()</code> 会重建；两个流式方法在丢连接和抛出之间多一步 <code>classify</code>。三个 bookmark 方法经 <code>executeOnLeader</code>，由它自己做这件事。</p>
 
-<h3 id="FeConnection"><span class="fn">FeConnection</span><span class="sz">310 行</span></h3>
+<h3 id="FeConnection"><span class="fn">FeConnection</span><span class="sz">304 行</span></h3>
 <p class="role">连接的一切：URL 扇出、传输判定、复用、leader 轮转、有界重试。</p>
 
 <h4>驱动注册——按 URL 只加载一个</h4>
@@ -477,7 +477,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>最后这点是必要的：Arrow Flight 的明文服务端需要 <code>?useEncryption=false</code>，只挂在最后一个 host 上会让前面的连接全部失败。</p>
 
 <h4>executeOnLeader(sql)</h4>
-<p>两层循环。外层按 URL 个数轮转，内层按 <code>maxRetries()</code> 重试。<code>isLeaderRedirect</code>（消息含 "must run on the FE leader"）→ 关连接、轮转、跳出内层；其他 <code>SQLException</code> → <code>closeIfBroken</code> 后在同一 URL 上重试并 sleep，重试用尽即抛出，<strong>不会换到下一个 URL</strong>。外层只有 leader 重定向才推进，转满一圈仍未成功则抛出最后一个异常。也就是说逗号分隔的多个 FE 只提供 leader 跟随，不提供节点故障转移——<code>rotateUrl()</code> 全仓只有这一个调用点，数据路径的 <code>get()</code> 始终用当前下标。</p>
+<p>两层循环。外层按 URL 个数轮转，内层在同一 URL 上最多尝试 <code>source.max.retries</code> 次（是总次数，不是失败后的重试次数）。<code>isLeaderRedirect</code>（消息含 "must run on the FE leader"）→ 关连接、轮转、跳出内层；其他 <code>SQLException</code> → <code>closeIfBroken</code> 后在同一 URL 上重试并 sleep，重试用尽即抛出，<strong>不会换到下一个 URL</strong>。外层只有 leader 重定向才推进，转满一圈仍未成功则抛出最后一个异常。也就是说逗号分隔的多个 FE 只提供 leader 跟随，不提供节点故障转移——<code>rotateUrl()</code> 全仓只有这一个调用点，数据路径的 <code>get()</code> 始终用当前下标。</p>
 
 <div class="note warn">
   <span class="tag">STREAM_FETCH_SIZE = 1024，不能是 Integer.MIN_VALUE</span>
@@ -607,7 +607,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <h3 id="FakeCdcClient"><span class="fn">FakeCdcClient</span><span class="sz">272 行 · 无 @Test</span></h3>
 <p class="role">Connector 与 Task 两套测试共用的可编排替身。</p>
 <p><strong>编排输入</strong>：八个方法——<code>setColumns</code>/<code>setKeyColumns</code>/<code>setHeldBookmarks</code>/<code>enqueueHead</code>/<code>enqueueSnapshotRows</code>/<code>enqueueChanges</code>/<code>failNextChangesWithNonTrackable</code>/<code>failNextChangesAfterEmitting</code>；外加可直接写的字段：<code>modelByTable</code>、<code>cdcEnabledByTable</code>、<code>colsByTable</code>，全局的 <code>bookmarkCreateFailure</code>/<code>bookmarkRenewFailure</code>/<code>heldBookmarksFailure</code>，按表的 <code>changesFailureByTable</code>/<code>snapshotFailureByTable</code>（在回放完排好的行<em>之后</em>抛一次 <code>SQLException</code>，所以能编排出真正的半截窗口，让一张坏表挨着健康的表），<code>nonTrackableMessage</code>，以及续租那一组 <code>failRenewOfBookmarks</code>/<code>grantedTtlMs</code>/<code>grantedTtlByBookmark</code>。<code>grantedTtlMs</code> 模拟集群上限：留 null 就原样返回请求值，设值就无视请求值——续租节奏是否真的跟着服务端走，靠它来验；<code>grantedTtlByBookmark</code> 让同一轮里不同 id 拿到不同租约。</p>
-<p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>renewedBookmarks</code>、<code>requestedTtls</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>snapshotCalls</code>。</p>
+<p><strong>记录输出</strong>：<code>createdBookmarks</code>、<code>releasedBookmarks</code>、<code>renewedBookmarks</code>、<code>requestedTtls</code>、<code>createHolders</code>、<code>releaseHolders</code>、<code>streamedWindows</code>、<code>heldBookmarkQueries</code>、<code>snapshotCalls</code>。</p>
 <p><code>bookmarkCreate</code> 的三段逻辑值得留意：队列非空就出队；队列空但见过该表就<strong>重复上次的值</strong>（这就是 idle dedup 的模拟）；从没编排过就用自增计数器（Connector 的 preflight 探针走这条）。</p>
 
 <h2 id="scripts"><span class="no">8</span>集成脚本</h2>
@@ -635,7 +635,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
   <li><strong>7</strong> DATE 与 DATETIME 在两条传输上都断言精确字符串。arrow-flight 上驱动的 JVM 时区平移由连接器按传输逆转（第一次真集群冒烟时顶层 <code>ts</code> 是 04:34 而嵌套 <code>adt</code> 是 12:34，同一条记录里自相矛盾，这就是修它的起点）</li>
   <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>
-  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>/tmp/sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
+  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>$TMPDIR</code> 或 <code>/tmp</code> 下的 <code>sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
   <li><strong>11</strong> preflight 拒绝含 HLL 列的表并指明列名——同时证明 StarRocks 类型名在当前通道上确实传到了守卫</li>
 </ol>
 

@@ -59,7 +59,7 @@ final class FeConnection implements AutoCloseable {
     /**
      * Run on every MySQL-protocol connection. The text form of a nested VARBINARY is governed by
      * two session variables that default to exactly this, but a cluster may set them globally:
-     * {@code raw} would put undecodable bytes in the text {@link MysqlTextReader} scans, and
+     * {@code raw} would put undecodable bytes in the text {@link MysqlValueReader} scans, and
      * {@code all} would hex-encode top-level VARBINARY under {@code getBytes()}. Pinning them makes
      * the reader's assumption true whatever the cluster says. Arrow Flight carries binary as
      * binary and does not consult either.
@@ -238,17 +238,11 @@ final class FeConnection implements AutoCloseable {
     }
 
     /**
-     * Loads only the driver this URL selects. Registering both eagerly killed the MySQL transport
-     * on a Java 8 worker: the Arrow driver is compiled for Java 11, so {@code Class.forName} throws
-     * {@link UnsupportedClassVersionError} -- a {@link LinkageError}, not a
-     * {@link ClassNotFoundException} -- which escaped the handler below as an
-     * {@code ExceptionInInitializerError} and left the class permanently unusable.
-     *
-     * <p>Explicit registration at all, rather than {@link java.sql.DriverManager}'s
-     * {@link java.util.ServiceLoader} discovery, because Connect's per-plugin classloader isolation
-     * defeats it.
+     * The one driver a URL needs. Loading both broke Java 8 workers: the Arrow driver is compiled
+     * for Java 11, so {@code Class.forName} threw a {@link LinkageError} that left the class unusable.
+     * Registered explicitly because Connect's per-plugin classloader defeats {@link java.sql.DriverManager}'s
+     * {@link java.util.ServiceLoader} discovery.
      */
-    /** The one driver a URL needs. Loading the other as well is what broke Java 8 workers. */
     static String driverClassFor(String url) {
         return url.startsWith(ARROW_FLIGHT_SCHEME_PREFIX) ? ARROW_FLIGHT_DRIVER : MARIADB_DRIVER;
     }
