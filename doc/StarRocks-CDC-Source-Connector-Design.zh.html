@@ -413,7 +413,7 @@
   </div>
 </div>
 
-<p>辅助类：<code>SqlBuilder</code>（纯静态 SQL 构造，统一标识符/字面量转义）、<code>OffsetState</code>（offset map 编解码）、<code>ColumnMeta</code>（一列的服务端描述与由此折成的 <code>ColumnType</code>）、<code>NonTrackableException</code>（把服务端多种"不可追踪"错误归一化）。跨 sink/source 复用的部分放在 <code>com.starrocks.connector.kafka.common</code>：<code>Version</code>（版本号唯一来源，构建期由 Maven 过滤写入资源文件）与 <code>KeyValueListParser</code>（<code>a:b,a:b</code> 配置格式的唯一解析器）。</p>
+<p>辅助类：<code>SqlBuilder</code>（纯静态 SQL 构造，统一标识符/字面量转义）、<code>OffsetState</code>（offset map 编解码）、<code>ColumnMeta</code>（一列的服务端描述与由此折成的 <code>ColumnType</code>）、<code>TableConfig</code>（一行 <code>tables_config</code>：模型与属性）、<code>NonTrackableException</code>（把服务端多种"不可追踪"错误归一化）。跨 sink/source 复用的部分放在 <code>com.starrocks.connector.kafka.common</code>：<code>Version</code>（版本号唯一来源，构建期由 Maven 过滤写入资源文件）与 <code>KeyValueListParser</code>（<code>a:b,a:b</code> 配置格式的唯一解析器）。</p>
 
 <div class="invariant">
   <span class="tag">为什么要拆</span>

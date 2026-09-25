@@ -29,56 +29,56 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Reading the CDC property out of {@code information_schema.tables_config.PROPERTIES}. Everything
- * else on {@link StarRocksJdbcClient} needs a server and is covered by the integration smoke test.
+ * Reading the CDC property out of {@code information_schema.tables_config.PROPERTIES}.
  *
  * <p>FE writes that column as {@code new Gson().toJson(table.getProperties())} over a
  * {@code Map<String, String>}, so values are JSON strings, not JSON booleans. The samples below
  * keep that shape.
  */
-public class StarRocksJdbcClientTest {
+public class TableConfigTest {
 
     private static final String REAL_PK_TABLE_PROPERTIES =
             "{\"compression\":\"LZ4\",\"datacache.enable\":\"true\","
                     + "\"enable_change_data_capture\":\"%s\",\"enable_persistent_index\":\"true\","
                     + "\"replication_num\":\"1\",\"storage_volume\":\"builtin_storage_volume\"}";
 
-    private static boolean enabledFor(String value) throws SQLException {
-        return StarRocksJdbcClient.changeDataCaptureEnabled(
-                "db1", "t1", String.format(REAL_PK_TABLE_PROPERTIES, value));
+    private static boolean enabledFor(String properties) throws SQLException {
+        return new TableConfig("db1", "t1", 1L, "PRIMARY_KEYS", properties).cdcEnabled();
+    }
+
+    private static boolean enabledForValue(String value) throws SQLException {
+        return enabledFor(String.format(REAL_PK_TABLE_PROPERTIES, value));
     }
 
     @Test
     public void testPropertyIsReadFromTheJsonMap() throws Exception {
-        assertTrue(enabledFor("true"));
-        assertFalse(enabledFor("false"));
+        assertTrue(enabledForValue("true"));
+        assertFalse(enabledForValue("false"));
     }
 
     /** The property's value is FE's Boolean.toString(); its casing is not a contract. */
     @Test
     public void testValueCasingIsIgnored() throws Exception {
-        assertTrue(enabledFor("TRUE"));
-        assertTrue(enabledFor("True"));
+        assertTrue(enabledForValue("TRUE"));
+        assertTrue(enabledForValue("True"));
     }
 
     /** FE omits the key entirely unless the table is a cloud-native primary-key table. */
     @Test
     public void testMissingKeyIsNotEnabled() throws Exception {
-        assertFalse(StarRocksJdbcClient.changeDataCaptureEnabled(
-                "db1", "t1", "{\"compression\":\"LZ4\",\"replication_num\":\"1\"}"));
-        assertFalse(StarRocksJdbcClient.changeDataCaptureEnabled("db1", "t1", "{}"));
+        assertFalse(enabledFor("{\"compression\":\"LZ4\",\"replication_num\":\"1\"}"));
+        assertFalse(enabledFor("{}"));
     }
 
     /**
      * A value that cannot be read must not answer "false": preflight would then tell an operator to
-     * run an ALTER enabling a property that is already on. This is the failure the SHOW CREATE TABLE
-     * substring match could produce silently, and the reason for moving to a parsed format.
+     * run an ALTER enabling a property that is already on.
      */
     @Test
     public void testUnreadablePropertiesThrowRatherThanReportDisabled() {
         for (String broken : new String[] {null, "", "   ", "not json", "{\"a\":", "[]", "\"a\"", "42"}) {
             try {
-                StarRocksJdbcClient.changeDataCaptureEnabled("db1", "t1", broken);
+                enabledFor(broken);
                 fail("expected a SQLException for PROPERTIES=" + broken);
             } catch (SQLException expected) {
                 assertTrue("message should name the table, was: " + expected.getMessage(),

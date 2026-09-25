@@ -58,9 +58,8 @@ public interface CdcClient extends AutoCloseable {
 
     List<String> fetchKeyColumns(String db, String table) throws SQLException;
 
-    String fetchTableModel(String db, String table) throws SQLException;
-
-    boolean cdcPropertyEnabled(String db, String table) throws SQLException;
+    /** The table's {@code tables_config} row; a table it does not list is an SQLException. */
+    TableConfig fetchTableConfig(String db, String table) throws SQLException;
 
     /** @param cols from {@link #fetchColumns}; it both names the columns and types the values read
      *              back, so the read side never re-derives types from the driver. */

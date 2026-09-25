@@ -124,7 +124,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      */
     private void preflightCheckTable(CdcClient client, String db, String table) {
         try {
-            String model = client.fetchTableModel(db, table);
+            TableConfig cfg = client.fetchTableConfig(db, table);
+            String model = cfg.model;
             // Empty, not null, is what "unknown" looks like: InformationSchemaDataSource sets
             // table_model only after casting to OlapTable, so a view or an external table leaves the
             // thrift field unset and the BE fills the column with "". Treating that as permission
@@ -153,9 +154,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                         + "every row sharing the deleted row's key.",
                         db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
             }
-            // "PRIMARY_KEYS" contains "PRI". && short-circuits, so cdcPropertyEnabled's query runs
-            // only for a primary key table.
-            if (model.contains("PRI") && !client.cdcPropertyEnabled(db, table)) {
+            // "PRIMARY_KEYS" contains "PRI"; only a primary key table can carry the property.
+            if (model.contains("PRI") && !cfg.cdcEnabled()) {
                 throw new ConnectException(
                         "primary key table " + db + "." + table + " does not have change data capture enabled; "
                                 + "run: ALTER TABLE " + db + "." + table

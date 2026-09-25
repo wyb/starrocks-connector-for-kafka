@@ -134,7 +134,7 @@ public class TransportBench {
         if (mutation == null) {
             return;
         }
-        if (!mysql.cdcPropertyEnabled(db, table)) {
+        if (!mysql.fetchTableConfig(db, table).cdcEnabled()) {
             report.note(table + ": enable_change_data_capture is off, CHANGES skipped");
             return;
         }
