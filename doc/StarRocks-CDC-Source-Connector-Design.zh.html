@@ -642,7 +642,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <div class="tablewrap">
 <table>
   <tr><th>取值</th><th>含义</th></tr>
-  <tr><td><code>durableBookmarkOf(t)</code></td><td><code>context.offsetStorageReader().offset(sourcePartition(db, table))</code> 里的 <code>bookmark_id</code>。读不到、拿不到 reader、或字段不是数字时为 <code>-1</code>。</td></tr>
+  <tr><td><code>durableBookmarks()</code></td><td>一次 <code>offsetStorageReader().offsets(全部 sourcePartition)</code> 读回，取每表的 <code>bookmark_id</code>。读不到、拿不到 reader、或字段不是数字时为 <code>-1</code>；整次读失败则本轮不释放。</td></tr>
   <tr><td><code>t.committedBookmark</code></td><td>本 task 自己已经推进到的位置。<code>volatile</code>：commit 线程读，poll 线程写。</td></tr>
   <tr><td><code>fence</code></td><td><code>Math.min(durable, committedBookmark)</code>。<code>&lt; 0</code> 时本轮不释放该表。</td></tr>
 </table>
@@ -654,7 +654,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <p><code>Math.min</code> 那一步是跨代保护：offset store 以 connector 名而非 task 世代为键，一个仍在 flush 的僵尸前任会让 store 的答案越过本 task 自己的位置——不钳制的话，task 就会释放掉它自己刚刚恢复所依赖的那个 bookmark。</p>
 
-<p>读失败按表隔离：记一条 WARN，该表的释放推迟到下一次 <code>commit()</code>，不影响其余表，也不失败 task。读被中断则恢复中断标志并整轮返回——继续下去只会让剩下每张表各自在自己的读上再阻塞一次，而中断信息已经丢了。</p>
+<p>offset store 一次读回全部表。读失败记一条 WARN，本轮不释放任何 bookmark，推迟到下一次 <code>commit()</code>，不失败 task。读被中断则恢复中断标志后返回——Connect 的 reader 把中断包成 <code>ConnectException</code>，不恢复标志。</p>
 
 <figure>
 <div class="figwrap">
@@ -706,7 +706,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <text class="ts" x="400" y="285">fence 自身永不释放，它就是恢复点。</text>
 </svg>
 </div>
-<figcaption><b>图 4</b><code>commit()</code> 不携带任何 offset 信息，且在零次 flush 时也会被调用，所以"commit 过了"推不出"落盘了"。task 因此在每次 <code>commit()</code> 里逐表读一次 offset store：#1 落在 flush→B2 之前，store 仍答 B1，于是不释放任何东西；#2 时 store 已答 B2，B1 才被释放，而那时它早已不是任何恢复点。</figcaption>
+<figcaption><b>图 4</b><code>commit()</code> 不携带任何 offset 信息，且在零次 flush 时也会被调用，所以"commit 过了"推不出"落盘了"。task 因此在每次 <code>commit()</code> 里读一次 offset store：#1 落在 flush→B2 之前，store 仍答 B1，于是不释放任何东西；#2 时 store 已答 B2，B1 才被释放，而那时它早已不是任何恢复点。</figcaption>
 </figure>
 
 <h3>3.4 租约续期</h3>

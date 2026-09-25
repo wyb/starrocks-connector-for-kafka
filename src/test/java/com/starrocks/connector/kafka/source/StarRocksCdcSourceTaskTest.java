@@ -84,7 +84,7 @@ public class StarRocksCdcSourceTaskTest {
     private final Map<Map<String, String>, Map<String, Object>> durableOffsets = new HashMap<>();
 
     /** Tables whose offset read throws instead of answering -- it does IO and can be closed. */
-    private final Set<String> offsetReadFailures = new HashSet<>();
+    private boolean offsetReadFails;
 
     /** Records the offset Connect would have flushed for {@code table} at {@code bookmarkId}. */
     private void flushOffset(String table, long bookmarkId) {
@@ -96,17 +96,24 @@ public class StarRocksCdcSourceTaskTest {
         OffsetStorageReader reader = new OffsetStorageReader() {
             @Override
             public <T> Map<String, Object> offset(Map<String, T> partition) {
-                Object name = partition.get(OffsetState.KEY_TABLE);
-                if (name != null && offsetReadFailures.contains(name.toString())) {
-                    throw new org.apache.kafka.connect.errors.ConnectException("Failed to fetch offsets.");
-                }
-                return store.get(partition);
+                return offsets(Collections.singletonList(partition)).get(partition);
             }
 
+            /** Like Connect's: one read for every partition, or one failure for all of them. */
             @Override
             public <T> Map<Map<String, T>, Map<String, Object>> offsets(
                     Collection<Map<String, T>> partitions) {
-                throw new UnsupportedOperationException("unused by the task");
+                if (offsetReadFails) {
+                    throw new org.apache.kafka.connect.errors.ConnectException("Failed to fetch offsets.");
+                }
+                Map<Map<String, T>, Map<String, Object>> out = new HashMap<>();
+                for (Map<String, T> partition : partitions) {
+                    Map<String, Object> offset = store.get(partition);
+                    if (offset != null) {
+                        out.put(partition, offset);
+                    }
+                }
+                return out;
             }
         };
         return new SourceTaskContext() {
@@ -1733,7 +1740,7 @@ public class StarRocksCdcSourceTaskTest {
      * failure silently stops reclaiming for the rest of the task.
      */
     @Test
-    public void testAFailedOffsetReadDoesNotSkipTheRemainingTables() throws Exception {
+    public void testAFailedOffsetReadDefersEveryReleaseToTheNextCommit() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders,items");
         props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders,items");
@@ -1749,15 +1756,20 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
         flushOffset("items", 501L);
 
-        // orders is read first and throws; items must still be reclaimed.
-        offsetReadFailures.add("orders");
+        // The store is read once for every table, so a failed read releases nothing this round.
+        offsetReadFails = true;
         try {
             task.commit();
         } finally {
-            offsetReadFailures.clear();
+            offsetReadFails = false;
         }
         pollToFlushReleases();
-        assertEquals("a throwing read for one table must not skip the next",
+        assertEquals("nothing is released on a failed read",
+                Arrays.asList(500L, 501L), liveBookmarksOf(task, "items"));
+
+        task.commit();
+        pollToFlushReleases();
+        assertEquals("the next commit reclaims what the failed one deferred",
                 Collections.singletonList(501L), liveBookmarksOf(task, "items"));
     }
 

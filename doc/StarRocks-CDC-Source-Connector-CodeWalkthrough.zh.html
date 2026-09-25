@@ -305,9 +305,9 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">658 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">665 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
-<p>文件按生命周期排：<code>start</code> 一组（<code>parseTaskTables</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarkOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
+<p>文件按生命周期排：<code>start</code> 一组（<code>parseTaskTables</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarks</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
 <div class="tablewrap">
@@ -399,14 +399,15 @@ if (state.snapshotDone) {
 <p><code>policy=resnapshot</code> → 记 WARN，把表打回 fresh（<code>snapshotDone=false</code>、<code>committedBookmark=-1</code>），下次 poll 重做快照。<strong>不动 <code>liveBookmarks</code></strong>——刚才那次失败的窗口所开的 bookmark 在服务端是真实存在的，仍归 <code>commit()</code> 的规则和 TTL 管。<br><code>policy=fail</code> → 记 ERROR 并抛 <code>ConnectException</code>。两条消息末尾都附 <code>leaseStateNote</code>——上次续租距今多久、服务端授予多长——只陈述事实，不推断原因：FE 点名 bookmark 的报错来自分区 drop/重写/reshard，而租约真过期反而表现为 BE 的 ancestor-chain 错误，两个方向都猜错过。</p>
 
 <h4>commit() —— offset committer 线程</h4>
-<pre><code>long durable = durableBookmarkOf(t);      // 读 offset store，读不到为 -1
-long fence   = Math.min(durable, t.committedBookmark);
-if (fence &lt; 0) continue;
-迭代 liveBookmarks，凡 live &lt; fence 的移出并放进 pendingReleases</code></pre>
-<p><code>durableBookmarkOf</code> 走 <code>context.offsetStorageReader().offset(sourcePartition(db, table))</code>，取里面的 <code>bookmark_id</code>。不从"<code>commit()</code> 被调用了"去推断落盘进度：<code>WorkerSourceTask.commitOffsets()</code> 在 <code>shouldFlush</code> 为假时也会调 <code>commitSourceTask()</code>，一次 flush 都没发生。</p>
-<p>方向上是安全的：<code>OffsetStorageReaderImpl.offset()</code> 是穿透读，看不到尚未 flush 的写入，所以只会偏旧不会偏新，而偏旧只是这一轮少释放几个。</p>
+<pre><code>Map&lt;String, Long&gt; durable = durableBookmarks();   // 一次读回全部表；读失败为 null，本轮不释放
+对每张表 t：
+  long fence = Math.min(durable.getOrDefault(t.table, -1), t.committedBookmark);
+  if (fence &lt; 0) continue;
+  迭代 liveBookmarks，凡 live &lt; fence 的移出并放进 pendingReleases</code></pre>
+<p><code>durableBookmarks</code> 把全部表的 partition 一次交给 <code>offsetStorageReader().offsets(...)</code>，取每个的 <code>bookmark_id</code>——Connect 的 <code>offset(partition)</code> 只是 <code>offsets(singletonList)</code> 的委托，每次调用都是一趟 offset topic 的读到末尾，逐表读就是 N 趟。不从"<code>commit()</code> 被调用了"去推断落盘进度：<code>WorkerSourceTask.commitOffsets()</code> 在 <code>shouldFlush</code> 为假时也会调 <code>commitSourceTask()</code>，一次 flush 都没发生。</p>
+<p>方向上是安全的：<code>OffsetStorageReaderImpl.offsets()</code> 是穿透读，看不到尚未 flush 的写入，所以只会偏旧不会偏新，而偏旧只是这一轮少释放几个。</p>
 <p><code>Math.min</code> 是跨代保护：offset store 以 connector 名而非 task 世代为键，仍在 flush 的僵尸前任会让答案越过本 task 自己的位置，不钳制就会释放掉本 task 刚恢复所依赖的那个 bookmark。</p>
-<p>读失败按表隔离——记 WARN、该表推迟到下次 <code>commit()</code>，不影响其余表；读被中断则恢复中断标志并整轮返回，否则剩下每张表都会各自在自己的读上再阻塞一次。</p>
+<p>读失败记一条 WARN，全部释放推迟到下次 <code>commit()</code>；读被中断则恢复中断标志后返回——Connect 的 reader 把中断包成 <code>ConnectException</code>，不恢复标志。</p>
 <p><strong>这个方法不发任何 SQL</strong>，只读 offset store 和入队。</p>
 
 <h3 id="OffsetState"><span class="fn">OffsetState</span><span class="sz">85 行</span></h3>

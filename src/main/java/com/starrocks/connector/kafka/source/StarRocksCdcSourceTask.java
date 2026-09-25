@@ -35,6 +35,7 @@ import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Deque;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
@@ -48,7 +49,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  * {@code StarRocksCdcSourceTaskTest}:
  * <ol>
  *   <li>Releases are fenced by the durable offset, read back from the offset store, never by acks.
- *       See {@link #commit()} and {@link #durableBookmarkOf}.</li>
+ *       See {@link #commit()} and {@link #durableBookmarks}.</li>
  *   <li>Snapshot rows carry {@code snapshot_done=false}, change records {@code true}, so a crash
  *       mid-snapshot redoes it whole rather than resuming a half-delivered one.</li>
  *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window; an
@@ -564,27 +565,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (tables == null) {
             return;
         }
+        Map<String, Long> durable = durableBookmarks();
+        if (durable == null) {
+            return;
+        }
         for (TableState t : tables) {
-            long durable;
-            try {
-                durable = durableBookmarkOf(t);
-            } catch (RuntimeException e) {
-                if (e.getCause() instanceof InterruptedException) {
-                    // Connect's reader clears the flag and rewraps, so restore it and stop: the
-                    // remaining tables would each block on their own read with the interrupt lost.
-                    Thread.currentThread().interrupt();
-                    return;
-                }
-                // The read does IO and can fail or be closed under us. One unreadable table must
-                // not skip the releases of every table after it.
-                LOG.warn("Could not read the durable offset for {}.{}; releases wait for the next "
-                        + "commit", db, t.table, e);
-                continue;
-            }
             // Never above this task's own position. The offset store is keyed by connector name,
             // not by task generation, so a zombie predecessor still flushing would otherwise let
             // this task release the very bookmark it resumed from.
-            long fence = Math.min(durable, t.committedBookmark);
+            long fence = Math.min(durable.getOrDefault(t.table, -1L), t.committedBookmark);
             if (fence < 0) {
                 continue;
             }
@@ -602,22 +591,40 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * The bookmark Connect has actually made durable for this table, or {@code -1} when it has none.
+     * The bookmark Connect has actually made durable, per table, {@code -1} where it has none; null
+     * when the store could not be read, which defers every release to the next commit. One read
+     * for all tables: Connect's per-partition {@code offset} is a pass over the offset topic each.
      * Read from the offset store rather than tracked here: a max over acked records is an upper
      * bound on durability, never a lower one, and {@code commitRecord} also fires for records a
      * transformation filtered or {@code errors.tolerance=all} dropped, which are never written.
      */
-    private long durableBookmarkOf(TableState t) {
+    private Map<String, Long> durableBookmarks() {
+        Map<String, Long> result = new HashMap<>();
         if (context == null || context.offsetStorageReader() == null) {
-            return -1L;
+            return result;
         }
-        Map<String, Object> offset =
-                context.offsetStorageReader().offset(OffsetState.sourcePartition(db, t.table));
-        if (offset == null) {
-            return -1L;
+        List<Map<String, String>> partitions = new ArrayList<>(tables.size());
+        for (TableState t : tables) {
+            partitions.add(OffsetState.sourcePartition(db, t.table));
         }
-        Object raw = offset.get(OffsetState.KEY_BOOKMARK_ID);
-        return raw instanceof Number ? ((Number) raw).longValue() : -1L;
+        Map<Map<String, String>, Map<String, Object>> offsets;
+        try {
+            offsets = context.offsetStorageReader().offsets(partitions);
+        } catch (RuntimeException e) {
+            if (e.getCause() instanceof InterruptedException) {
+                // Connect's reader wraps the interrupt without restoring the flag.
+                Thread.currentThread().interrupt();
+            } else {
+                LOG.warn("Could not read the durable offsets; releases wait for the next commit", e);
+            }
+            return null;
+        }
+        for (TableState t : tables) {
+            Map<String, Object> offset = offsets == null ? null : offsets.get(OffsetState.sourcePartition(db, t.table));
+            Object raw = offset == null ? null : offset.get(OffsetState.KEY_BOOKMARK_ID);
+            result.put(t.table, raw instanceof Number ? ((Number) raw).longValue() : -1L);
+        }
+        return result;
     }
 
     @Override
