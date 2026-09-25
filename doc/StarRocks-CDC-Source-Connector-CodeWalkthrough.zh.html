@@ -305,9 +305,9 @@ for (int i = 0; i &lt; tables.size(); i++)
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">660 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">658 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
-<p>文件按生命周期排：<code>start</code> 一组（<code>restoreOffset</code>、<code>adoptHeldBookmarks</code>、<code>parseTaskTables</code>），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarkOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
+<p>文件按生命周期排：<code>start</code> 一组（<code>parseTaskTables</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarkOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
 <div class="tablewrap">

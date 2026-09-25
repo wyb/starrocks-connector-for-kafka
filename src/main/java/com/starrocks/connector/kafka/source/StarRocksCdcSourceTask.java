@@ -61,6 +61,8 @@ import java.util.concurrent.ConcurrentLinkedQueue;
  */
 public class StarRocksCdcSourceTask extends SourceTask {
 
+    private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceTask.class);
+
     /**
      * Caps the renewal interval whatever the lease says, because the cluster ceiling is mutable: a
      * lease learned once goes stale the moment an operator lowers it. Not a safe floor for the
@@ -68,8 +70,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * by a poll plus a round trip.
      */
     private static final long RENEW_MAX_INTERVAL_MS = 300_000L;
-
-    private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceTask.class);
 
     static final class TableState {
         final String table;
@@ -95,9 +95,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // Failure backoff, so a cluster without bookmark_renew is not retried on every poll:
         // executeOnLeader's retries would put ~1s of sleep per bookmark per poll on this thread.
         long lastRenewAttemptMs = -1L;
+        long renewBackoffMs = 0L;
         // One warning per table, not one per round, when the poll interval cannot service the lease.
         boolean warnedPollOutpacesLease = false;
-        long renewBackoffMs = 0L;
         // Monotonic ms of the first failed poll in the current run of failures; -1 after a success.
         long firstFailureMs = -1L;
 
@@ -107,12 +107,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    private StarRocksCdcSourceConfig config;
     private CdcClient client;
     private String db;
     private String holder;
     private long ttlMs;
-    private long monotonicOriginNanos = Long.MIN_VALUE;
     private long pollIntervalMs;
     private long pollRetryTimeoutMs;
     private boolean snapshotInitial;
@@ -121,6 +119,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     // Package-visible so tests can reach a started task's per-table state directly.
     List<TableState> tables;
+    /** Origin of {@link #monotonicMs}, taken at its first reading. */
+    private long monotonicOriginNanos = Long.MIN_VALUE;
 
     @Override
     public String version() {
@@ -129,7 +129,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     @Override
     public void start(Map<String, String> props) {
-        config = new StarRocksCdcSourceConfig(props);
+        StarRocksCdcSourceConfig config = new StarRocksCdcSourceConfig(props);
         db = config.databaseName();
         holder = config.holderId();
         ttlMs = config.bookmarkTtlMs();
@@ -169,21 +169,18 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /**
-     * Restores one table from its durable offset. Only {@code snapshot_done=true} is trusted;
-     * anything else leaves the table fresh so the next poll redoes the snapshot. Package-visible so
-     * tests can drive it without a real offset store.
-     */
-    void restoreOffset(TableState t, Map<String, Object> raw) {
-        OffsetState state = OffsetState.fromMap(raw);
-        if (state.snapshotDone) {
-            t.committedBookmark = state.bookmarkId;
-            t.snapshotDone = true;
-            // Not optional: without this the resumed bookmark is never released, leaking one per
-            // table per restart until its TTL. Safe, because commit() releases strictly below the
-            // durable offset, and at restore time this id is exactly that offset.
-            retain(t, state.bookmarkId);
+    private static List<String> parseTaskTables(String raw) {
+        List<String> result = new ArrayList<>();
+        if (raw == null) {
+            return result;
         }
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed);
+            }
+        }
+        return result;
     }
 
     /**
@@ -207,18 +204,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    private static List<String> parseTaskTables(String raw) {
-        List<String> result = new ArrayList<>();
-        if (raw == null) {
-            return result;
+    /**
+     * Restores one table from its durable offset. Only {@code snapshot_done=true} is trusted;
+     * anything else leaves the table fresh so the next poll redoes the snapshot. Package-visible so
+     * tests can drive it without a real offset store.
+     */
+    void restoreOffset(TableState t, Map<String, Object> raw) {
+        OffsetState state = OffsetState.fromMap(raw);
+        if (state.snapshotDone) {
+            t.committedBookmark = state.bookmarkId;
+            t.snapshotDone = true;
+            // Not optional: without this the resumed bookmark is never released, leaking one per
+            // table per restart until its TTL. Safe, because commit() releases strictly below the
+            // durable offset, and at restore time this id is exactly that offset.
+            retain(t, state.bookmarkId);
         }
-        for (String part : raw.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
-        }
-        return result;
     }
 
     /**
@@ -242,8 +242,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 t.firstFailureMs = -1L;
             } catch (NonTrackableException e) {
                 // These records carry this window's head; committing them would advance the durable
-                // position past a window never read to the end. Empty today -- the ORDER BY makes the
-                // scan blocking -- but the rule belongs here, not in one clause of SqlBuilder.
+                // position past a window never read to the end.
                 discardFrom(out, emittedBefore);
                 applyPolicy(t, e);
             } catch (SQLException e) {
@@ -364,8 +363,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
     /**
      * Leaves only the window's last record carrying {@code head}; the rest carry {@code base}.
      * Connect commits the longest <em>acked prefix</em>, not the batch, so with every record naming
-     * {@code head} an ack of the first alone declared the window durable and a crash dropped the
-     * rest -- 4999 of 5000, measured. Naming {@code base} costs a re-read bounded by one window.
+     * {@code head} an ack of the first alone would declare the window durable and a crash drop the
+     * rest. Naming {@code base} costs a re-read bounded by one window.
      */
     private static void demoteAllButLast(List<SourceRecord> out, int windowStart, long base) {
         if (out.size() - windowStart < 2) {
@@ -438,9 +437,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * The lease as it stood at the failure, stated as fact and not as a cause. Inferring the cause
-     * here was wrong in both directions: the FE messages naming a bookmark are dropped partitions,
-     * rewrites and reshards, while a lapsed lease surfaces as a BE ancestor-chain error.
+     * The lease as it stood at the failure, stated as fact, not as a cause: the FE messages naming
+     * a bookmark are dropped partitions, rewrites and reshards, while a lapsed lease surfaces as a
+     * BE ancestor-chain error.
      */
     private String leaseStateNote(TableState t, long nowMs) {
         if (t.effectiveTtlMs <= 0 || t.lastRenewMs < 0) {
@@ -459,8 +458,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         while ((id = t.pendingReleases.poll()) != null) {
             try {
                 client.bookmarkRelease(db, t.table, id, holder);
-                // INFO, not DEBUG: the only external sign reclamation is keeping up. Without it
-                // "no failures" and "nothing attempted" look identical.
+                // INFO: the only external sign that reclamation keeps up.
                 LOG.info("Released bookmark {} for {}.{}", id, db, t.table);
             } catch (Exception e) {
                 LOG.warn("Failed to release bookmark {} for {}.{} (holder {}); it stays pinned until its TTL "
