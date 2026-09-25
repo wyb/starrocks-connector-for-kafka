@@ -36,13 +36,13 @@ import java.util.Set;
  * The authoritative column list, used both to build the Connect schema and to read values back out.
  * One strategy for both transports: ask the server.
  */
-final class ColumnMetadataReader {
+final class ColumnMetaReader {
 
-    private static final Logger LOG = LoggerFactory.getLogger(ColumnMetadataReader.class);
+    private static final Logger LOG = LoggerFactory.getLogger(ColumnMetaReader.class);
 
     private final FeConnection connection;
 
-    ColumnMetadataReader(FeConnection connection) {
+    ColumnMetaReader(FeConnection connection) {
         this.connection = connection;
     }
 

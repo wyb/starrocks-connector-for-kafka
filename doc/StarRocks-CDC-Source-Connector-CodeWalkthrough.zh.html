@@ -118,7 +118,7 @@
     <li><a href="#map">先看全景</a></li>
     <li><a href="#entry">入口层</a><span class="toc-sub"><a href="#StarRocksCdcSourceConnector">StarRocksCdcSourceConnector</a><a href="#StarRocksCdcSourceConfig">StarRocksCdcSourceConfig</a></span></li>
     <li><a href="#state">状态机层</a><span class="toc-sub"><a href="#StarRocksCdcSourceTask">StarRocksCdcSourceTask</a><a href="#OffsetState">OffsetState</a><a href="#NonTrackableException">NonTrackableException</a></span></li>
-    <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetadataReader">ColumnMetadataReader</a><a href="#ValueReader">ValueReader</a><a href="#MysqlValueReader">MysqlValueReader</a><a href="#ArrowValueReader">ArrowValueReader</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
+    <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetaReader">ColumnMetaReader</a><a href="#ValueReader">ValueReader</a><a href="#MysqlValueReader">MysqlValueReader</a><a href="#ArrowValueReader">ArrowValueReader</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
     <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a><a href="#ColumnTypeParser">ColumnTypeParser</a><a href="#ColumnType">ColumnType</a></span></li>
     <li><a href="#common">common 包</a><span class="toc-sub"><a href="#Version">Version</a><a href="#KeyValueListParser">KeyValueListParser</a></span></li>
     <li><a href="#tests">测试</a><span class="toc-sub"><a href="#FakeCdcClient">FakeCdcClient</a></span></li>
@@ -167,7 +167,7 @@
   <text class="tm" x="20" y="215">FeConnection</text>
   <text class="ts" x="20" y="232">URL 扇出 · 连接 · leader 轮转 · 重试</text>
   <rect class="bx" x="266" y="196" width="248" height="44" rx="5"/>
-  <text class="tm" x="278" y="215">ColumnMetadataReader</text>
+  <text class="tm" x="278" y="215">ColumnMetaReader</text>
   <text class="ts" x="278" y="232">列清单（information_schema）· 重名与空表检查</text>
   <rect class="bx" x="524" y="196" width="248" height="44" rx="5"/>
   <text class="tm" x="536" y="215">ValueReader</text>
@@ -447,7 +447,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>bookmarkRenew</code></td><td>同样走 <code>executeOnLeader</code>，把返回的生效 TTL 解析成 long；null/非数字同 <code>bookmarkCreate</code> 转 <code>SQLException</code></td></tr>
   <tr><td><code>bookmarkRelease</code></td><td>一行转发</td></tr>
   <tr><td><code>fetchHeldBookmarks</code></td><td>先经 <code>fetchTableConfigRow</code> 拿 <code>TABLE_ID</code>，再按 <code>TABLE_ID + HOLDER_ID</code> 读 <code>information_schema.table_bookmark_references</code>，按 id 升序返回</td></tr>
-  <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetadataReader</code></td></tr>
+  <tr><td><code>fetchColumns</code></td><td>转发给 <code>ColumnMetaReader</code></td></tr>
   <tr><td><code>fetchKeyColumns</code></td><td>读 <code>information_schema.columns</code> 里 <code>COLUMN_KEY &lt;&gt; ''</code> 的列，按 <code>ORDINAL_POSITION</code> 排序。<strong>不读 <code>tables_config.PRIMARY_KEY</code></strong>——FE 算出了每种模型的 key 列却只对 PRI/UNI 发出来（<code>InformationSchemaDataSource:343-351</code>），AGG 和 DUP 会拿到空串</td></tr>
   <tr><td><code>fetchTableModel</code></td><td>同一行的 <code>TABLE_MODEL</code>；<code>fetchTableConfigRow</code> 一次取回 <code>TABLE_ID</code>/<code>TABLE_MODEL</code>/<code>PROPERTIES</code>，三个方法共用</td></tr>
   <tr><td><code>cdcPropertyEnabled</code></td><td>同一行的 <code>PROPERTIES</code>——FE 用 <code>new Gson().toJson(genProps(table))</code> 写出（<code>InformationSchemaDataSource</code>），是 JSON 对象，所以按 key 取而不是在 <code>SHOW CREATE TABLE</code> 文本里做子串匹配（那个格式取决于 FE <code>PrintableMap</code> 的引号与空格，变了就静默失配）。<strong>读不出来一律抛</strong>，不能答 false——那会让 preflight 叫运维去开一个已经开着的属性</td></tr>
@@ -482,7 +482,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <p><code>openConnection</code> 在 MySQL 协议的连接上多跑一句 <code>SESSION_SETUP_SQL</code>：<code>SET binary_encoding_format = 'hex', binary_encoding_level = 'nested'</code>。这两个会话变量决定嵌套 VARBINARY 的文本形态，默认值恰好就是这样，但集群可以全局改：<code>raw</code> 会往 <code>MysqlValueReader</code> 扫的文本里塞不可解码的字节，<code>all</code> 会把顶层 VARBINARY 也 hex 化、让 <code>getBytes()</code> 拿到十六进制文本。钉住之后读取器的假设与集群设置无关；SQL 由 <code>MysqlValueReader.SESSION_BINARY_ENCODING</code> 拼出，单测断言两者一致。SET 失败则关掉刚开的连接再抛，不留半初始化的连接。Arrow Flight 以二进制传二进制，不看这两个变量，也就不设。</p>
 
-<h3 id="ColumnMetadataReader"><span class="fn">ColumnMetadataReader</span><span class="sz">97 行</span></h3>
+<h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">97 行</span></h3>
 <p class="role">权威列清单。两条通道<strong>同一条路径</strong>：只问服务端。</p>
 
 <pre><code>fetchColumns()  ──  每行 new ColumnMeta(COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, NUMERIC_SCALE, IS_NULLABLE)</code></pre>

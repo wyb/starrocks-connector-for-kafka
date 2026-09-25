@@ -33,7 +33,7 @@ import java.util.List;
 
 /**
  * {@link CdcClient} over JDBC. The query layer only: {@link FeConnection},
- * {@link ColumnMetadataReader} and {@link ValueReader} sit underneath it.
+ * {@link ColumnMetaReader} and {@link ValueReader} sit underneath it.
  *
  * <p><b>Not thread-safe</b>, because {@link FeConnection} is not; drive one client from one thread.
  * Connection behaviour is covered by the integration smoke test, not by unit tests.
@@ -44,11 +44,11 @@ public class StarRocksJdbcClient implements CdcClient {
     private static final String CDC_PROPERTY = "enable_change_data_capture";
 
     private final FeConnection connection;
-    private final ColumnMetadataReader columns;
+    private final ColumnMetaReader columns;
 
     public StarRocksJdbcClient(StarRocksCdcSourceConfig config) {
         this.connection = new FeConnection(config);
-        this.columns = new ColumnMetadataReader(connection);
+        this.columns = new ColumnMetaReader(connection);
     }
 
     @Override

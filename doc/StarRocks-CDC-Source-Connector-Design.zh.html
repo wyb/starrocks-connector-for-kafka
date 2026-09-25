@@ -406,9 +406,9 @@
   </div>
   <div class="flow">↓ 委托</div>
   <div class="box">
-    <h4>FeConnection　·　ColumnMetadataReader　·　ValueReader</h4>
+    <h4>FeConnection　·　ColumnMetaReader　·　ValueReader</h4>
     <p><strong>FeConnection</strong>：URL 扇出、传输通道判定、连接复用、FE leader 轮转、有界重试。<br>
-       <strong>ColumnMetadataReader</strong>：权威列清单，两种传输同一策略——只读 <code>information_schema</code>（见第 6 节）；类型由 <code>ColumnMeta</code> 从 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>。<br>
+       <strong>ColumnMetaReader</strong>：权威列清单，两种传输同一策略——只读 <code>information_schema</code>（见第 6 节）；类型由 <code>ColumnMeta</code> 从 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>。<br>
        <strong>ValueReader</strong>：结果集行 → <code>Object[]</code>，<em>用同一份列清单定类型</em>。</p>
   </div>
 </div>
@@ -417,7 +417,7 @@
 
 <div class="invariant">
   <span class="tag">为什么要拆</span>
-  <p>拆分之前 <code>StarRocksJdbcClient</code> 是 728 行、32 个方法，同时承担驱动注册、URL 解析、连接生命周期、leader 轮转重试、列元数据、类型映射、行提取和全部业务查询。最直接的证据是它的测试：为了测 URL 解析，测试得用反射撬开 private static 方法——需要反射才能测一个纯函数，说明边界画错了。现在 <code>FeConnection.parseUrls</code> 和 <code>ColumnMetadataReader.toJdbcType</code> 都是包内可见，直接调用即可。</p>
+  <p>拆分之前 <code>StarRocksJdbcClient</code> 是 728 行、32 个方法，同时承担驱动注册、URL 解析、连接生命周期、leader 轮转重试、列元数据、类型映射、行提取和全部业务查询。最直接的证据是它的测试：为了测 URL 解析，测试得用反射撬开 private static 方法——需要反射才能测一个纯函数，说明边界画错了。现在 <code>FeConnection.parseUrls</code> 和 <code>ColumnMetaReader.toJdbcType</code> 都是包内可见，直接调用即可。</p>
 </div>
 
 <h4>为什么 Connector 要做 preflight</h4>
@@ -990,7 +990,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <div class="invariant">
   <span class="tag">不变式 · 列类型只有一个真相源</span>
-  <p>上面那条坑还有个后半段：schema 端换用了 <code>information_schema</code>，取值端却仍在问驱动。<code>extractValue</code> 曾经 switch 在 <code>ResultSetMetaData.getColumnType()</code> 上，而 <code>ChangeRecordMapper</code> 用的是 <code>ColumnMetadataReader</code> 给出的清单——同一条读取路径上两个真相源，其中一个已知在 Arrow 通道上不可信。两者一旦分歧，就是 schema 说 <code>Date</code>、值却是 <code>String</code>，在序列化时抛 <code>DataException</code>，且离成因很远。</p>
+  <p>上面那条坑还有个后半段：schema 端换用了 <code>information_schema</code>，取值端却仍在问驱动。<code>extractValue</code> 曾经 switch 在 <code>ResultSetMetaData.getColumnType()</code> 上，而 <code>ChangeRecordMapper</code> 用的是 <code>ColumnMetaReader</code> 给出的清单——同一条读取路径上两个真相源，其中一个已知在 Arrow 通道上不可信。两者一旦分歧，就是 schema 说 <code>Date</code>、值却是 <code>String</code>，在序列化时抛 <code>DataException</code>，且离成因很远。</p>
   <p>现在 <code>streamSnapshot</code>/<code>streamChanges</code> 接的是 <code>List&lt;ColumnMeta&gt;</code> 而非列名，<code>ValueReader</code> 按同一份清单取值，两边不可能再漂移。</p>
 </div>
 
