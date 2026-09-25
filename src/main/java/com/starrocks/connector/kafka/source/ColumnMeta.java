@@ -63,6 +63,12 @@ public final class ColumnMeta {
         this.type = typeOf(this.srDataType, srColumnType, scale);
     }
 
+    /** What the server said and what it became: {@code v(varchar->string,sql=varchar(20),null=true)}. */
+    @Override
+    public String toString() {
+        return name + "(" + srDataType + "->" + type + ",sql=" + srColumnType + ",null=" + nullable + ")";
+    }
+
     private static ColumnType typeOf(String dataType, String columnType, int scale) {
         if (isComplex(dataType)) {
             return ColumnTypeParser.parse(columnType).orElse(ColumnType.opaque(fallbackLogicalName(dataType)));

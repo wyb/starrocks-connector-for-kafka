@@ -86,6 +86,15 @@ public class ColumnMetaTest {
         assertEquals("bigint unsigned", new ColumnMeta("c", " BIGINT UNSIGNED ", null, 0, true).srDataType);
     }
 
+    /** The startup log and the duplicate-column error print columns this way. */
+    @Test
+    public void testToStringShowsWhatTheServerSaidAndWhatItBecame() {
+        assertEquals("v(varchar->string,sql=varchar(20),null=true)",
+                new ColumnMeta("v", "VarChar", "varchar(20)", 0, true).toString());
+        assertEquals("d(decimal->decimal(2),sql=decimal(18, 2),null=false)",
+                new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, false).toString());
+    }
+
     @Test
     public void testDecimalKeepsTheDeclaredScale() {
         ColumnType t = new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, true).type;

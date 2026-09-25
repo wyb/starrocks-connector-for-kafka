@@ -31,6 +31,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.StringJoiner;
 
 /**
  * The authoritative column list, used both to build the Connect schema and to read values back out.
@@ -63,18 +64,12 @@ final class ColumnMetaReader {
                  ResultSet rs = stmt.executeQuery(sql)) {
                 List<ColumnMeta> result = new ArrayList<>();
                 Set<String> seen = new HashSet<>();
-                StringBuilder described = new StringBuilder();
+                StringJoiner described = new StringJoiner(", ");
                 while (rs.next()) {
                     ColumnMeta col = new ColumnMeta(rs.getString("COLUMN_NAME"), rs.getString("DATA_TYPE"),
                             rs.getString("COLUMN_TYPE"), rs.getInt("NUMERIC_SCALE"),
                             !"NO".equalsIgnoreCase(rs.getString("IS_NULLABLE")));
-                    if (described.length() > 0) {
-                        described.append(", ");
-                    }
-                    described.append(result.size() + 1).append(':').append(col.name)
-                            .append('(').append(col.srDataType).append("->").append(col.type)
-                            .append(",sql=").append(col.srColumnType)
-                            .append(",null=").append(col.nullable).append(')');
+                    described.add((result.size() + 1) + ":" + col);
                     if (!seen.add(col.name)) {
                         throw new SQLException("information_schema.columns lists the column '" + col.name
                                 + "' more than once for " + db + "." + table + ": " + described);

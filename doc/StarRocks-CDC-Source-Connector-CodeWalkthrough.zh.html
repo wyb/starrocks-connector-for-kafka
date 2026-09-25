@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>19 个类 / 约 4000 行</b></span>
-    <span>测试<b>247 个</b></span>
+    <span>测试<b>248 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -482,7 +482,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <p><code>openConnection</code> 在 MySQL 协议的连接上多跑一句 <code>SESSION_SETUP_SQL</code>：<code>SET binary_encoding_format = 'hex', binary_encoding_level = 'nested'</code>。这两个会话变量决定嵌套 VARBINARY 的文本形态，默认值恰好就是这样，但集群可以全局改：<code>raw</code> 会往 <code>MysqlValueReader</code> 扫的文本里塞不可解码的字节，<code>all</code> 会把顶层 VARBINARY 也 hex 化、让 <code>getBytes()</code> 拿到十六进制文本。钉住之后读取器的假设与集群设置无关；SQL 由 <code>MysqlValueReader.SESSION_BINARY_ENCODING</code> 拼出，单测断言两者一致。SET 失败则关掉刚开的连接再抛，不留半初始化的连接。Arrow Flight 以二进制传二进制，不看这两个变量，也就不设。</p>
 
-<h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">97 行</span></h3>
+<h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">92 行</span></h3>
 <p class="role">权威列清单。两条通道<strong>同一条路径</strong>：只问服务端。</p>
 
 <pre><code>fetchColumns()  ──  每行 new ColumnMeta(COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, NUMERIC_SCALE, IS_NULLABLE)</code></pre>
@@ -512,7 +512,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><strong>顶层两处。</strong>驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值、传什么 Calendar 都一样（UTC+8 的 worker 上 12:34:56 变成 04:34:56Z），<code>timestamp()</code> 覆写后经自己的 <code>fromJvmWallClock</code> 逆转（用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定；DST 跳变那一小时不可逆，是唯一残留）；Avatica 的 <code>getObject</code> 按 JDBC 类型码分发，ARRAY(2003) 拿到 <code>java.sql.Array</code>、MAP/STRUCT(2000) 拿到 vector 的 <code>Map</code>，<code>nested()</code> 先把 <code>Array</code> 用 <code>getArray()</code> 解成 <code>List</code>。这两条都是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 <code>List</code>，但 <code>ResultSet.getObject</code> 根本不走那里。</p>
 <p><strong>嵌套值是 vector 自己的对象。</strong>list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 和 INT/BIGINT 一模一样，所以 <code>leaf()</code> 只看声明类型，再由 <code>dateOfEpochDays</code>/<code>dateTimeOfEpochMicros</code> 换成基类那种文本。嵌套的 map 是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>，<code>asMap()</code> 覆写后两种形态都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。</p>
 
-<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">135 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">165 行</span></h3>
+<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">135 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">171 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
 <p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
 <p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
@@ -588,7 +588,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>SqlBuilderTest</code></td><td>11</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中、<code>tables_config</code> 一行带 <code>TABLE_ID</code>、引用查询按 <code>TABLE_ID + HOLDER_ID</code> 过滤</td></tr>
   <tr><td><code>StarRocksCdcSourceConfigTest</code></td><td>13</td><td>默认值、必填校验、被拒绝的值与组合（空表列表、重复表名、坏 snapshot mode、坏 table2topic 条目、no_snapshot+resnapshot、poll 重试超时小于 -1），以及大小写不同的表名不算重复</td></tr>
   <tr><td><code>ArrowValueReaderTest</code></td><td>12</td><td>声明类型区分天数/微秒与 int/bigint、<code>Text</code>→String 而字节原样、decimal 取声明 scale、嵌套 map 以 entry 列表到达且与顶层 Map 同读、map 键按声明类型拼写、struct 按声明字段而非 map 顺序、未声明的 struct 字段点名报错、各层 null 透传、中立值装配成 <code>Struct</code> 并通过 <code>validate()</code>、形状不符点名报错、天数/微秒入口与基类的 Date 入口一致、<code>fromJvmWallClock</code> 是 <code>valueOf</code> 的逆</td></tr>
-  \g<1>每种服务端类型名落到哪个种类、BOOLEAN 靠 <code>tinyint(1)</code> 与 tinyint 区分、大小写与空白不敏感、DECIMAL 保留声明 scale、<code>bigint unsigned</code> 是 LARGEINT 且 schema scale 恒为 0、<code>json</code> 是 JSON 种类、解析成功的复杂列 <code>type.isNested()</code>、解析失败是带 StarRocks 逻辑名的 OPAQUE 文本且可空性来自列、未识别类型与未询问服务端的列都是无名文本、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假、不可导出类型判定\g<2>
+  \g<1>每种服务端类型名落到哪个种类、BOOLEAN 靠 <code>tinyint(1)</code> 与 tinyint 区分、大小写与空白不敏感、DECIMAL 保留声明 scale、<code>bigint unsigned</code> 是 LARGEINT 且 schema scale 恒为 0、<code>json</code> 是 JSON 种类、解析成功的复杂列 <code>type.isNested()</code>、解析失败是带 StarRocks 逻辑名的 OPAQUE 文本且可空性来自列、未识别类型与未询问服务端的列都是无名文本、<code>toString</code> 即启动日志的列格式、<code>isUnrecognized</code> 对未映射类型为真而对已映射类型为假、不可导出类型判定\g<2>
   <tr><td><code>ColumnTypeParserTest</code></td><td>14</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、字段名集合与声明一致、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlValueReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlValueReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>
