@@ -408,12 +408,12 @@
   <div class="box">
     <h4>FeConnection　·　ColumnMetadataReader　·　ValueReader</h4>
     <p><strong>FeConnection</strong>：URL 扇出、传输通道判定、连接复用、FE leader 轮转、有界重试。<br>
-       <strong>ColumnMetadataReader</strong>：权威列清单，两种传输各用一套策略（见第 6 节）。<br>
+       <strong>ColumnMetadataReader</strong>：权威列清单，两种传输同一策略——只读 <code>information_schema</code>（见第 6 节）；类型由 <code>ColumnMeta</code> 从 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>。<br>
        <strong>ValueReader</strong>：结果集行 → <code>Object[]</code>，<em>用同一份列清单定类型</em>。</p>
   </div>
 </div>
 
-<p>辅助类：<code>SqlBuilder</code>（纯静态 SQL 构造，统一标识符/字面量转义）、<code>OffsetState</code>（offset map 编解码）、<code>ColumnMeta</code>、<code>NonTrackableException</code>（把服务端多种"不可追踪"错误归一化）。跨 sink/source 复用的部分放在 <code>com.starrocks.connector.kafka.common</code>：<code>Version</code>（版本号唯一来源，构建期由 Maven 过滤写入资源文件）与 <code>KeyValueListParser</code>（<code>a:b,a:b</code> 配置格式的唯一解析器）。</p>
+<p>辅助类：<code>SqlBuilder</code>（纯静态 SQL 构造，统一标识符/字面量转义）、<code>OffsetState</code>（offset map 编解码）、<code>ColumnMeta</code>（一列的服务端描述与由此折成的 <code>ColumnType</code>）、<code>NonTrackableException</code>（把服务端多种"不可追踪"错误归一化）。跨 sink/source 复用的部分放在 <code>com.starrocks.connector.kafka.common</code>：<code>Version</code>（版本号唯一来源，构建期由 Maven 过滤写入资源文件）与 <code>KeyValueListParser</code>（<code>a:b,a:b</code> 配置格式的唯一解析器）。</p>
 
 <div class="invariant">
   <span class="tag">为什么要拆</span>
@@ -922,7 +922,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <tr><td>驱动</td><td>mariadb-java-client 3.3.3</td><td>flight-sql-jdbc-driver 18.0.0</td></tr>
   <tr><td>端口</td><td><code>query_port</code>（默认 9030）</td><td><code>arrow_flight_port</code>（默认 -1，需显式开启）</td></tr>
   <tr><td>流式读</td><td><code>setFetchSize(1024)</code></td><td>驱动自带，不设置</td></tr>
-  <tr><td>列元数据</td><td><code>ResultSetMetaData</code></td><td><code>information_schema.columns</code></td></tr>
+  <tr><td>列元数据</td><td colspan="2"><code>information_schema.columns</code>，两条通道相同；驱动的 <code>ResultSetMetaData</code> 一概不用</td></tr>
 </table>
 </div>
 
