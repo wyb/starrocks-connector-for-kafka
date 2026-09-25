@@ -25,7 +25,6 @@ import org.apache.kafka.connect.source.ExactlyOnceSupport;
 import org.junit.Test;
 
 import java.sql.SQLException;
-import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -181,8 +180,8 @@ public class StarRocksCdcSourceConnectorTest {
             FakeCdcClient fake = new FakeCdcClient();
             fake.modelByTable.put("t1", "DUP_KEYS");
             fake.colsByTable.put("t1", Arrays.asList(
-                    new ColumnMeta("k", Types.INTEGER, 10, 0, false),
-                    new ColumnMeta(name, Types.INTEGER, 10, 0, false)));
+                    new ColumnMeta("k", "int", "int(11)", 0, false),
+                    new ColumnMeta(name, "int", "int(11)", 0, false)));
             Map<String, String> props = base();
             props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
             StarRocksCdcSourceConnector connector = newConnector(fake);
@@ -209,8 +208,8 @@ public class StarRocksCdcSourceConnectorTest {
             FakeCdcClient fake = new FakeCdcClient();
             fake.modelByTable.put("t1", "DUP_KEYS");
             fake.colsByTable.put("t1", Arrays.asList(
-                    new ColumnMeta("k", Types.INTEGER, 10, 0, false, "int", "int(11)"),
-                    new ColumnMeta("sketch", Types.OTHER, 0, 0, true, sketch, sketch)));
+                    new ColumnMeta("k", "int", "int(11)", 0, false),
+                    new ColumnMeta("sketch", sketch, sketch, 0, true)));
             Map<String, String> props = base();
             props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
 
@@ -235,15 +234,15 @@ public class StarRocksCdcSourceConnectorTest {
         FakeCdcClient fake = new FakeCdcClient();
         fake.modelByTable.put("t1", "DUP_KEYS");
         fake.colsByTable.put("t1", Arrays.asList(
-                new ColumnMeta("k", Types.INTEGER, 10, 0, false, "int", "int(11)"),
-                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int>"),
-                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int>"),
-                new ColumnMeta("s", Types.OTHER, 0, 0, true, "struct", "struct<x int>"),
-                new ColumnMeta("j", Types.OTHER, 0, 0, true, "json", "json"),
+                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("a", "array", "array<int>", 0, true),
+                new ColumnMeta("m", "map", "map<varchar(10),int>", 0, true),
+                new ColumnMeta("s", "struct", "struct<x int>", 0, true),
+                new ColumnMeta("j", "json", "json", 0, true),
                 // An unrecognised type warns but must not block. "variant" is a real StarRocks type
                 // this connector does not map; the warning itself is pinned by
-                // ColumnMetadataReaderTest, which is what a placeholder value here failed to do.
-                new ColumnMeta("u", Types.OTHER, 0, 0, true, "variant", "variant")));
+                // ColumnMetaTest, which is what a placeholder value here failed to do.
+                new ColumnMeta("u", "variant", "variant", 0, true)));
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
 

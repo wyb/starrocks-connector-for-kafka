@@ -214,7 +214,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can
                 // interpret. Without this the connector starts happily and streams that non-value
                 // forever, which from the outside looks like working.
-                if (ColumnMetadataReader.isNonExportable(col.srDataType)) {
+                if (ColumnMeta.isNonExportable(col.srDataType)) {
                     throw new ConnectException(
                             "table " + db + "." + t + " has column '" + col.name + "' of type "
                                     + col.srDataType + ", whose value cannot be exported by a SELECT"
@@ -231,7 +231,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                                     + " into a nested schema; it will be carried as text.",
                             db, t, col.name, col.srColumnType);
                 }
-                if (ColumnMetadataReader.isUnrecognized(col.srDataType)) {
+                if (ColumnMeta.isUnrecognized(col.srDataType)) {
                     LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
                                     + " recognise; it will be carried as text. This usually means StarRocks"
                                     + " added a type.",

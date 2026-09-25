@@ -81,12 +81,11 @@ public final class SqlBuilder {
      * Both type columns are projected: {@code DATA_TYPE} is StarRocks' type name ("array", "hll")
      * and {@code COLUMN_TYPE} carries the nesting ("array&lt;int&gt;") and BOOLEAN's "tinyint(1)".
      *
-     * <p>{@code NUMERIC_PRECISION}/{@code NUMERIC_SCALE}, not StarRocks' own
-     * {@code COLUMN_SIZE}/{@code DECIMAL_DIGITS} extensions: the BE fills COLUMN_SIZE from
-     * {@code columnLength}, which is a length and not a precision.
+     * <p>Scale from the standard {@code NUMERIC_SCALE}; precision is not read, Connect's Decimal
+     * has no use for it.
      */
     public static String columnsMetadataSql(String db, String table) {
-        return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_PRECISION, NUMERIC_SCALE"
+        return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
                 + " FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
     }

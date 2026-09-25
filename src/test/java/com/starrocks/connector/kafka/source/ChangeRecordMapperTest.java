@@ -29,7 +29,6 @@ import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
 
 import java.math.BigDecimal;
-import java.sql.Types;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
@@ -41,8 +40,8 @@ public class ChangeRecordMapperTest {
 
     private ChangeRecordMapper mapper() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("k", Types.INTEGER, 10, 0, false),
-                new ColumnMeta("v", Types.BIGINT, 19, 0, true));
+                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
         return new ChangeRecordMapper("db1", "orders", "sr.db1.orders",
                 cols, Collections.singletonList("k"));
     }
@@ -55,8 +54,8 @@ public class ChangeRecordMapperTest {
     @Test
     public void testKeyColumnMissingFromColumnListIsNamed() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("k", Types.INTEGER, 10, 0, false),
-                new ColumnMeta("v", Types.BIGINT, 19, 0, true));
+                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
         try {
             new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols, Collections.singletonList("K"));
             fail("expected a ConnectException naming the unmatched key column");
@@ -180,8 +179,8 @@ public class ChangeRecordMapperTest {
     @Test
     public void testTableWithoutKeyColumnsHasNullKey() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("k", Types.INTEGER, 10, 0, false),
-                new ColumnMeta("v", Types.BIGINT, 19, 0, true));
+                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "orders", "sr.db1.orders",
                 cols, Collections.emptyList());
 
@@ -193,10 +192,10 @@ public class ChangeRecordMapperTest {
     @Test
     public void testDecimalDateTimestampMapping() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("d", Types.DECIMAL, 10, 2, true),
-                new ColumnMeta("dt", Types.DATE, 0, 0, true),
-                new ColumnMeta("ts", Types.TIMESTAMP, 0, 0, true),
-                new ColumnMeta("j", Types.OTHER, 0, 0, true));
+                new ColumnMeta("d", "decimal", "decimal(10, 2)", 2, true),
+                new ColumnMeta("dt", "date", "date", 0, true),
+                new ColumnMeta("ts", "datetime", "datetime", 0, true),
+                new ColumnMeta("j", null, null, 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "misc", "sr.db1.misc",
                 cols, Collections.emptyList());
 
@@ -236,8 +235,8 @@ public class ChangeRecordMapperTest {
     @Test
     public void testDateTextPassesThroughIncludingKeyColumns() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("d", Types.DATE, 0, 0, false),
-                new ColumnMeta("ts", Types.TIMESTAMP, 0, 0, true));
+                new ColumnMeta("d", "date", "date", 0, false),
+                new ColumnMeta("ts", "datetime", "datetime", 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t",
                 cols, Collections.singletonList("d"));
 
@@ -257,7 +256,7 @@ public class ChangeRecordMapperTest {
     public void testLargeIntKeepsFullPrecision() {
         BigDecimal max = new BigDecimal("170141183460469231731687303715884105727");
         List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta(
-                "big", Types.DECIMAL, 39, 0, true, "bigint unsigned", "bigint(20) unsigned"));
+                "big", "bigint unsigned", "bigint(20) unsigned", 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "big", "sr.db1.big",
                 cols, Collections.emptyList());
 
@@ -281,8 +280,8 @@ public class ChangeRecordMapperTest {
     @Test
     public void testBinaryColumnsCarryRawBytesNotText() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("b", Types.BINARY, 4, 0, false),
-                new ColumnMeta("vb", Types.VARBINARY, 16, 0, true));
+                new ColumnMeta("b", "binary", "binary(4)", 0, false),
+                new ColumnMeta("vb", "varbinary", "varbinary(16)", 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "blobs", "sr.db1.blobs",
                 cols, Collections.emptyList());
 
@@ -313,12 +312,12 @@ public class ChangeRecordMapperTest {
     @Test
     public void testParsedComplexColumnsAreNativeAndUnparsedOnesStayText() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("j", Types.OTHER, 0, 0, true, "json", "json"),
-                new ColumnMeta("a", Types.OTHER, 0, 0, true, "array", "array<int(11)>"),
-                new ColumnMeta("m", Types.OTHER, 0, 0, true, "map", "map<varchar(10),int(11)>"),
-                new ColumnMeta("st", Types.OTHER, 0, 0, false, "struct", "struct<`x` int(11), `d` date>"),
-                new ColumnMeta("s", Types.OTHER, 0, 0, false, "struct", "struct<x int>"),
-                new ColumnMeta("v", Types.VARCHAR, 20, 0, true, "varchar", "varchar(20)"));
+                new ColumnMeta("j", "json", "json", 0, true),
+                new ColumnMeta("a", "array", "array<int(11)>", 0, true),
+                new ColumnMeta("m", "map", "map<varchar(10),int(11)>", 0, true),
+                new ColumnMeta("st", "struct", "struct<`x` int(11), `d` date>", 0, false),
+                new ColumnMeta("s", "struct", "struct<x int>", 0, false),
+                new ColumnMeta("v", "varchar", "varchar(20)", 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
                 cols, Collections.emptyList());
         java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
@@ -359,7 +358,7 @@ public class ChangeRecordMapperTest {
     /** Columns described without the server's view (no srDataType) must still work, unnamed. */
     @Test
     public void testColumnsWithoutStarRocksTypeFallBackToPlainString() {
-        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", Types.OTHER, 0, 0, true));
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", null, null, 0, true));
         ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
                 cols, Collections.emptyList());
 

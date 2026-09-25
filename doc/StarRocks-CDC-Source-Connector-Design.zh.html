@@ -888,10 +888,10 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 </figure>
 
 <div class="invariant">
-  <span class="tag">复杂类型：先按文本承载，但把服务端的类型名留住</span>
-  <p><code>java.sql.Types</code> 表达不了「这是 StarRocks 的 ARRAY」或「这是 HLL 草图」——它们全都是 <code>OTHER</code>，而在 MySQL 协议上，<code>ResultSetMetaData</code> 更是把它们和 VARCHAR 完全混同。所以 <code>ColumnMeta</code> 同时保留两套视角：JDBC 的，和 <code>information_schema</code> 给出的 <code>DATA_TYPE</code>（<code>array</code>/<code>json</code>/<code>hll</code>）与 <code>COLUMN_TYPE</code>（完整嵌套类型，如 <code>array&lt;int&gt;</code>）。</p>
-  <p>这也是<strong>两条通道都只查 <code>information_schema</code></strong> 的原因：驱动的描述一概不用。BOOLEAN 是实测分歧过的那一个——FE 只在 <code>COLUMN_TYPE</code> 里写 <code>tinyint(1)</code>，只看 <code>DATA_TYPE</code> 的一侧会给出 int8。否则同一张表会因为 URL scheme 不同而产出不同的 schema——传输方式本该是实现细节，会改变 schema 的就不是。</p>
-  <p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> 目前发的是文本，但带上了 <code>com.starrocks.data.*</code> 逻辑名；<code>JSON</code> 用 Debezium 自己的 <code>io.debezium.data.Json</code>（JSON 列按定义就是 JSON 文档，这个承诺是安全的）。前三者不借用那个名字，是因为那等于承诺每个值都能按 JSON 解析，而 NULL、内嵌引号、深层嵌套这些边界尚未验证。<code>srColumnType</code> 已经留在 <code>ColumnMeta</code> 上，是为重建嵌套 schema 那一步准备的——注意 StarRocks 超过 15 层嵌套会渲染成 <code>array&lt;...&gt;</code>，将来的解析器必须对此显式失败而不是猜。</p>
+  <span class="tag">列类型：只信服务端的描述</span>
+  <p><code>ColumnMeta</code> 只保留 <code>information_schema</code> 给出的 <code>DATA_TYPE</code>（<code>array</code>/<code>json</code>/<code>hll</code>/<code>bigint unsigned</code>）与 <code>COLUMN_TYPE</code>（完整嵌套类型，如 <code>array&lt;int&gt;</code>），并在构造时折成一棵 <code>ColumnType</code>；schema 与两条传输的值读取都只看这棵树。驱动的描述一概不用：MySQL 协议上 <code>ResultSetMetaData</code> 把 ARRAY、JSON、HLL 和 VARCHAR 完全混同，Arrow Flight 驱动则把每列都报成 NOT NULL 且没有 scale。</p>
+  <p>BOOLEAN 是实测分歧过的那一个——FE 只在 <code>COLUMN_TYPE</code> 里写 <code>tinyint(1)</code>，只看 <code>DATA_TYPE</code> 的一侧会给出 int8。两套描述意味着同一张表会因为 URL scheme 不同而产出不同的 schema——传输方式本该是实现细节，会改变 schema 的就不是。</p>
+  <p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> 由 <code>COLUMN_TYPE</code> 解析成原生嵌套 schema；解析失败才按文本承载，并带上 <code>com.starrocks.data.*</code> 逻辑名——不借用 Debezium 的 JSON 名，因为 BE 的文本渲染不是 JSON。<code>JSON</code> 用 <code>io.debezium.data.Json</code>。StarRocks 超过 15 层嵌套会渲染成 <code>array&lt;...&gt;</code>，解析器对此显式失败而不是猜。</p>
 </div>
 
 <div class="invariant warn">

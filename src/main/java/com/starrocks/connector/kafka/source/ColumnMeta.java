@@ -20,52 +20,93 @@
 
 package com.starrocks.connector.kafka.source;
 
-import java.sql.Types;
+import java.util.Arrays;
+import java.util.HashSet;
 import java.util.Locale;
+import java.util.Set;
 
 /**
- * Immutable metadata for one captured column.
+ * Immutable metadata for one captured column, as {@code information_schema.columns} describes it,
+ * folded at construction into the one {@link ColumnType} the schema and the value readers use.
  *
- * <p>Both the JDBC view and StarRocks' own are kept: {@link java.sql.Types} cannot express
- * "StarRocks ARRAY" or "HLL sketch" -- both are {@link java.sql.Types#OTHER}, and over the MySQL
- * protocol result-set metadata cannot tell either from a VARCHAR. The two are folded into one
- * {@link ColumnType} at construction, and that tree is what the schema and the value readers use.
+ * <p>Only the server's description, never a driver's: over the MySQL protocol
+ * {@link java.sql.ResultSetMetaData} cannot tell an ARRAY, a JSON or an HLL sketch from a VARCHAR,
+ * and the Arrow Flight driver calls every column NOT NULL with no scale. Two descriptions would also
+ * mean one table producing two schemas depending on the URL scheme.
  */
 public final class ColumnMeta {
     public final String name;
-    public final int jdbcType;     // java.sql.Types.*
-    /**
-     * {@code NUMERIC_PRECISION}. Diagnostics only: Connect's {@code Decimal} logical type carries a
-     * scale and no precision, so nothing reads it -- which is how it held a length for a long time.
-     */
-    public final int precision;
-    public final int scale;
     public final boolean nullable;
-    /** {@code DATA_TYPE}: "array", "json", "hll", "varchar"... null when the server was not asked. */
+    /** {@code DATA_TYPE}, normalized: "array", "json", "hll", "bigint unsigned"... null when the server was not asked. */
     public final String srDataType;
-    /** {@code COLUMN_TYPE}: the full type with nesting, e.g. {@code "map<varchar(10),int>"}. */
+    /** {@code COLUMN_TYPE}: the full type with nesting, e.g. {@code "map<varchar(10),int>"}, or BOOLEAN's {@code "tinyint(1)"}. */
     public final String srColumnType;
     /**
      * The column's type as one tree, for every column: a parsed ARRAY/MAP/STRUCT with its nesting, a
-     * scalar derived from {@link #jdbcType}, or {@link ColumnType.Kind#OPAQUE} for what is carried
-     * as text -- a complex column whose COLUMN_TYPE did not parse, or a type never mapped.
+     * scalar named by {@code DATA_TYPE}, or {@link ColumnType.Kind#OPAQUE} for what is carried as
+     * text -- a complex column whose COLUMN_TYPE did not parse, or a type never mapped.
      */
     final ColumnType type;
 
-    public ColumnMeta(String name, int jdbcType, int precision, int scale, boolean nullable) {
-        this(name, jdbcType, precision, scale, nullable, null, null);
+    /** The closed set FE's {@code Type.toMysqlDataTypeString} emits; a name outside it means StarRocks grew a type. */
+    private static final Set<String> KNOWN_DATA_TYPES = new HashSet<>(Arrays.asList(
+            "tinyint", "smallint", "int", "bigint", "bigint unsigned", "float", "double", "decimal",
+            "char", "varchar", "date", "datetime", "binary", "varbinary",
+            "array", "map", "struct", "json", "hll", "bitmap", "percentile"));
+
+    /** @param scale {@code NUMERIC_SCALE}; DECIMAL is the only type that reads it. */
+    public ColumnMeta(String name, String srDataType, String srColumnType, int scale, boolean nullable) {
+        this.name = name;
+        this.nullable = nullable;
+        this.srDataType = srDataType == null ? null : normalize(srDataType);
+        this.srColumnType = srColumnType;
+        this.type = typeOf(this.srDataType, srColumnType, scale);
     }
 
-    public ColumnMeta(String name, int jdbcType, int precision, int scale, boolean nullable,
-                      String srDataType, String srColumnType) {
-        this.name = name;
-        this.jdbcType = jdbcType;
-        this.precision = precision;
-        this.scale = scale;
-        this.nullable = nullable;
-        this.srDataType = srDataType;
-        this.srColumnType = srColumnType;
-        this.type = typeOf(jdbcType, scale, srDataType, srColumnType);
+    private static ColumnType typeOf(String dataType, String columnType, int scale) {
+        if (isComplex(dataType)) {
+            return ColumnTypeParser.parse(columnType).orElse(ColumnType.opaque(fallbackLogicalName(dataType)));
+        }
+        // FE renders BOOLEAN's DATA_TYPE as "tinyint" and only its COLUMN_TYPE as "tinyint(1)"
+        // (ScalarType#toMysqlDataTypeString / #toMysqlColumnTypeString), so the name alone loses it.
+        if ("tinyint(1)".equals(normalize(columnType))) {
+            return ColumnType.scalar(ColumnType.Kind.BOOLEAN);
+        }
+        switch (normalize(dataType)) {
+            case "tinyint":
+                return ColumnType.scalar(ColumnType.Kind.TINYINT);
+            case "smallint":
+                return ColumnType.scalar(ColumnType.Kind.SMALLINT);
+            case "int":
+                return ColumnType.scalar(ColumnType.Kind.INT);
+            case "bigint":
+                return ColumnType.scalar(ColumnType.Kind.BIGINT);
+            // LARGEINT: 128 bits, integral, so its Decimal schema is scale 0 whatever NUMERIC_SCALE
+            // says (FE leaves it NULL, which getInt reads as 0 by accident).
+            case "bigint unsigned":
+                return ColumnType.scalar(ColumnType.Kind.LARGEINT);
+            case "float":
+                return ColumnType.scalar(ColumnType.Kind.FLOAT);
+            case "double":
+                return ColumnType.scalar(ColumnType.Kind.DOUBLE);
+            case "decimal":
+                return ColumnType.decimal(scale);
+            case "char":
+            case "varchar":
+                return ColumnType.scalar(ColumnType.Kind.STRING);
+            case "date":
+                return ColumnType.scalar(ColumnType.Kind.DATE);
+            case "datetime":
+                return ColumnType.scalar(ColumnType.Kind.DATETIME);
+            case "binary":
+            case "varbinary":
+                return ColumnType.scalar(ColumnType.Kind.BYTES);
+            case "json":
+                return ColumnType.scalar(ColumnType.Kind.JSON);
+            // hll/bitmap/percentile are refused by preflight; anything else is carried as text, unnamed.
+            default:
+                return ColumnType.opaque(null);
+        }
     }
 
     static boolean isComplex(String srDataType) {
@@ -79,48 +120,24 @@ public final class ColumnMeta {
         }
     }
 
-    private static ColumnType typeOf(int jdbcType, int scale, String srDataType, String srColumnType) {
-        if (isComplex(srDataType)) {
-            return ColumnTypeParser.parse(srColumnType).orElse(ColumnType.opaque(fallbackLogicalName(srDataType)));
-        }
-        switch (jdbcType) {
-            case Types.BIT:
-            case Types.BOOLEAN:
-                return ColumnType.scalar(ColumnType.Kind.BOOLEAN);
-            case Types.TINYINT:
-                return ColumnType.scalar(ColumnType.Kind.TINYINT);
-            case Types.SMALLINT:
-                return ColumnType.scalar(ColumnType.Kind.SMALLINT);
-            case Types.INTEGER:
-                return ColumnType.scalar(ColumnType.Kind.INT);
-            case Types.BIGINT:
-                return ColumnType.scalar(ColumnType.Kind.BIGINT);
-            case Types.REAL:
-                return ColumnType.scalar(ColumnType.Kind.FLOAT);
-            // FLOAT is double precision in JDBC; REAL is the single-precision one.
-            case Types.FLOAT:
-            case Types.DOUBLE:
-                return ColumnType.scalar(ColumnType.Kind.DOUBLE);
-            case Types.DECIMAL:
-            case Types.NUMERIC:
-                // LARGEINT rides the DECIMAL getters but is its own kind: scale 0 whatever the server says.
-                return "bigint unsigned".equals(normalize(srDataType))
-                        ? ColumnType.scalar(ColumnType.Kind.LARGEINT) : ColumnType.decimal(scale);
-            case Types.DATE:
-                return ColumnType.scalar(ColumnType.Kind.DATE);
-            case Types.TIMESTAMP:
-                return ColumnType.scalar(ColumnType.Kind.DATETIME);
-            case Types.BINARY:
-            case Types.VARBINARY:
-            case Types.LONGVARBINARY:
-                return ColumnType.scalar(ColumnType.Kind.BYTES);
-            case Types.CHAR:
-            case Types.VARCHAR:
-            case Types.LONGVARCHAR:
-                return ColumnType.scalar(ColumnType.Kind.STRING);
+    /**
+     * True when StarRocks named a type this connector has no mapping for; null means the server was
+     * not asked. Matched against the set, never a literal: FE renders an unmapped type as its own
+     * lowercase name ("variant", "time") and UNKNOWN_TYPE as "unknown_type".
+     */
+    static boolean isUnrecognized(String srDataType) {
+        return srDataType != null && !KNOWN_DATA_TYPES.contains(normalize(srDataType));
+    }
+
+    /** StarRocks type names whose values cannot be meaningfully exported by a plain SELECT. */
+    static boolean isNonExportable(String srDataType) {
+        switch (normalize(srDataType)) {
+            case "hll":
+            case "bitmap":
+            case "percentile":
+                return true;
             default:
-                return "json".equals(normalize(srDataType))
-                        ? ColumnType.scalar(ColumnType.Kind.JSON) : ColumnType.opaque(fallbackLogicalName(srDataType));
+                return false;
         }
     }
 

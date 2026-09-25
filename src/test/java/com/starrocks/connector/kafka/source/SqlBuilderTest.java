@@ -101,7 +101,7 @@ public class SqlBuilderTest {
      */
     @Test
     public void testColumnsMetadataSqlSelectsOrderedByOrdinalPosition() {
-        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_PRECISION, NUMERIC_SCALE"
+        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
                         + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
                         + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
                 SqlBuilder.columnsMetadataSql("db1", "t1"));

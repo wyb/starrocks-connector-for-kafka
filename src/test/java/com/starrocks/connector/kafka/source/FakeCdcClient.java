@@ -21,7 +21,6 @@
 package com.starrocks.connector.kafka.source;
 
 import java.sql.SQLException;
-import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -52,8 +51,8 @@ import java.util.Set;
 final class FakeCdcClient implements CdcClient {
 
     static final List<ColumnMeta> DEFAULT_COLS = Arrays.asList(
-            new ColumnMeta("k", Types.INTEGER, 10, 0, false),
-            new ColumnMeta("v", Types.BIGINT, 19, 0, true));
+            new ColumnMeta("k", "int", "int(11)", 0, false),
+            new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
 
     // -- scripted inputs --
     final Map<String, String> modelByTable = new HashMap<>();

@@ -29,7 +29,6 @@ import java.math.BigDecimal;
 import java.sql.Date;
 import java.sql.ResultSet;
 import java.sql.Timestamp;
-import java.sql.Types;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
@@ -96,40 +95,42 @@ public class ValueReaderTest {
                 new Class<?>[] {ResultSet.class}, handler);
     }
 
-    private static ColumnMeta col(int jdbcType) {
-        return col(jdbcType, 0);
+    private static ColumnMeta col(String dataType) {
+        return col(dataType, dataType, 0);
     }
 
-    private static ColumnMeta col(int jdbcType, int scale) {
-        return new ColumnMeta("c", jdbcType, 0, scale, true);
+    private static ColumnMeta col(String dataType, String columnType, int scale) {
+        return new ColumnMeta("c", dataType, columnType, scale, true);
     }
 
-    private static Object extract(int jdbcType, Object value, RecordingResultSet handler) throws Exception {
+    private static ColumnMeta bool() {
+        return col("tinyint", "tinyint(1)", 0);
+    }
+
+    private static Object extract(ColumnMeta col, Object value, RecordingResultSet handler) throws Exception {
         handler.next = value;
-        return new MysqlValueReader().read(proxyFor(handler), 1, col(jdbcType).type);
+        return new MysqlValueReader().read(proxyFor(handler), 1, col.type);
     }
 
     @Test
     public void testEachTypeUsesItsOwnGetter() throws Exception {
         Object[][] cases = {
-            {Types.BIT, Boolean.TRUE, "getBoolean"},
-            {Types.BOOLEAN, Boolean.TRUE, "getBoolean"},
-            {Types.TINYINT, (byte) 7, "getByte"},
-            {Types.SMALLINT, (short) 8, "getShort"},
-            {Types.INTEGER, 9, "getInt"},
-            {Types.BIGINT, 10L, "getLong"},
-            {Types.REAL, 1.5f, "getFloat"},
-            // JDBC: FLOAT is double precision, REAL is the single-precision one.
-            {Types.FLOAT, 2.5d, "getDouble"},
-            {Types.DOUBLE, 3.5d, "getDouble"},
-            {Types.VARCHAR, "s", "getString"},
-            {Types.OTHER, "carried as text", "getString"},
+            {bool(), Boolean.TRUE, "getBoolean"},
+            {col("tinyint"), (byte) 7, "getByte"},
+            {col("smallint"), (short) 8, "getShort"},
+            {col("int"), 9, "getInt"},
+            {col("bigint"), 10L, "getLong"},
+            {col("float"), 1.5f, "getFloat"},
+            {col("double"), 3.5d, "getDouble"},
+            {col("varchar"), "s", "getString"},
+            {col("variant"), "carried as text", "getString"},
         };
         for (Object[] c : cases) {
             RecordingResultSet h = new RecordingResultSet();
-            Object got = extract((Integer) c[0], c[1], h);
-            assertEquals("value for jdbcType " + c[0], c[1], got);
-            assertEquals("getter for jdbcType " + c[0], Arrays.asList(c[2]), h.calls);
+            ColumnMeta col = (ColumnMeta) c[0];
+            Object got = extract(col, c[1], h);
+            assertEquals("value for " + col.type, c[1], got);
+            assertEquals("getter for " + col.type, Arrays.asList(c[2]), h.calls);
         }
     }
 
@@ -142,23 +143,23 @@ public class ValueReaderTest {
         ValueReader reader = new MysqlValueReader();
         RecordingResultSet h = new RecordingResultSet();
         h.next = new BigDecimal("1.5");
-        assertEquals(new BigDecimal("1.50"), reader.read(proxyFor(h), 1, col(Types.DECIMAL, 2).type));
+        assertEquals(new BigDecimal("1.50"), reader.read(proxyFor(h), 1, col("decimal", "decimal(18, 2)", 2).type));
         assertEquals(Arrays.asList("getBigDecimal"), h.calls);
 
         h = new RecordingResultSet();
         h.next = new BigDecimal("7");
-        assertEquals(new BigDecimal("7"), reader.read(proxyFor(h), 1, col(Types.NUMERIC).type));
+        assertEquals(new BigDecimal("7"), reader.read(proxyFor(h), 1, col("decimal", "decimal(9, 0)", 0).type));
 
         h = new RecordingResultSet();
         h.next = new Date(0L);
-        assertEquals("1970-01-01", reader.read(proxyFor(h), 1, col(Types.DATE).type));
+        assertEquals("1970-01-01", reader.read(proxyFor(h), 1, col("date").type));
         assertEquals(Arrays.asList("getDate"), h.calls);
 
         Timestamp withMicros = new Timestamp(0L);
         withMicros.setNanos(123_456_000);
         h = new RecordingResultSet();
         h.next = withMicros;
-        assertEquals("1970-01-01 00:00:00.123456", reader.read(proxyFor(h), 1, col(Types.TIMESTAMP).type));
+        assertEquals("1970-01-01 00:00:00.123456", reader.read(proxyFor(h), 1, col("datetime").type));
         assertEquals(Arrays.asList("getTimestamp"), h.calls);
     }
 
@@ -168,7 +169,7 @@ public class ValueReaderTest {
      */
     @Test
     public void testBinaryTypesReadRawBytes() throws Exception {
-        for (int t : new int[] {Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY}) {
+        for (ColumnMeta t : new ColumnMeta[] {col("binary", "binary(4)", 0), col("varbinary", "varbinary(16)", 0)}) {
             RecordingResultSet h = new RecordingResultSet();
             byte[] bytes = {1, 2, 3};
             Object got = extract(t, bytes, h);
@@ -183,17 +184,18 @@ public class ValueReaderTest {
      */
     @Test
     public void testSqlNullBecomesNullForPrimitiveGetters() throws Exception {
-        for (int t : new int[] {Types.TINYINT, Types.SMALLINT, Types.INTEGER, Types.BIGINT,
-                                Types.REAL, Types.DOUBLE, Types.BOOLEAN}) {
+        for (ColumnMeta t : new ColumnMeta[] {col("tinyint"), col("smallint"), col("int"), col("bigint"),
+                                              col("float"), col("double"), bool()}) {
             RecordingResultSet h = new RecordingResultSet();
             h.wasNull = true;
-            assertNull("jdbcType " + t + " must yield null, not its zero value", extract(t, null, h));
+            assertNull(t.type + " must yield null, not its zero value", extract(t, null, h));
         }
     }
 
     @Test
     public void testSqlNullBecomesNullForObjectGetters() throws Exception {
-        for (int t : new int[] {Types.DECIMAL, Types.DATE, Types.TIMESTAMP, Types.VARCHAR, Types.BINARY}) {
+        for (ColumnMeta t : new ColumnMeta[] {col("decimal", "decimal(18, 2)", 2), col("date"), col("datetime"),
+                                              col("varchar"), col("binary")}) {
             RecordingResultSet h = new RecordingResultSet();
             h.wasNull = true;
             assertNull(extract(t, null, h));
@@ -218,8 +220,8 @@ public class ValueReaderTest {
                 });
 
         ValueReader reader = new MysqlValueReader();
-        reader.read(rs, 1, col(Types.DATE).type);
-        reader.read(rs, 1, col(Types.TIMESTAMP).type);
+        reader.read(rs, 1, col("date").type);
+        reader.read(rs, 1, col("datetime").type);
         assertEquals(2, seen.size());
         for (Object cal : seen) {
             assertEquals("UTC", ((Calendar) cal).getTimeZone().getID());
@@ -240,7 +242,7 @@ public class ValueReaderTest {
             ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
                     new Class<?>[] {ResultSet.class},
                     (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
-            ColumnType ts = col(Types.TIMESTAMP).type;
+            ColumnType ts = col("datetime").type;
             assertEquals("2026-08-05 12:34:56.123456", new ArrowValueReader().read(rs, 1, ts));
             assertEquals("2026-08-05 04:34:56.123456", new MysqlValueReader().read(rs, 1, ts));
         } finally {
@@ -270,7 +272,7 @@ public class ValueReaderTest {
      */
     @Test
     public void testNestedColumnReadsTheSameThroughEitherReader() throws Exception {
-        ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
+        ColumnMeta nested = new ColumnMeta("arr", "array", "array<date>", 0, true);
 
         RecordingResultSet mysql = new RecordingResultSet();
         mysql.next = "[\"2026-08-05\",null]";
@@ -292,7 +294,7 @@ public class ValueReaderTest {
      */
     @Test
     public void testArrowReaderUnwrapsATopLevelJavaSqlArray() throws Exception {
-        ColumnMeta nested = new ColumnMeta("arr", Types.OTHER, 0, 0, true, "array", "array<date>");
+        ColumnMeta nested = new ColumnMeta("arr", "array", "array<date>", 0, true);
         java.sql.Array array = (java.sql.Array) Proxy.newProxyInstance(getClass().getClassLoader(),
                 new Class<?>[] {java.sql.Array.class}, (proxy, method, args) ->
                         "getArray".equals(method.getName()) && (args == null || args.length == 0)
@@ -306,7 +308,7 @@ public class ValueReaderTest {
     /** A complex column whose COLUMN_TYPE did not parse is OPAQUE and keeps the getString path. */
     @Test
     public void testUnparsedComplexColumnStillReadsText() throws Exception {
-        ColumnMeta unparsed = new ColumnMeta("s", Types.OTHER, 0, 0, true, "struct", "struct<x int>");
+        ColumnMeta unparsed = new ColumnMeta("s", "struct", "struct<x int>", 0, true);
         RecordingResultSet h = new RecordingResultSet();
         h.next = "{\"x\":1}";
         assertEquals("{\"x\":1}", new MysqlValueReader().read(proxyFor(h), 1, unparsed.type));
@@ -318,7 +320,7 @@ public class ValueReaderTest {
     public void testReadRowReadsOnlyTheDeclaredColumns() throws Exception {
         RecordingResultSet h = new RecordingResultSet();
         h.next = 42;
-        Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col(Types.INTEGER), col(Types.INTEGER)));
+        Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col("int"), col("int")));
         assertArrayEquals(new Object[] {42, 42}, row);
         assertEquals(Arrays.asList("getInt", "getInt"), h.calls);
     }

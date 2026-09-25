@@ -30,7 +30,6 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.sql.SQLException;
-import java.sql.Types;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -60,8 +59,8 @@ import static org.junit.Assert.fail;
 public class StarRocksCdcSourceTaskTest {
 
     private static final List<ColumnMeta> ORDERS_COLS = Arrays.asList(
-            new ColumnMeta("id", Types.INTEGER, 10, 0, false),
-            new ColumnMeta("amount", Types.BIGINT, 19, 0, true));
+            new ColumnMeta("id", "int", "int(11)", 0, false),
+            new ColumnMeta("amount", "bigint", "bigint(20)", 0, true));
     private static final List<String> ORDERS_KEYS = Collections.singletonList("id");
 
     private FakeCdcClient fake;

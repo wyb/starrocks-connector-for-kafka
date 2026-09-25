@@ -244,8 +244,7 @@ public class ArrowDriverResultSetTest {
     private static List<ColumnMeta> columns() {
         List<ColumnMeta> cols = new ArrayList<>();
         for (String[] c : COLUMNS) {
-            cols.add(new ColumnMeta(c[0], ColumnMetadataReader.toJdbcType(c[1], c[2]), 0,
-                    ColumnMetadataReader.scaleFor(c[1], 0), true, c[1], c[2]));
+            cols.add(new ColumnMeta(c[0], c[1], c[2], 0, true));
         }
         return cols;
     }
