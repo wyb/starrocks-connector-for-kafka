@@ -52,8 +52,7 @@ final class ColumnMetaReader {
      * <p>Never from {@link java.sql.ResultSetMetaData}: the Arrow Flight driver repeats the schema,
      * calls every column NOT NULL and zeroes precision and scale, and the MySQL protocol cannot tell
      * an ARRAY, a JSON or an HLL sketch from a VARCHAR. Two descriptions would also mean one table
-     * producing two schemas depending on the URL scheme -- a StarRocks BOOLEAN really did, arriving
-     * as int8 on one transport and boolean on the other.
+     * producing two schemas depending on the URL scheme.
      */
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException {
         String sql = SqlBuilder.columnsMetadataSql(db, table);

@@ -83,8 +83,7 @@ public final class ColumnMeta {
                 return ColumnType.scalar(ColumnType.Kind.INT);
             case "bigint":
                 return ColumnType.scalar(ColumnType.Kind.BIGINT);
-            // LARGEINT: 128 bits, integral, so its Decimal schema is scale 0 whatever NUMERIC_SCALE
-            // says (FE leaves it NULL, which getInt reads as 0 by accident).
+            // LARGEINT is integral: Decimal at scale 0 whatever NUMERIC_SCALE says (FE leaves it NULL).
             case "bigint unsigned":
                 return ColumnType.scalar(ColumnType.Kind.LARGEINT);
             case "float":
@@ -122,11 +121,8 @@ public final class ColumnMeta {
         }
     }
 
-    /**
-     * True when StarRocks named a type this connector has no mapping for; null means the server was
-     * not asked. Matched against the set, never a literal: FE renders an unmapped type as its own
-     * lowercase name ("variant", "time") and UNKNOWN_TYPE as "unknown_type".
-     */
+    /** A type name this connector has no mapping for; FE spells unmapped types as their own lowercase
+     *  name ("variant", "time", "unknown_type"). Null means the server was not asked. */
     static boolean isUnrecognized(String srDataType) {
         return srDataType != null && !KNOWN_DATA_TYPES.contains(normalize(srDataType));
     }

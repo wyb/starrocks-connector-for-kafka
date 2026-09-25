@@ -239,9 +239,7 @@ public class StarRocksCdcSourceConnectorTest {
                 new ColumnMeta("m", "map", "map<varchar(10),int>", 0, true),
                 new ColumnMeta("s", "struct", "struct<x int>", 0, true),
                 new ColumnMeta("j", "json", "json", 0, true),
-                // An unrecognised type warns but must not block. "variant" is a real StarRocks type
-                // this connector does not map; the warning itself is pinned by
-                // ColumnMetaTest, which is what a placeholder value here failed to do.
+                // An unrecognised type warns but must not block; "variant" is a real StarRocks type.
                 new ColumnMeta("u", "variant", "variant", 0, true)));
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");

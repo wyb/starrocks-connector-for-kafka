@@ -64,11 +64,7 @@ public class ColumnMetaTest {
         }
     }
 
-    /**
-     * FE renders BOOLEAN's DATA_TYPE as "tinyint" and only its COLUMN_TYPE as "tinyint(1)", so the
-     * type name alone cannot tell the two apart. Getting this wrong is silent: the column arrives as
-     * an int8 of 0/1 instead of a boolean.
-     */
+    /** FE renders BOOLEAN's DATA_TYPE as "tinyint" and only its COLUMN_TYPE as "tinyint(1)". */
     @Test
     public void testBooleanIsDistinguishedFromTinyint() {
         assertEquals(ColumnType.Kind.BOOLEAN, kindOf("tinyint", "tinyint(1)"));
@@ -102,10 +98,7 @@ public class ColumnMetaTest {
         assertEquals("2", t.toConnectSchema("t.d", true).parameters().get(Decimal.SCALE_FIELD));
     }
 
-    /**
-     * LARGEINT is 128-bit and integral: Decimal at scale 0 whatever NUMERIC_SCALE says. FE reports
-     * NULL for it, and a non-zero scale would move the decimal point on every value.
-     */
+    /** LARGEINT is integral: Decimal at scale 0 whatever NUMERIC_SCALE says (FE reports NULL for it). */
     @Test
     public void testLargeIntIsItsOwnKindAtScaleZero() {
         for (int numericScale : new int[] {0, 9}) {
@@ -158,11 +151,7 @@ public class ColumnMetaTest {
         }
     }
 
-    /**
-     * Real spellings StarRocks has and this connector does not map. A check for the bare word
-     * "unknown" -- which this once was -- matches none of them, so a type StarRocks added went by
-     * in silence.
-     */
+    /** Real spellings StarRocks has and this connector does not map. */
     @Test
     public void testTypesStarRocksHasButThisConnectorDoesNotMapAreUnrecognized() {
         assertTrue(ColumnMeta.isUnrecognized("variant"));
