@@ -482,7 +482,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <p><code>openConnection</code> 在 MySQL 协议的连接上多跑一句 <code>SESSION_SETUP_SQL</code>：<code>SET binary_encoding_format = 'hex', binary_encoding_level = 'nested'</code>。这两个会话变量决定嵌套 VARBINARY 的文本形态，默认值恰好就是这样，但集群可以全局改：<code>raw</code> 会往 <code>MysqlValueReader</code> 扫的文本里塞不可解码的字节，<code>all</code> 会把顶层 VARBINARY 也 hex 化、让 <code>getBytes()</code> 拿到十六进制文本。钉住之后读取器的假设与集群设置无关；SQL 由 <code>MysqlValueReader.SESSION_BINARY_ENCODING</code> 拼出，单测断言两者一致。SET 失败则关掉刚开的连接再抛，不留半初始化的连接。Arrow Flight 以二进制传二进制，不看这两个变量，也就不设。</p>
 
-<h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">92 行</span></h3>
+<h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">89 行</span></h3>
 <p class="role">权威列清单。两条通道<strong>同一条路径</strong>：只问服务端。</p>
 
 <pre><code>fetchColumns()  ──  每行 new ColumnMeta(COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, NUMERIC_SCALE, IS_NULLABLE)</code></pre>
