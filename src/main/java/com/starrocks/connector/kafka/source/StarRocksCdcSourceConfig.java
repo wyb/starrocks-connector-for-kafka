@@ -45,24 +45,22 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public static final String TABLE_NAMES = "starrocks.table.names";
     public static final String TABLE2TOPIC_MAP = "starrocks.table2topic.map";
     public static final String TOPIC_PREFIX = "source.topic.prefix";
+    public static final String SNAPSHOT_MODE = "source.snapshot.mode";
     /** Take a full snapshot before streaming changes. */
     public static final String SNAPSHOT_MODE_INITIAL = "initial";
     /** Stream changes from the version current at task start; nothing older is ever read. */
     public static final String SNAPSHOT_MODE_NO_SNAPSHOT = "no_snapshot";
-
-    public static final String SNAPSHOT_MODE = "source.snapshot.mode";
     public static final String POLL_INTERVAL_MS = "source.poll.interval.ms";
     public static final String BOOKMARK_TTL_MS = "source.bookmark.ttl.ms";
+    public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
     /** Stop the task and wait for an operator. */
     public static final String NONTRACKABLE_POLICY_FAIL = "fail";
     /** Discard the table's position and rebuild it from a fresh snapshot. */
     public static final String NONTRACKABLE_POLICY_RESNAPSHOT = "resnapshot";
-
-    public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
     public static final String TOMBSTONES_ON_DELETE = "source.tombstones.on.delete";
     public static final String MAX_RETRIES = "source.max.retries";
     public static final String POLL_RETRY_TIMEOUT_MS = "source.poll.retry.timeout.ms";
-    public static final String CONNECT_TIMEOUT_MS = "connect.timeout.ms";
+    public static final String CONNECT_TIMEOUT_MS = "source.connect.timeout.ms";
 
     // Internal task-sharding key used only to pass the assigned tables from the Connector to a Task;
     // it is not part of CONFIG_DEF and must never be surfaced to users.
@@ -131,7 +129,9 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.STRING,
                         ConfigDef.NO_DEFAULT_VALUE,
                         ConfigDef.Importance.HIGH,
-                        "JDBC URL of the StarRocks FE MySQL protocol endpoint(s)."
+                        "JDBC URL of the StarRocks FE endpoint(s); the scheme selects the transport, jdbc:mysql:// or "
+                                + "jdbc:arrow-flight-sql://. Comma-separate several FE hosts so bookmark calls can rotate "
+                                + "to the leader."
                 ).define(
                         DATABASE_NAME,
                         ConfigDef.Type.STRING,
@@ -191,7 +191,9 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.LONG,
                         604800000L,
                         ConfigDef.Importance.MEDIUM,
-                        "The time-to-live, in milliseconds, for stored bookmarks before they are considered stale."
+                        "The lease, in milliseconds, requested for the bookmark references this task holds. Renewed "
+                                + "while the task polls, so it only bounds how long a stopped connector keeps pinning "
+                                + "versions; the cluster's bookmark_reference_max_ttl_ms caps it."
                 ).define(
                         NONTRACKABLE_POLICY,
                         ConfigDef.Type.STRING,
@@ -210,7 +212,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.INT,
                         3,
                         ConfigDef.Importance.LOW,
-                        "The number of times to retry a failed source operation before giving up."
+                        "Attempts per FE URL for a leader-only bookmark call before giving up."
                 ).define(
                         POLL_RETRY_TIMEOUT_MS,
                         ConfigDef.Type.LONG,

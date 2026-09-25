@@ -52,7 +52,7 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
 | `source.tombstones.on.delete` | Boolean | `false` | When `true`, emits an extra tombstone record (null value, same key) immediately following each delete record. |
 | `source.max.retries` | Int | `3` | Number of attempts for a bookmark call before giving up (mirrors the sink's `sink.maxretries`). |
 | `source.poll.retry.timeout.ms` | Long | `600000` | How long a table's reads may keep failing across polls before the task fails instead of retrying. Each failed poll waits `source.poll.interval.ms` before the next try. `-1` retries forever; `0` fails on the first failed poll. |
-| `connect.timeout.ms` | Int | `1000` | Milliseconds before a connection attempt to StarRocks times out. The sink connector spells its own equivalent `connect.timeoutms`; the two are separate keys. |
+| `source.connect.timeout.ms` | Int | `1000` | Milliseconds before a connection attempt to StarRocks times out. The sink connector spells its own equivalent `connect.timeoutms`; the two are separate keys. |
 
 A complete `connect-standalone`-style connector properties file:
 
@@ -82,7 +82,7 @@ source.nontrackable.policy=fail
 source.tombstones.on.delete=false
 source.max.retries=3
 source.poll.retry.timeout.ms=600000
-connect.timeout.ms=1000
+source.connect.timeout.ms=1000
 ```
 
 ### Choosing a transport

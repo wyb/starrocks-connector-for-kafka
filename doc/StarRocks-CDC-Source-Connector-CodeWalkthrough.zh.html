@@ -275,7 +275,7 @@ for (int i = 0; i &lt; tables.size(); i++)
 <p>顺序不能反：<code>DELETE /connectors/{name}/offsets</code> 是把 offset store 里<em>每一个</em>已存 partition 映射成 <code>null</code> 交进来，其中可能有本连接器已经不再写的形状。校验放在 null 判断之前，这类残留就再也清不掉了——重置是唯一的清理入口。</p>
 <p>不校验的代价不是立刻报错，而是几分钟后：写进去的畸形 offset 要等到某个 task 重启读回来，才表现为"窗口读不出来"加"续租一直失败"，跟当初那对引号已经联系不起来。</p>
 
-<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">309 行</span></h3>
+<h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">311 行</span></h3>
 <p class="role">一个 <code>AbstractConfig</code>：15 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
 
 <p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有三处：</p>

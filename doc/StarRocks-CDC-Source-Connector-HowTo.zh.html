@@ -227,7 +227,7 @@
   <tr><td><code>source.tombstones.on.delete</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会在每条删除记录之后立即发出一条额外的 tombstone 记录（value 为 null，key 相同）。</td></tr>
   <tr><td><code>source.max.retries</code></td><td>Int</td><td><code>3</code></td><td>一次 bookmark 调用在放弃前的尝试次数（对应 sink 连接器的 <code>sink.maxretries</code>）。</td></tr>
   <tr><td><code>source.poll.retry.timeout.ms</code></td><td>Long</td><td><code>600000</code></td><td>一张表的读取跨 poll 持续失败多久之后，task 不再重试而是失败。每次失败的 poll 都会先等一个 <code>source.poll.interval.ms</code> 再重试。<code>-1</code> 永远重试；<code>0</code> 首次失败即停。</td></tr>
-  <tr><td><code>connect.timeout.ms</code></td><td>Int</td><td><code>1000</code></td><td>连接 StarRocks 的尝试在超时前等待的毫秒数。sink 连接器的同类配置写作 <code>connect.timeoutms</code>，两者是不同的键。</td></tr>
+  <tr><td><code>source.connect.timeout.ms</code></td><td>Int</td><td><code>1000</code></td><td>连接 StarRocks 的尝试在超时前等待的毫秒数。sink 连接器的同类配置写作 <code>connect.timeoutms</code>，两者是不同的键。</td></tr>
 </table>
 </div>
 
@@ -258,7 +258,7 @@ source.nontrackable.policy=fail
 source.tombstones.on.delete=false
 source.max.retries=3
 source.poll.retry.timeout.ms=600000
-connect.timeout.ms=1000</code></pre>
+source.connect.timeout.ms=1000</code></pre>
 
 <h3 id="choosing-a-transport">选择传输方式</h3>
 <p>URL scheme 就是唯一的开关——并不存在单独的传输方式配置项，因为一个 JDBC URL 本身就已经指明了它要使用的驱动（driver）。两种驱动都内置在插件 jar 包中；未被指定使用的那一个则始终保持不活跃（inert）。</p>

@@ -129,7 +129,7 @@ final class FeConnection implements AutoCloseable {
     /**
      * Runs a leader-only statement, returning its single-row single-column result (null if empty).
      * A "must run on the FE leader" failure rotates to the next URL; each is tried at most once per
-     * lap. Anything else is retried up to {@code maxRetries()} times on the same URL.
+     * lap. Anything else is attempted up to {@code maxRetries()} times on the same URL.
      */
     String executeOnLeader(String sql) throws SQLException {
         int totalUrls = urls.size();
