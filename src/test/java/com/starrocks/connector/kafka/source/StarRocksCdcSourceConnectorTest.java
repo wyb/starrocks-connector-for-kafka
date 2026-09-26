@@ -467,5 +467,11 @@ public class StarRocksCdcSourceConnectorTest {
         request.put(Collections.singletonMap(OffsetState.KEY_DB, "db1"), offset);
         assertOffsetRejected("a partition naming no table matches nothing the task reads",
                 request, OffsetState.KEY_TABLE);
+
+        Map<Map<String, ?>, Map<String, ?>> extraKey = new HashMap<>();
+        Map<String, Object> partition = new HashMap<>(OffsetState.sourcePartition("db1", "orders"));
+        partition.put("shard", 1);
+        extraKey.put(partition, offset);
+        assertOffsetRejected("a partition with an extra key matches nothing the task reads", extraKey, "exactly");
     }
 }

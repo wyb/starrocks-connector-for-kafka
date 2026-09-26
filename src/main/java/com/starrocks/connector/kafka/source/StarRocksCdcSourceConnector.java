@@ -285,6 +285,11 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             Map<String, ?> partition = entry.getKey();
             requireNonEmptyString(partition, OffsetState.KEY_DB, "partition");
             requireNonEmptyString(partition, OffsetState.KEY_TABLE, "partition");
+            if (partition.size() != 2) {
+                // A task looks its partition up by Map equality, so any extra key matches nothing.
+                throw new ConnectException("partition " + partition + " must carry exactly "
+                        + OffsetState.KEY_DB + " and " + OffsetState.KEY_TABLE + "; with any other key no task reads it");
+            }
             Object bookmarkId = offset.get(OffsetState.KEY_BOOKMARK_ID);
             if (!(bookmarkId instanceof Number) || ((Number) bookmarkId).longValue() < 0) {
                 throw new ConnectException("offset for " + partition + " must carry "
