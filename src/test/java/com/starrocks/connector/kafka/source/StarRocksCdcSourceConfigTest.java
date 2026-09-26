@@ -64,6 +64,26 @@ public class StarRocksCdcSourceConfigTest {
         assertEquals("kc:c1", new StarRocksCdcSourceConfig(base()).holderId());
     }
 
+    /** What the connector assigns to a task is a subset of the captured tables, without repeats. */
+    @Test
+    public void testTaskTablesMustBeCapturedTablesWithoutRepeats() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.TASK_TABLES, "users, orders");
+        assertEquals(Arrays.asList("users", "orders"), new StarRocksCdcSourceConfig(m).taskTables());
+        for (String bad : new String[] {null, " , ", "orders, orders", "items"}) {
+            Map<String, String> props = base();
+            if (bad != null) {
+                props.put(StarRocksCdcSourceConfig.TASK_TABLES, bad);
+            }
+            try {
+                new StarRocksCdcSourceConfig(props).taskTables();
+                fail("expected ConfigException for task.tables=" + bad);
+            } catch (ConfigException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TASK_TABLES));
+            }
+        }
+    }
+
     /** 0 hot-loops the FE leader and a negative reaches Thread.sleep; neither may be configurable. */
     @Test
     public void testPollIntervalMustBePositive() {

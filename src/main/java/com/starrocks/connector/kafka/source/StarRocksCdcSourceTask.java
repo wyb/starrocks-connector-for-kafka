@@ -142,7 +142,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         tombstones = config.tombstonesOnDelete();
         policyResnapshot = StarRocksCdcSourceConfig.NONTRACKABLE_POLICY_RESNAPSHOT.equals(config.nonTrackablePolicy());
 
-        List<String> taskTables = assignedTables(props, config);
+        List<String> taskTables = config.taskTables();
         client = createClient(config);
 
         try {
@@ -163,32 +163,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
         } catch (SQLException e) {
             throw new ConnectException("Failed to start CDC source task", e);
         }
-    }
-
-    /**
-     * The tables the connector assigned to this task. The connector never writes an empty,
-     * duplicated or unlisted assignment, so any of them is a hand-written config; a duplicate would
-     * ship every row twice while one copy's fence releases the other's base.
-     */
-    private static List<String> assignedTables(Map<String, String> props, StarRocksCdcSourceConfig config) {
-        List<String> assigned = StarRocksCdcSourceConfig.splitNames(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
-        if (assigned.isEmpty()) {
-            throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES
-                    + " names no table; the connector sets it for every task it creates");
-        }
-        List<String> captured = config.tableNames();
-        Set<String> seen = new HashSet<>();
-        for (String table : assigned) {
-            if (!captured.contains(table)) {
-                throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES + " names " + table + ", which "
-                        + StarRocksCdcSourceConfig.TABLE_NAMES + "=" + captured + " does not list");
-            }
-            if (!seen.add(table)) {
-                throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES + " names " + table
-                        + " more than once; one task would capture it twice");
-            }
-        }
-        return assigned;
     }
 
     /** One state per assigned table, its columns read from the server and its mapper built. */
@@ -245,10 +219,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * bookmark the holder still references, adopted by {@link #adoptHeldBookmarks}, is the position
      * an earlier start pinned, and resuming from it keeps every change since. A reset through the
      * offsets REST API releases those references first, so it still starts from the current
-     * version. Logs where the table starts. Package-visible so tests can drive it without a real
-     * offset store.
+     * version. Logs where the table starts.
      */
-    void restoreOffset(TableState t, Map<String, Object> raw) {
+    private void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;

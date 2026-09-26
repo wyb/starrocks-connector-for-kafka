@@ -260,6 +260,30 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         return splitNames(getString(TABLE_NAMES));
     }
 
+    /**
+     * The tables the connector assigned to this task through {@link #TASK_TABLES}. The connector
+     * never writes an empty, duplicated or unlisted assignment, so any of them is a hand-written
+     * config; a duplicate would ship every row twice while one copy's fence releases the other's base.
+     */
+    public List<String> taskTables() {
+        String raw = originalsStrings().get(TASK_TABLES);
+        List<String> assigned = splitNames(raw);
+        if (assigned.isEmpty()) {
+            throw new ConfigException(TASK_TABLES, raw, "names no table; the connector sets it for every task it creates.");
+        }
+        List<String> captured = tableNames();
+        Set<String> seen = new HashSet<>();
+        for (String table : assigned) {
+            if (!captured.contains(table)) {
+                throw new ConfigException(TASK_TABLES, table, "is not listed in " + TABLE_NAMES + "=" + captured + ".");
+            }
+            if (!seen.add(table)) {
+                throw new ConfigException(TASK_TABLES, table, "is named more than once; one task would capture it twice.");
+            }
+        }
+        return assigned;
+    }
+
     /** Comma-separated names, trimmed, empty entries dropped; null names nothing. The task reads
      *  {@link #TASK_TABLES} with it. */
     public static List<String> splitNames(String raw) {

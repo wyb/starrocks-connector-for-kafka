@@ -21,6 +21,7 @@
 package com.starrocks.connector.kafka.source;
 
 import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.source.SourceRecord;
@@ -641,9 +642,9 @@ public class StarRocksCdcSourceTaskTest {
      */
     @Test
     public void testRestoringAHalfDeliveredSnapshotRedoesItWhole() throws Exception {
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, false));
         task.start(baseProps());
         StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-        task.restoreOffset(t, OffsetState.sourceOffset(11952L, false));
 
         fake.enqueueHead("orders", 11955L);
         fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
@@ -665,12 +666,12 @@ public class StarRocksCdcSourceTaskTest {
      */
     @Test
     public void testRestoringAnUnparsableBookmarkIdRedoesTheSnapshot() throws Exception {
-        task.start(baseProps());
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
         Map<String, Object> corrupt = new HashMap<>();
         corrupt.put(OffsetState.KEY_BOOKMARK_ID, "11952");
         corrupt.put(OffsetState.KEY_SNAPSHOT_DONE, true);
-        task.restoreOffset(t, corrupt);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), corrupt);
+        task.start(baseProps());
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
 
         assertEquals(-1L, t.committedBookmark);
         assertFalse(t.snapshotDone);
@@ -687,9 +688,9 @@ public class StarRocksCdcSourceTaskTest {
 
     @Test
     public void testRestartResumesFromCommittedOffset() throws Exception {
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, true));
         task.start(baseProps());
         StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-        task.restoreOffset(t, OffsetState.sourceOffset(11952L, true));
 
         fake.enqueueHead("orders", 11955L);
         fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 9001L));
@@ -712,9 +713,9 @@ public class StarRocksCdcSourceTaskTest {
      */
     @Test
     public void testRestartedBookmarkIsEventuallyReleased() throws Exception {
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, true));
         task.start(baseProps());
         StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-        task.restoreOffset(t, OffsetState.sourceOffset(11952L, true));
 
         // Retained rather than dropped on the floor.
         assertEquals(Collections.singletonList(11952L), liveBookmarksOf(task));
@@ -1664,8 +1665,8 @@ public class StarRocksCdcSourceTaskTest {
     @Test
     public void testFenceNeverOutrunsThisTasksOwnPosition() throws Exception {
         fake.enqueueHead("orders", 100L);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, true));
         task.start(baseProps());
-        task.restoreOffset(task.tables.get(0), OffsetState.sourceOffset(100L, true));
         assertEquals(Collections.singletonList(100L), liveBookmarksOf(task));
 
         // A zombie predecessor flushes a window this task never read.
@@ -1793,23 +1794,16 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(1, out.size());
     }
 
-    /** The connector sets task.tables for every task it creates; a hand-written config without it
-     *  must not idle silently. */
+    /** A bad assignment fails the task at start with the config's own message; the rules live in the config's tests. */
     @Test
-    public void testStartRejectsAnEmptyTableAssignment() {
-        for (String assignment : new String[] {null, " , "}) {
-            Map<String, String> props = baseProps();
-            if (assignment == null) {
-                props.remove(StarRocksCdcSourceConfig.TASK_TABLES);
-            } else {
-                props.put(StarRocksCdcSourceConfig.TASK_TABLES, assignment);
-            }
-            try {
-                newTask(new FakeCdcClient()).start(props);
-                fail("expected ConnectException for task.tables=" + assignment);
-            } catch (ConnectException e) {
-                assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TASK_TABLES));
-            }
+    public void testStartRefusesABadTableAssignment() {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders, orders");
+        try {
+            newTask(new FakeCdcClient()).start(props);
+            fail("expected ConfigException for a duplicated assignment");
+        } catch (ConfigException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("more than once"));
         }
     }
 
@@ -1868,26 +1862,5 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
         assertEquals(140L, task.tables.get(0).committedBookmark);
         assertEquals(0, fake.snapshotCalls);
-    }
-
-    /** The connector never writes a duplicated or unlisted assignment; a duplicate would ship every row twice. */
-    @Test
-    public void testStartRejectsADuplicateOrUnlistedTableAssignment() {
-        Map<String, String> duplicated = baseProps();
-        duplicated.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders, orders");
-        try {
-            newTask(new FakeCdcClient()).start(duplicated);
-            fail("expected ConnectException for a duplicated assignment");
-        } catch (ConnectException e) {
-            assertTrue(e.getMessage(), e.getMessage().contains("more than once"));
-        }
-        Map<String, String> unlisted = baseProps();
-        unlisted.put(StarRocksCdcSourceConfig.TASK_TABLES, "users");
-        try {
-            newTask(new FakeCdcClient()).start(unlisted);
-            fail("expected ConnectException for an assignment outside starrocks.table.names");
-        } catch (ConnectException e) {
-            assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TABLE_NAMES));
-        }
     }
 }
