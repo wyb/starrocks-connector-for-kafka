@@ -39,10 +39,9 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Tests for {@link StarRocksCdcSourceConnector}: the fail-fast preflight checks run from {@code
- * start()} (unique-key rejection, PK-without-CDC rejection, metadata pseudo-column collisions, and
- * the bookmark-meta-function probe) and the round-robin table sharding performed by {@code
- * taskConfigs()}.
+ * Tests for {@link StarRocksCdcSourceConnector}: the fail-fast preflight in {@code start()} (table
+ * model, CDC property, columns, bookmark-function probe), the round-robin sharding in {@code
+ * taskConfigs()}, {@code exactlyOnceSupport} and the offset vetting in {@code alterOffsets}.
  */
 public class StarRocksCdcSourceConnectorTest {
 
@@ -96,12 +95,11 @@ public class StarRocksCdcSourceConnectorTest {
 
     /**
      * A view leaves {@code table_model} unset: InformationSchemaDataSource sets it only after
-     * casting to OlapTable, and the BE fills the unset thrift field with "". The old guard was
-     * {@code model != null}, which that empty string satisfies -- so every check below it passed and
-     * the table failed later at bookmark_create, after a warning naming a blank model.
+     * casting to OlapTable, and the BE fills the unset thrift field with "", so "no model" arrives
+     * as an empty string as often as a null.
      */
     @Test
-    public void testPreflightRejectsATableWhoseModelIsUnknown() {
+    public void testPreflightRejectsATableWithNoModel() {
         for (String model : new String[] {null, "", "   "}) {
             FakeCdcClient fake = new FakeCdcClient();
             if (model != null) {
@@ -243,11 +241,15 @@ public class StarRocksCdcSourceConnectorTest {
     }
 
     /**
-     * Complex types are exportable -- as text, for now -- so the same guard must not catch them.
-     * A check that also rejected ARRAY would turn away perfectly capturable tables.
+     * Complex types are exportable -- natively when the declaration parses, as text otherwise --
+     * so the sketch guard must not catch them; a check that also rejected ARRAY would turn away
+     * perfectly capturable tables.
      */
     @Test
     public void testPreflightAcceptsComplexTypeColumns() {
+        ColumnMeta unparsable = new ColumnMeta("deep", "array", "array<...>", 0, true);
+        assertEquals("the case under test is the one the parser refuses",
+                ColumnType.Kind.OPAQUE, unparsable.type.kind);
         FakeCdcClient fake = new FakeCdcClient();
         fake.modelByTable.put("t1", "DUP_KEYS");
         fake.colsByTable.put("t1", Arrays.asList(
@@ -257,7 +259,9 @@ public class StarRocksCdcSourceConnectorTest {
                 new ColumnMeta("s", "struct", "struct<x int>", 0, true),
                 new ColumnMeta("j", "json", "json", 0, true),
                 // An unrecognised type warns but must not block; "variant" is a real StarRocks type.
-                new ColumnMeta("u", "variant", "variant", 0, true)));
+                new ColumnMeta("u", "variant", "variant", 0, true),
+                // A declaration the parser refuses is carried as text: warns, must not block either.
+                unparsable));
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
 
@@ -265,19 +269,37 @@ public class StarRocksCdcSourceConnectorTest {
     }
 
     @Test
-    public void testPreflightAcceptsDupAndPkWithCdc() {
+    public void testPreflightAcceptsDupAggAndPkWithCdc() {
         FakeCdcClient fake = new FakeCdcClient();
         fake.modelByTable.put("t1", "DUP_KEYS");
         fake.modelByTable.put("t2", "PRIMARY_KEYS");
         fake.cdcEnabledByTable.put("t2", true);
+        fake.modelByTable.put("t3", "AGG_KEYS");
         Map<String, String> props = base();
-        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1,t2");
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1,t2,t3");
         StarRocksCdcSourceConnector connector = newConnector(fake);
 
         connector.start(props);
 
         assertSame(StarRocksCdcSourceTask.class, connector.taskClass());
         assertSame(StarRocksCdcSourceConfig.CONFIG_DEF, connector.config());
+    }
+
+    /** A metadata query that fails is wrapped once, with the table's name, and the FE's reason kept as the cause. */
+    @Test
+    public void testPreflightWrapsAMetadataQueryFailureWithTheTableName() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.tableConfigFailure = new SQLException("table not found: db1.t1");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+
+        try {
+            newConnector(fake).start(props);
+            fail("expected ConnectException when tables_config cannot be read");
+        } catch (ConnectException e) {
+            assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+            assertSame(fake.tableConfigFailure, e.getCause());
+        }
     }
 
     /**
@@ -352,6 +374,21 @@ public class StarRocksCdcSourceConnectorTest {
                 taskHolder, probeHolder);
         assertTrue("the probe holder should still be derived from the task holder, was: " + probeHolder,
                 probeHolder.startsWith(taskHolder));
+    }
+
+    /** A probe bookmark that cannot be released expires by its own TTL: a warning, not a failed start. */
+    @Test
+    public void testPreflightSurvivesAFailedProbeRelease() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "DUP_KEYS");
+        fake.bookmarkReleaseFailure = new SQLException("synthetic release failure");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+
+        newConnector(fake).start(props);
+
+        assertEquals(1, fake.createdBookmarks.size());
+        assertEquals("the release must have been attempted", 1, fake.releasedBookmarks.size());
     }
 
     /**
@@ -438,6 +475,14 @@ public class StarRocksCdcSourceConnectorTest {
         assertTrue(new StarRocksCdcSourceConnector().alterOffsets(base(), request));
     }
 
+    /** A reset is the one way to clear stale offsets, so it must not depend on the config parsing. */
+    @Test
+    public void testAlterOffsetsResetsWithoutParsingTheConfig() {
+        Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
+        request.put(OffsetState.sourcePartition("db1", "orders"), null);
+        assertTrue(new StarRocksCdcSourceConnector().alterOffsets(new HashMap<>(), request));
+    }
+
     /**
      * Connect writes the payload to the offset store whether or not this runs, and the task reads a
      * quoted id back as no position at all. Rejecting it here is the only place an operator learns
@@ -477,6 +522,11 @@ public class StarRocksCdcSourceConnectorTest {
         partition.put("shard", 1);
         extraKey.put(partition, offset);
         assertOffsetRejected("a partition with an extra key matches nothing the task reads", extraKey, "exactly");
+
+        Map<Map<String, ?>, Map<String, ?>> nullPartition = new HashMap<>();
+        nullPartition.put(null, offset);
+        assertOffsetRejected("Connect passes a request's \"partition\": null through as is", nullPartition,
+                OffsetState.KEY_DB);
     }
 
     /** A well-formed partition for a table the config does not list would land and never be read. */

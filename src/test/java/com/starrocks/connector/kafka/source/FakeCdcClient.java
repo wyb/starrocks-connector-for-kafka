@@ -70,6 +70,10 @@ final class FakeCdcClient implements CdcClient {
     SQLException bookmarkCreateFailure;
     /** When set, every bookmarkRenew fails with it. */
     SQLException bookmarkRenewFailure;
+    /** When set, every bookmarkRelease fails with it, after being recorded. */
+    SQLException bookmarkReleaseFailure;
+    /** When set, every fetchTableConfig fails with it -- a table tables_config does not list. */
+    SQLException tableConfigFailure;
     /** When set, every fetchHeldBookmarks fails with it -- a cluster without the reference table. */
     SQLException heldBookmarksFailure;
     /** Thrown once by streamChanges for that table, after any queued rows -- a partial window. */
@@ -175,9 +179,12 @@ final class FakeCdcClient implements CdcClient {
     }
 
     @Override
-    public void bookmarkRelease(String db, String table, long bookmarkId, String holder) {
+    public void bookmarkRelease(String db, String table, long bookmarkId, String holder) throws SQLException {
         releasedBookmarks.add(db + "." + table + ":" + bookmarkId + ":" + holder);
         releaseHolders.add(holder);
+        if (bookmarkReleaseFailure != null) {
+            throw bookmarkReleaseFailure;
+        }
     }
 
     @Override
@@ -203,7 +210,10 @@ final class FakeCdcClient implements CdcClient {
     }
 
     @Override
-    public TableConfig fetchTableConfig(String db, String table) {
+    public TableConfig fetchTableConfig(String db, String table) throws SQLException {
+        if (tableConfigFailure != null) {
+            throw tableConfigFailure;
+        }
         Boolean enabled = cdcEnabledByTable.get(table);
         return new TableConfig(db, table, 0L, modelByTable.get(table),
                 "{\"" + TableConfig.CDC_PROPERTY + "\":\"" + (enabled != null && enabled) + "\"}");

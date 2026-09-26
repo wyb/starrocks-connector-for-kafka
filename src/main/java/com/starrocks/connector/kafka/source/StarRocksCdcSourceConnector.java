@@ -84,8 +84,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * offset it commits is the bookmark to resume from, written in the same transaction.
      *
      * <p>Read from the raw properties rather than through {@link StarRocksCdcSourceConfig}: the
-     * herder calls this while validating, so a half-filled config -- the key missing or null -- must
-     * not throw here.
+     * herder calls this while validating a config with {@code exactly.once.support=required}, so a
+     * half-filled config -- the key missing or null -- must not throw here.
      */
     @Override
     public ExactlyOnceSupport exactlyOnceSupport(Map<String, String> props) {
@@ -137,18 +137,18 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // Treating no model as permission would let the column checks pass and the table
                 // fail later, at bookmark_create.
                 throw new ConnectException(
-                        "could not determine the table model of " + db + "." + table
+                        "Could not determine the table model of " + db + "." + table
                                 + " (information_schema.tables_config reports it empty), so this connector"
                                 + " cannot tell whether the table is capturable. Views, materialized views"
                                 + " and external tables have no table model; capture the base table instead.");
             case OTHER:
                 throw new ConnectException(
-                        "table " + db + "." + table + " has table model '" + tableConfig.modelName
+                        "Table " + db + "." + table + " has table model '" + tableConfig.modelName
                                 + "', which this connector does not know, so it cannot tell whether CHANGES"
                                 + " can read it");
             case UNIQUE:
                 throw new ConnectException(
-                        "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
+                        "Table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
             case DUPLICATE:
                 // DUP's key is a sort key and admits duplicates: fine for partitioning, not for compaction.
                 LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
@@ -162,7 +162,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // The only model that carries the property.
                 if (!tableConfig.cdcEnabled()) {
                     throw new ConnectException(
-                            "primary key table " + db + "." + table + " does not have change data capture "
+                            "Primary key table " + db + "." + table + " does not have change data capture "
                                     + "enabled; run: ALTER TABLE " + db + "." + table
                                     + " SET (\"" + TableConfig.CDC_PROPERTY + "\" = \"true\")");
                 }
@@ -184,13 +184,13 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             if (SqlBuilder.CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name)
                     || SqlBuilder.ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
                 throw new ConnectException(
-                        "table " + db + "." + table + " has a column named " + col.name
-                                + " which collides with a CDC metadata column");
+                        "Table " + db + "." + table + " has a column named " + col.name
+                                + " which collides with a CHANGES pseudo-column");
             }
             // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can interpret.
             if (ColumnMeta.isNonExportable(col.srDataType)) {
                 throw new ConnectException(
-                        "table " + db + "." + table + " has column '" + col.name + "' of type "
+                        "Table " + db + "." + table + " has column '" + col.name + "' of type "
                                 + col.srDataType + ", whose value cannot be exported by a SELECT"
                                 + " -- it is an aggregate sketch, not a value. Leave this table out of "
                                 + StarRocksCdcSourceConfig.TABLE_NAMES + ", or drop the column.");
@@ -286,7 +286,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             requirePartitionString(partition, OffsetState.KEY_TABLE);
             if (partition.size() != 2) {
                 // A task looks its partition up by Map equality, so any extra key matches nothing.
-                throw new ConnectException("partition " + partition + " must carry exactly "
+                throw new ConnectException("Partition " + partition + " must carry exactly "
                         + OffsetState.KEY_DB + " and " + OffsetState.KEY_TABLE + "; with any other key no task reads it");
             }
             if (config == null) {
@@ -294,21 +294,21 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             }
             if (!config.databaseName().equals(partition.get(OffsetState.KEY_DB))
                     || !config.tableNames().contains(partition.get(OffsetState.KEY_TABLE))) {
-                throw new ConnectException("partition " + partition + " names no table this connector captures ("
+                throw new ConnectException("Partition " + partition + " names no table this connector captures ("
                         + StarRocksCdcSourceConfig.DATABASE_NAME + "=" + config.databaseName() + ", "
                         + StarRocksCdcSourceConfig.TABLE_NAMES + "=" + config.tableNames()
                         + "), so no task would read the offset");
             }
             Object bookmarkId = offset.get(OffsetState.KEY_BOOKMARK_ID);
             if (!(bookmarkId instanceof Number) || ((Number) bookmarkId).longValue() < 0) {
-                throw new ConnectException("offset for " + partition + " must carry "
+                throw new ConnectException("Offset for " + partition + " must carry "
                         + OffsetState.KEY_BOOKMARK_ID + " as a non-negative number, not "
                         + describe(bookmarkId) + ". Quote nothing: {\"" + OffsetState.KEY_BOOKMARK_ID
                         + "\": 11955, \"" + OffsetState.KEY_SNAPSHOT_DONE + "\": true}");
             }
             Object snapshotDone = offset.get(OffsetState.KEY_SNAPSHOT_DONE);
             if (!(snapshotDone instanceof Boolean)) {
-                throw new ConnectException("offset for " + partition + " must carry "
+                throw new ConnectException("Offset for " + partition + " must carry "
                         + OffsetState.KEY_SNAPSHOT_DONE + " as a boolean, not " + describe(snapshotDone)
                         + ". false re-reads the table from scratch; true resumes CHANGES from "
                         + OffsetState.KEY_BOOKMARK_ID + ".");
@@ -321,7 +321,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     private static void requirePartitionString(Map<String, ?> partition, String key) {
         Object value = partition == null ? null : partition.get(key);
         if (!(value instanceof String) || ((String) value).isEmpty()) {
-            throw new ConnectException("partition " + partition + " must carry " + key
+            throw new ConnectException("Partition " + partition + " must carry " + key
                     + " as a non-empty string, not " + describe(value));
         }
     }
