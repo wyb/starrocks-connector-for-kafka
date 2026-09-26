@@ -23,6 +23,7 @@ package com.starrocks.connector.kafka.source;
 import com.starrocks.connector.kafka.common.Version;
 
 import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
 import org.apache.kafka.connect.connector.Task;
 import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.ExactlyOnceSupport;
@@ -39,7 +40,8 @@ import java.util.Map;
 /**
  * Validates configuration, runs fail-fast preflight against every captured table, shards the table
  * list round-robin across {@code maxTasks} tasks, and vets the offsets the REST API is about to
- * write ({@link #alterOffsets}). {@link #exactlyOnceSupport} says when exactly-once is on offer.
+ * write, releasing the FE references a reset must not leave behind ({@link #alterOffsets}).
+ * {@link #exactlyOnceSupport} says when exactly-once is on offer.
  *
  * <p>Preflight rejects at {@link #start} rather than mid-stream: a table with no model (a view, an
  * external table) or one this connector does not know; the UNIQUE KEY model; a PRIMARY KEY table
@@ -263,22 +265,32 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     }
 
     /**
-     * Validates what the offsets REST API is about to write. Connect writes the payload to the
-     * offset store whether or not a connector overrides this, so without the check a malformed one
-     * -- {@code bookmark_id} quoted as a string, say -- lands silently and only surfaces when a task
-     * restarts and reads it back as "no position at all". A partition naming a table the config does
-     * not capture is refused for the same reason: no task would ever read it.
+     * Validates what the offsets REST API is about to write, and makes a reset reach the FE. Connect
+     * writes the payload to the offset store whether or not a connector overrides this, so without
+     * the check a malformed one -- {@code bookmark_id} quoted as a string, say -- lands silently and
+     * only surfaces when a task restarts and reads it back as "no position at all". A partition
+     * naming a table the config does not capture is refused for the same reason: no task would ever
+     * read it.
+     *
+     * <p>A reset also releases every bookmark the tasks' holder still references on the reset table.
+     * Under {@code no_snapshot} a task with no durable offset resumes from the oldest of those, so
+     * leaving them would undo the reset at the next start. That needs the FE, hence a config that
+     * parses; a release that fails refuses the reset rather than leaving it half done.
      */
     @Override
     public boolean alterOffsets(Map<String, String> connectorConfig,
                                 Map<Map<String, ?>, Map<String, ?>> offsets) {
-        StarRocksCdcSourceConfig config = null; // built on first use, so a reset never depends on the config parsing
+        StarRocksCdcSourceConfig config = null; // built on first use
+        List<Map<String, ?>> resets = new ArrayList<>();
         for (Map.Entry<Map<String, ?>, Map<String, ?>> entry : offsets.entrySet()) {
             Map<String, ?> offset = entry.getValue();
             if (offset == null) {
                 // A reset, and DELETE /offsets sends every stored partition this way. Validating
                 // those would leave a partition whose shape this connector no longer writes with no
                 // supported way to clear it, since a reset is the only way.
+                if (namesATable(entry.getKey())) {
+                    resets.add(entry.getKey());
+                }
                 continue;
             }
             Map<String, ?> partition = entry.getKey();
@@ -290,7 +302,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                         + OffsetState.KEY_DB + " and " + OffsetState.KEY_TABLE + "; with any other key no task reads it");
             }
             if (config == null) {
-                config = new StarRocksCdcSourceConfig(connectorConfig);
+                config = parseConfig(connectorConfig);
             }
             if (!config.databaseName().equals(partition.get(OffsetState.KEY_DB))
                     || !config.tableNames().contains(partition.get(OffsetState.KEY_TABLE))) {
@@ -314,16 +326,72 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                         + OffsetState.KEY_BOOKMARK_ID + ".");
             }
         }
+        if (!resets.isEmpty()) {
+            if (config == null) {
+                config = parseConfig(connectorConfig);
+            }
+            releaseReferences(config, resets);
+        }
         return true;
+    }
+
+    /** The config, or a refusal that says what altering and resetting offsets need it for. */
+    private static StarRocksCdcSourceConfig parseConfig(Map<String, String> connectorConfig) {
+        try {
+            return new StarRocksCdcSourceConfig(connectorConfig);
+        } catch (ConfigException e) {
+            throw new ConnectException("The connector configuration does not parse (" + e.getMessage()
+                    + "); altering offsets needs it to check the table is captured, resetting them to reach the FE", e);
+        }
+    }
+
+    /** Releases every bookmark the tasks' holder still references on each reset table; a dropped table
+     *  references nothing. */
+    private void releaseReferences(StarRocksCdcSourceConfig config, List<Map<String, ?>> partitions) {
+        String holder = config.holderId();
+        CdcClient client = createClient(config);
+        try {
+            for (Map<String, ?> partition : partitions) {
+                String db = stringAt(partition, OffsetState.KEY_DB);
+                String table = stringAt(partition, OffsetState.KEY_TABLE);
+                try {
+                    List<Long> held = client.fetchHeldBookmarks(db, table, holder);
+                    for (Long id : held) {
+                        client.bookmarkRelease(db, table, id, holder);
+                    }
+                    LOG.info("Offset reset of {}.{}: released {} bookmark(s) {} still held: {}",
+                            db, table, held.size(), holder, held);
+                } catch (SQLException e) {
+                    throw new ConnectException("Reset refused: could not release the bookmarks " + holder + " holds on "
+                            + db + "." + table + ": " + e.getMessage() + ". Left in place, a task with no offset would"
+                            + " resume from them instead of from the current version; retry when the FE answers, or"
+                            + " release them with bookmark_release.", e);
+                }
+            }
+        } finally {
+            client.close();
+        }
+    }
+
+    /** Whether the partition names a db and a table: the shape every task writes, and the only one the FE
+     *  knows. */
+    private static boolean namesATable(Map<String, ?> partition) {
+        return stringAt(partition, OffsetState.KEY_DB) != null && stringAt(partition, OffsetState.KEY_TABLE) != null;
     }
 
     /** {@code partition} itself may be null: Connect passes a request's {@code "partition": null} through as is. */
     private static void requirePartitionString(Map<String, ?> partition, String key) {
-        Object value = partition == null ? null : partition.get(key);
-        if (!(value instanceof String) || ((String) value).isEmpty()) {
+        if (stringAt(partition, key) == null) {
+            Object value = partition == null ? null : partition.get(key);
             throw new ConnectException("Partition " + partition + " must carry " + key
                     + " as a non-empty string, not " + describe(value));
         }
+    }
+
+    /** The value under {@code key} when it is a non-empty string, else null. */
+    private static String stringAt(Map<String, ?> map, String key) {
+        Object value = map == null ? null : map.get(key);
+        return value instanceof String && !((String) value).isEmpty() ? (String) value : null;
     }
 
     /** Names the offending value with its type, since "11955" and 11955 print the same. */

@@ -77,7 +77,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
         final List<ColumnMeta> cols;
         final ChangeRecordMapper mapper;
         // volatile: commit() reads it from the offset-committer thread to clamp the fence, while
-        // the poll thread writes it. Every other TableState field stays poll-thread-only.
+        // the poll thread writes it. Apart from liveBookmarks and pendingReleases below, every
+        // other TableState field stays poll-thread-only.
         volatile long committedBookmark = -1L;
         boolean snapshotDone = false;
         // Created and not yet released, oldest first. Genuinely concurrent: the poll thread appends,
@@ -141,13 +142,12 @@ public class StarRocksCdcSourceTask extends SourceTask {
         tombstones = config.tombstonesOnDelete();
         policyResnapshot = StarRocksCdcSourceConfig.NONTRACKABLE_POLICY_RESNAPSHOT.equals(config.nonTrackablePolicy());
 
-        client = createClient(config);
-
         List<String> taskTables = StarRocksCdcSourceConfig.splitNames(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
         if (taskTables.isEmpty()) {
             throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES
                     + " names no table; the connector sets it for every task it creates");
         }
+        client = createClient(config);
 
         try {
             List<TableState> started = new ArrayList<>();
@@ -182,7 +182,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     /**
      * Re-enters every reference this holder still has on the table, so a predecessor's leftovers
-     * are released by the fence instead of expiring by TTL. Best-effort.
+     * are released by the fence instead of expiring by TTL, and so {@link #restoreOffset} can resume
+     * from the oldest of them under {@code no_snapshot}. Best-effort.
      */
     private void adoptHeldBookmarks(TableState t) {
         List<Long> held;
@@ -190,7 +191,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
             held = client.fetchHeldBookmarks(db, t.table, holder);
         } catch (SQLException e) {
             LOG.warn("Could not list the bookmarks {} holds on {}.{}; any left by a previous task expire by "
-                    + "TTL instead of being released", holder, db, t.table, e);
+                    + "TTL instead of being released, and with no durable offset under no_snapshot the position "
+                    + "an earlier start pinned is not recovered", holder, db, t.table, e);
             return;
         }
         for (Long id : held) {
@@ -203,8 +205,12 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     /**
      * Restores one table from its durable offset. Only {@code snapshot_done=true} is trusted;
-     * anything else leaves the table fresh so the next poll redoes the snapshot. Package-visible so
-     * tests can drive it without a real offset store.
+     * anything else leaves the table fresh so the next poll redoes the snapshot -- except under
+     * {@code no_snapshot}, where nothing is durable before the first change window: there the oldest
+     * bookmark the holder still references, adopted by {@link #adoptHeldBookmarks}, is the position
+     * an earlier start pinned, and resuming from it keeps every change since. A reset through the
+     * offsets REST API releases those references first, so it still starts from the current
+     * version. Package-visible so tests can drive it without a real offset store.
      */
     void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
@@ -215,6 +221,20 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // table per restart until its TTL. Safe, because commit() releases strictly below the
             // durable offset, and at restore time this id is exactly that offset.
             retain(t, state.bookmarkId);
+            return;
+        }
+        if (snapshotInitial) {
+            return;
+        }
+        Long oldest;
+        synchronized (t.liveBookmarks) {
+            oldest = t.liveBookmarks.isEmpty() ? null : Collections.min(t.liveBookmarks);
+        }
+        if (oldest != null) {
+            t.committedBookmark = oldest;
+            t.snapshotDone = true;
+            LOG.info("No durable offset for {}.{}; resuming CHANGES from bookmark {}, the oldest {} still holds "
+                    + "from an earlier start", db, t.table, oldest, holder);
         }
     }
 
@@ -569,7 +589,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // Never above this task's own position. The offset store is keyed by connector name,
             // not by task generation, so a zombie predecessor still flushing would otherwise let
             // this task release the very bookmark it resumed from.
-            long fence = Math.min(durable.getOrDefault(t.table, -1L), t.committedBookmark);
+            long fence = Math.min(durable.get(t.table), t.committedBookmark);
             if (fence < 0) {
                 continue;
             }

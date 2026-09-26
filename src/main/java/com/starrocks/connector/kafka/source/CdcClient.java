@@ -51,7 +51,8 @@ public interface CdcClient extends AutoCloseable {
 
     void bookmarkRelease(String db, String table, long bookmarkId, String holder) throws SQLException;
 
-    /** Ids of the bookmarks {@code holder} still references on the table, ascending. */
+    /** Ids of the bookmarks {@code holder} still references on the table, ascending; none for a table that
+     *  no longer exists. */
     List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException;
 
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException;

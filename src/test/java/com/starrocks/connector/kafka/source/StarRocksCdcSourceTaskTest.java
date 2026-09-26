@@ -1818,4 +1818,61 @@ public class StarRocksCdcSourceTaskTest {
             }
         }
     }
+
+    /**
+     * Under no_snapshot nothing is durable before the first change window, so a restart in between
+     * resumes from the oldest bookmark the holder still references: the position the earlier start pinned.
+     */
+    @Test
+    public void testNoSnapshotRestartResumesFromTheOldestHeldBookmark() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT);
+        fake.setHeldBookmarks("orders", 100L, 130L);
+        task.start(props);
+
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
+        assertEquals(100L, t.committedBookmark);
+        assertTrue(t.snapshotDone);
+
+        fake.enqueueHead("orders", 140L);
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
+        assertEquals(1, task.poll().size());
+        assertEquals(Collections.singletonList("100_140"), fake.streamedWindows);
+        assertEquals(0, fake.snapshotCalls);
+    }
+
+    /** A durable offset outranks the held references. */
+    @Test
+    public void testADurableOffsetOutranksTheHeldBookmarks() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT);
+        fake.setHeldBookmarks("orders", 100L, 130L);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(130L, true));
+        task.start(props);
+        assertEquals(130L, task.tables.get(0).committedBookmark);
+    }
+
+    /** With a snapshot to redo, held references are only adopted for release, never taken as the position. */
+    @Test
+    public void testInitialModeIgnoresHeldBookmarksForItsPosition() throws Exception {
+        fake.setHeldBookmarks("orders", 100L, 130L);
+        task.start(baseProps());
+        assertFalse(task.tables.get(0).snapshotDone);
+        task.poll();
+        assertEquals(1, fake.snapshotCalls);
+    }
+
+    /** An unreadable reference list under no_snapshot leaves the table fresh, as on a first-ever run. */
+    @Test
+    public void testAnUnreadableReferenceListUnderNoSnapshotStartsAfresh() throws Exception {
+        Map<String, String> props = baseProps();
+        props.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT);
+        fake.heldBookmarksFailure = new SQLException("Unknown table 'table_bookmark_references'");
+        task.start(props);
+        assertFalse(task.tables.get(0).snapshotDone);
+        fake.enqueueHead("orders", 140L);
+        task.poll();
+        assertEquals(140L, task.tables.get(0).committedBookmark);
+        assertEquals(0, fake.snapshotCalls);
+    }
 }

@@ -29,6 +29,7 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -469,18 +470,67 @@ public class StarRocksCdcSourceConnectorTest {
      */
     @Test
     public void testAlterOffsetsResetsAPartitionItWouldRefuseToWrite() {
+        FakeCdcClient fake = new FakeCdcClient();
         Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
         request.put(Collections.singletonMap(OffsetState.KEY_DB, "db1"), null);
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
-        assertTrue(new StarRocksCdcSourceConnector().alterOffsets(base(), request));
+        assertTrue(newConnector(fake).alterOffsets(base(), request));
+        // Only the shape a task writes can have references on the FE; the stale one is just cleared.
+        assertEquals(Collections.singletonList("db1.orders:kc:default"), fake.heldBookmarkQueries);
     }
 
-    /** A reset is the one way to clear stale offsets, so it must not depend on the config parsing. */
+    /**
+     * Under no_snapshot a task with no offset resumes from the oldest bookmark its holder still
+     * references, so a reset that left them would be undone at the next start.
+     */
     @Test
-    public void testAlterOffsetsResetsWithoutParsingTheConfig() {
+    public void testAlterOffsetsResetReleasesTheHoldersReferences() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.setHeldBookmarks("orders", 3L, 4L);
+        Map<String, String> config = base();
+        config.put("name", "c1");
         Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
-        assertTrue(new StarRocksCdcSourceConnector().alterOffsets(new HashMap<>(), request));
+        request.put(OffsetState.sourcePartition("db1", "users"), null);
+
+        assertTrue(newConnector(fake).alterOffsets(config, request));
+
+        assertEquals(new HashSet<>(Arrays.asList("db1.orders:kc:c1", "db1.users:kc:c1")),
+                new HashSet<>(fake.heldBookmarkQueries));
+        assertEquals(Arrays.asList("db1.orders:3:kc:c1", "db1.orders:4:kc:c1"), fake.releasedBookmarks);
+    }
+
+    /** A reset left half done would be undone at the next start, so it fails whole. */
+    @Test
+    public void testAlterOffsetsResetIsRefusedWhenTheReferencesCannotBeReleased() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.heldBookmarksFailure = new SQLException("FE unreachable");
+        Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
+        request.put(OffsetState.sourcePartition("db1", "orders"), null);
+        try {
+            newConnector(fake).alterOffsets(base(), request);
+            fail("expected the reset to be refused");
+        } catch (ConnectException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("Reset refused"));
+            assertTrue(e.getMessage(), e.getMessage().contains("FE unreachable"));
+        }
+    }
+
+    /** Releasing the references needs the FE, so a reset of a table partition needs a config that parses. */
+    @Test
+    public void testAlterOffsetsResetRefusesAnUnparsableConfig() {
+        Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
+        request.put(OffsetState.sourcePartition("db1", "orders"), null);
+        try {
+            newConnector(new FakeCdcClient()).alterOffsets(new HashMap<>(), request);
+            fail("expected ConnectException for a reset with an unparsable config");
+        } catch (ConnectException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("does not parse"));
+        }
+        // A shape this connector never wrote has no references, so clearing it needs no config.
+        Map<Map<String, ?>, Map<String, ?>> stale = new HashMap<>();
+        stale.put(Collections.singletonMap(OffsetState.KEY_DB, "db1"), null);
+        assertTrue(new StarRocksCdcSourceConnector().alterOffsets(new HashMap<>(), stale));
     }
 
     /**

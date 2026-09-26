@@ -565,10 +565,10 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <ol class="seq">
   <li><span class="who">start()</span>拿到本 task 分到的表清单，把全部表的 partition 一次交给 <code>reader.offsets(...)</code> 读回 raw map，与 <code>commit()</code> 同一趟读法。</li>
+  <li><span class="who">start()</span>另从 <code>information_schema.table_bookmark_references</code> 取回 holder 在该表上仍持有的全部引用，压回 <code>liveBookmarks</code>——前一个 task 留下的、窗口未落盘的 head 和未发出的释放由此走正常围栏释放，而不是等 TTL；<code>no_snapshot</code> 下它们还是下一步的后备位点。</li>
   <li><span class="who">restoreOffset()</span><code>OffsetState.fromMap</code> 解码，容忍 <code>bookmark_id</code> 被反序列化成 <code>Integer</code> 或 <code>Long</code>；解不出非负数就整条丢弃回 <code>fresh()</code>，不把 <code>-1</code> 哨兵和 <code>snapshot_done</code> 配成矛盾状态。</li>
-  <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）保持 fresh，下次 poll 重做整表快照。</li>
+  <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）<code>initial</code> 模式保持 fresh，下次 poll 重做整表快照；<code>no_snapshot</code> 模式取 <code>liveBookmarks</code> 里最旧的引用作 base——那是上一次启动钉住的版本，第一个变更窗口落盘前的重启由此不再丢变更；没有引用才按首次运行处理。</li>
   <li><span class="who">restoreOffset()</span>把恢复出来的 bookmark <strong>重新压回 <code>liveBookmarks</code></strong>。</li>
-  <li><span class="who">start()</span>另从 <code>information_schema.table_bookmark_references</code> 取回 holder 在该表上仍持有的全部引用，一并压回 <code>liveBookmarks</code>——前一个 task 留下的、窗口未落盘的 head 和未发出的释放由此走正常围栏释放，而不是等 TTL。</li>
   <li><span class="who">poll()</span><code>head = bookmarkCreate(...)</code>；若 <code>head == committedBookmark</code> 则本轮无新版本，直接跳过（idle dedup）；否则读 <code>[_CHANGES_base_head_]</code>。</li>
 </ol>
 
@@ -616,7 +616,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
   <rect class="bx" x="450" y="268" width="270" height="48" rx="5"/>
   <text class="tb" x="462" y="288">bootstrap()</text>
-  <text class="ts" x="462" y="306">整表重做快照 —— 宁可重复，不留空洞</text>
+  <text class="ts" x="462" y="306">initial 重做快照；no_snapshot 从持有引用续读</text>
 </svg>
 </div>
 <figcaption><b>图 3</b>只有 <code>snapshot_done=true</code> 的位点才被信任。★ 那一行不是可选的：它把恢复出来的 bookmark 重新放回本地的存活队列，否则服务端那一份永远等不到释放。这个 bug 真实发生过——集群冒烟日志里 21275 一直不被释放、而相邻 id 都正常回收，才定位到。</figcaption>
@@ -1043,9 +1043,9 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 </div>
 
 <div class="invariant warn">
-  <span class="tag">缺口 2 · bootstrap 未产生记录时，首个窗口持久化之前存在丢数据窗口</span>
-  <p>当 bootstrap 没有发出任何记录时——<code>no_snapshot</code> 模式，或者 <code>initial</code> 模式下快照时表为空——不会有任何 offset 落盘。若在第一个变更窗口被确认之前崩溃，重启会在<em>当前版本</em>重新开 bookmark，崩溃到重启之间的变更被静默跳过。</p>
-  <p>这一小段是 at-most-once，与整体语义不一致。窗口很窄（仅限首个持久 offset 出现之前），但确实存在。</p>
+  <span class="tag">缺口 2（已补）· bootstrap 未产生记录时，首个窗口持久化之前曾存在丢数据窗口</span>
+  <p>当 bootstrap 没有发出任何记录时——<code>no_snapshot</code> 模式，或者 <code>initial</code> 模式下快照时表为空——不会有任何 offset 落盘。<code>initial</code> 下重启只是把快照在当前版本重做，最终状态一条不少；<code>no_snapshot</code> 下重启曾经会在<em>当前版本</em>重开 bookmark，崩溃到重启之间的变更被静默跳过，那一小段是 at-most-once。</p>
+  <p>现在的修法：holder 仍持有的引用在启动时被接管，<code>no_snapshot</code> 下没有 offset 就从其中最旧的一个续读——它正是上一次启动钉住的版本。配套地，REST 重置 offset 时 Connector 的 <code>alterOffsets</code> 先释放这些引用，重置仍是"从当前版本开始"。残留：引用列表读不出（记 WARN）或引用已过 TTL 时，仍按首次运行处理。</p>
 </div>
 
 <figure>
@@ -1100,13 +1100,13 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <text class="tms" x="678" y="250" text-anchor="middle" fill="var(--danger)">位于当前版本 v2</text>
 
   <path class="lnd dash" d="M345 232 L345 278 L678 278 L678 240"/>
-  <text class="td" x="511" y="292" text-anchor="middle">v1 … v2 之间的变更被静默跳过</text>
+  <text class="td" x="511" y="292" text-anchor="middle">修补前：v1 … v2 之间的变更被静默跳过；现在从仍持有的 b0 续读</text>
 </svg>
 </div>
-<figcaption><b>图 8</b>两者的成因相同——<strong>没有记录，就没有 offset</strong>——但后果不同：缺口 1 只是重复，缺口 2 是真的丢数据。修法也相同：让 bootstrap 结束时能够独立落一个位点，而不是依赖第一条变更记录去翻转标志。</figcaption>
+<figcaption><b>图 8</b>两者的成因相同——<strong>没有记录，就没有 offset</strong>——但后果不同：缺口 1 只是重复，缺口 2 曾是真的丢数据。缺口 2 已用启动时接管的引用补上（<code>no_snapshot</code> 下无 offset 时从最旧的持有引用续读）；缺口 1 的修法仍是让 bootstrap 结束时能独立落一个位点，而不是依赖第一条变更记录去翻转标志。</figcaption>
 </figure>
 
-<p class="lead">以上两条均由代码推导得出，尚未编写复现测试；不是本轮改动引入的，是设计本身的推论。</p>
+<p class="lead">缺口 1 由代码推导得出，尚未编写复现测试；缺口 2 的修补由 <code>StarRocksCdcSourceTaskTest</code> 与 <code>StarRocksCdcSourceConnectorTest</code> 覆盖。两者都不是某轮改动引入的，是设计本身的推论。</p>
 
 <h4>不可追踪的处理</h4>
 <p>当 CHANGES 窗口跨越了破坏可追踪性的操作（PK 表 CDC 属性关闭期间的写入、DELETE/TRUNCATE 于非 PK 表、分区 drop/重写、schema 重写型 ALTER、bucket 数变更等），服务端报 <code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)</code> 或 FE 规划期的 "not trackable"。<code>NonTrackableException.classify</code> 需要同时匹配这几类措辞——早期只匹配 <code>CDC-ERROR-</code> 前缀，导致 <code>resnapshot</code> 策略事实上从未生效。</p>

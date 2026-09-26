@@ -86,7 +86,11 @@ public class StarRocksJdbcClient implements CdcClient {
 
     @Override
     public List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException {
-        String sql = SqlBuilder.heldBookmarksSql(fetchTableConfig(db, table).tableId, holder);
+        TableConfig tableConfig = readTableConfig(db, table);
+        if (tableConfig == null) {
+            return new ArrayList<>(); // dropped, so nothing references it any more
+        }
+        String sql = SqlBuilder.heldBookmarksSql(tableConfig.tableId, holder);
         try {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement();
@@ -138,13 +142,22 @@ public class StarRocksJdbcClient implements CdcClient {
 
     @Override
     public TableConfig fetchTableConfig(String db, String table) throws SQLException {
+        TableConfig tableConfig = readTableConfig(db, table);
+        if (tableConfig == null) {
+            throw new SQLException("table not found: " + db + "." + table);
+        }
+        return tableConfig;
+    }
+
+    /** The table's {@code tables_config} row, or null when it has none. */
+    private TableConfig readTableConfig(String db, String table) throws SQLException {
         String sql = SqlBuilder.tableConfigSql(db, table);
         try {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement();
                  ResultSet rs = stmt.executeQuery(sql)) {
                 if (!rs.next()) {
-                    throw new SQLException("table not found: " + db + "." + table);
+                    return null;
                 }
                 return new TableConfig(db, table, rs.getLong("TABLE_ID"), rs.getString("TABLE_MODEL"),
                         rs.getString("PROPERTIES"));
