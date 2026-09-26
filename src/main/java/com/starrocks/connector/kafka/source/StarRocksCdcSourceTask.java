@@ -160,8 +160,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
             for (TableState ts : started) {
                 adoptHeldBookmarks(ts);
-                LOG.info("Table {}.{} starts {}", db, ts.table,
-                        restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table))));
+                restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
             }
             tables = started;
             LOG.info("CDC source task started: database={}, tables={}, holder={}, {}={}, {}={}, {}={}, {}={}, {}={}",
@@ -232,11 +231,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * bookmark the holder still references, adopted by {@link #adoptHeldBookmarks}, is the position
      * an earlier start pinned, and resuming from it keeps every change since. A reset through the
      * offsets REST API releases those references first, so it still starts from the current
-     * version. Package-visible so tests can drive it without a real offset store.
-     *
-     * @return where the table starts, worded for the start log
+     * version. Logs where the table starts. Package-visible so tests can drive it without a real
+     * offset store.
      */
-    String restoreOffset(TableState t, Map<String, Object> raw) {
+    void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;
@@ -245,21 +243,26 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // table per restart until its TTL. Safe, because commit() releases strictly below the
             // durable offset, and at restore time this id is exactly that offset.
             retain(t, state.bookmarkId);
-            return "at bookmark " + state.bookmarkId + ", the durable offset";
+            LOG.info("Table {}.{} starts at bookmark {}, the durable offset", db, t.table, state.bookmarkId);
+            return;
         }
         if (snapshotInitial) {
-            return "fresh: the first poll takes the snapshot";
+            LOG.info("Table {}.{} starts fresh: the first poll takes the snapshot", db, t.table);
+            return;
         }
         Long oldest;
         synchronized (t.liveBookmarks) {
             oldest = t.liveBookmarks.isEmpty() ? null : Collections.min(t.liveBookmarks);
         }
         if (oldest == null) {
-            return "fresh: the first poll pins the current version and streams from there";
+            LOG.info("Table {}.{} starts fresh: the first poll pins the current version and streams from there",
+                    db, t.table);
+            return;
         }
         t.committedBookmark = oldest;
         t.snapshotDone = true;
-        return "at bookmark " + oldest + ", the oldest reference " + holder + " still holds from an earlier start";
+        LOG.info("Table {}.{} starts at bookmark {}, the oldest reference {} still holds from an earlier start",
+                db, t.table, oldest, holder);
     }
 
     /**

@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>20 个类 / 约 4200 行</b></span>
-    <span>测试<b>257 个</b></span>
+    <span>测试<b>256 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -306,7 +306,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">710 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">713 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
 <p>文件按生命周期排：<code>start</code> 一组（<code>assignedTables</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarks</code>/<code>partitionsOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
 
@@ -329,7 +329,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 <p>只有 <code>liveBookmarks</code> 在监视器下：commit 线程在里面挑出低于围栏的 id，poll 线程在里面追加、并为续租取快照。<code>committedBookmark</code> 用 <code>volatile</code> 而不进监视器，因为读它的那一步（<code>Math.min</code>）不需要与 deque 的修改原子。<code>pendingReleases</code> 自带线程安全，其余字段只在 poll 线程上动。task 级的 <code>tables</code> 与 <code>client</code> 是 <code>volatile</code>：前者在 <code>start()</code> 末尾赋值、由 commit 线程读，后者的 <code>stop()</code> 按 API 可能来自别的线程。</p>
 
 <h4>start(props)</h4>
-<p>读配置 → <code>assignedTables</code> 解析 <code>task.tables</code>，空、重复、不在 <code>starrocks.table.names</code> 里的都拒绝启动（连接器从不生成这三种，出现即手写配置；重复的表会每行发两遍，且一份的围栏会释放另一份的 base）→ 建 client → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、建 mapper，都是构造参数）→ 全部表的 partition 一次交给 <code>offsetStorageReader().offsets(...)</code> 读回 raw offset，与 <code>durableBookmarks</code> 同一趟读法 → 逐表 <code>adoptHeldBookmarks</code> 把 holder 在这张表上仍持有的引用全部压回 <code>liveBookmarks</code> → <code>restoreOffset</code>。接管在恢复之前：恢复出来的那个 id 通常已在接管名单里，<code>retain</code> 去重。每张表记一行 INFO 说明从哪里开始，措辞就是 <code>restoreOffset</code> 的返回值：持久 offset、最旧的持有引用，或 fresh。</p>
+<p>读配置 → <code>assignedTables</code> 解析 <code>task.tables</code>，空、重复、不在 <code>starrocks.table.names</code> 里的都拒绝启动（连接器从不生成这三种，出现即手写配置；重复的表会每行发两遍，且一份的围栏会释放另一份的 base）→ 建 client → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、建 mapper，都是构造参数）→ 全部表的 partition 一次交给 <code>offsetStorageReader().offsets(...)</code> 读回 raw offset，与 <code>durableBookmarks</code> 同一趟读法 → 逐表 <code>adoptHeldBookmarks</code> 把 holder 在这张表上仍持有的引用全部压回 <code>liveBookmarks</code> → <code>restoreOffset</code>。接管在恢复之前：恢复出来的那个 id 通常已在接管名单里，<code>retain</code> 去重。<code>restoreOffset</code> 在每个出口记一行 INFO 说明这张表从哪里开始：持久 offset、最旧的持有引用，或 fresh。</p>
 <p><code>context</code> 为 null 时（单测直接 new 一个 task）每张表都按首次运行处理，这是刻意留的口子。</p>
 
 <h4>restoreOffset(t, raw)</h4>
@@ -338,18 +338,21 @@ if (state.snapshotDone) {
     t.committedBookmark = state.bookmarkId;
     t.snapshotDone = true;
     retain(t, state.bookmarkId);
-    return "at bookmark …, the durable offset";
+    LOG.info("... starts at bookmark {}, the durable offset");
+    return;
 }
 if (snapshotInitial) {
-    return "fresh: the first poll takes the snapshot";
+    LOG.info("... starts fresh: the first poll takes the snapshot");
+    return;
 }
 Long oldest = min(t.liveBookmarks);   // adoptHeldBookmarks 已把 holder 仍持有的引用压进来
 if (oldest == null) {
-    return "fresh: the first poll pins the current version …";
+    LOG.info("... starts fresh: the first poll pins the current version");
+    return;
 }
 t.committedBookmark = oldest;
 t.snapshotDone = true;
-return "at bookmark …, the oldest reference the holder still holds";</code></pre>
+LOG.info("... starts at bookmark {}, the oldest reference the holder still holds");</code></pre>
 <p><strong>只信 <code>snapshot_done=true</code></strong>。其余情况（包括完全没有 offset）在 <code>initial</code> 模式下什么都不做，表保持 fresh，下次 poll 重做全量快照。<code>no_snapshot</code> 模式没有快照可重做，而第一个变更窗口落盘之前也没有任何 offset：这时 holder 仍持有的最旧 bookmark 就是上一次启动钉住的位置，从它续读，其间的变更一条不少（重复由至少一次兜底，精确一次下被 abort 的事务本来就不可见）。它依赖 <code>adoptHeldBookmarks</code> 先跑：引用列表读不出时记 WARN，表按首次运行处理，这是残留的缺口；引用过了 TTL 同样。运维通过 REST 重置 offset 时，Connector 的 <code>alterOffsets</code> 会先释放这些引用，所以重置仍然意味着"从当前版本开始"。</p>
 <p>最后那行 <code>retain</code> 不是可选的：恢复出来的 bookmark 必须重新进入存活队列，否则永远没人释放它，每次重启/rebalance 泄漏一个，直到 TTL 到期。用 <code>retain</code> 而不是直接 <code>addLast</code>，因为 resnapshot 之后 <code>bootstrap</code> 会拿回同一个 id，重复持有就会被释放两次。</p>
 
@@ -595,7 +598,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <div class="tablewrap">
 <table>
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
-  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>66</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup 与空窗口 head 留作 base、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）+ poll 失败（抛 Retriable 前先睡一个 poll 间隔、持续失败超时转致命、成功重置计时、-1 永远重试、0 首次即停、致命时即使别的表有记录也抛）。含重启续读、启动接管 holder 的遗留引用并由围栏释放、引用表读不出不影响启动、畸形 offset 恢复为 fresh、空、重复或越界的 <code>task.tables</code> 拒绝启动、<code>restoreOffset</code> 报告起点、<code>no_snapshot</code> 无 offset 时从最旧的持有引用续读（有 offset 时 offset 优先，<code>initial</code> 不用，引用读不出则按首次运行）</td></tr>
+  <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>65</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup 与空窗口 head 留作 base、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）+ poll 失败（抛 Retriable 前先睡一个 poll 间隔、持续失败超时转致命、成功重置计时、-1 永远重试、0 首次即停、致命时即使别的表有记录也抛）。含重启续读、启动接管 holder 的遗留引用并由围栏释放、引用表读不出不影响启动、畸形 offset 恢复为 fresh、空、重复或越界的 <code>task.tables</code> 拒绝启动、<code>no_snapshot</code> 无 offset 时从最旧的持有引用续读（有 offset 时 offset 优先，<code>initial</code> 不用，引用读不出则按首次运行）</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>14</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset</td></tr>
   <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>28</td><td>preflight 各条拒绝（无模型、不认识的模型名、UNIQUE、PK 无 CDC、撞名、草图列）与放行（DUP/AGG/PK、复杂列含解析失败的）、元数据查询失败包成带表名的异常、探针 holder 独立且 release 失败只警告、round-robin 分表、精确一次的适用与拒绝（缺键或值为 null 都不抛）、<code>alterOffsets</code> 对重置放行并释放 holder 的引用（只动请求置 null 的表，空 map 的 DELETE 释放配置里每张表；配置解析不了或 FE 不应答则拒绝，本连接器不写的形状直接清），对引号 id/负数/非布尔/畸形或 null partition/不在配置里的表拒绝</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>

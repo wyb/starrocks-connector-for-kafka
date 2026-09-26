@@ -1890,13 +1890,4 @@ public class StarRocksCdcSourceTaskTest {
             assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TABLE_NAMES));
         }
     }
-
-    /** What the start log says per table comes straight from restoreOffset. */
-    @Test
-    public void testRestoreOffsetSaysWhereTheTableStarts() throws Exception {
-        task.start(baseProps());
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-        assertEquals("at bookmark 130, the durable offset", task.restoreOffset(t, OffsetState.sourceOffset(130L, true)));
-        assertTrue(task.restoreOffset(t, null).startsWith("fresh: the first poll takes the snapshot"));
-    }
 }
