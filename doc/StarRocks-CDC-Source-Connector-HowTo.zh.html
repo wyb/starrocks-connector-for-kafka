@@ -203,7 +203,7 @@
     该属性只适用于存算分离的 PRIMARY KEY 表。请在连接器需要覆盖的版本范围<em>之前</em>就把它打开：该属性关闭期间写入的行无法被重放，任何跨越"关闭"时段的 CHANGES 窗口都会因不可追踪而失败（<code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)</code>）。
   </li>
   <li><strong>DUPLICATE KEY 和 AGGREGATE KEY 表不需要修改任何表属性即可使用</strong>，但仅限于只插入（insert-only）的工作负载。对这类表执行 <code>DELETE</code>/<code>TRUNCATE</code>，或者对任意表进行分区 drop/重写、schema 重写型的 <code>ALTER</code>、bucket 数量或 reshard 变更，都会使跨越该操作的 CHANGES 窗口变为不可追踪——参见<a href="#limitations">限制</a>。</li>
-  <li><strong>不支持 UNIQUE KEY 表。</strong> <code>CHANGES</code> 无法读取此类表，<code>StarRocksCdcSourceConnector</code> 会在启动时就直接拒绝该配置，而不是留到之后某个 task 运行时才失败。</li>
+  <li><strong>不支持 UNIQUE KEY 表。</strong> <code>CHANGES</code> 无法读取此类表，<code>StarRocksCdcSourceConnector</code> 会在启动时就直接拒绝该配置，而不是留到之后某个 task 运行时才失败。<code>TABLE_MODEL</code> 不是 <code>PRIMARY_KEYS</code>/<code>DUP_KEYS</code>/<code>AGG_KEYS</code>/<code>UNIQUE_KEYS</code> 之一的表同样在启动时被点名拒绝，而不是凭猜测去抓。</li>
   <li><strong>除上述条件外，没有额外的 FE 版本要求。</strong> 连接器只依赖已经发布的能力（<code>bookmark_create</code>/<code>bookmark_release</code>，以及 <code>[_CHANGES_]</code>/<code>[_BOOKMARK_]</code> 查询提示）；代码中没有最低版本检查。<code>bookmark_renew</code> 是可选增强：集群没有它时续租失败并记日志，空闲表行为退回无续期语义（见限制第 1 条）。</li>
 </ul>
 

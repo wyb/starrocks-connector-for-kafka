@@ -27,7 +27,7 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
   ```
   This property only applies to shared-data PRIMARY KEY tables. Turn it on *before* the version range you need the connector to cover: rows written while it was off cannot be replayed, and any CHANGES window that straddles an "off" period fails as non-trackable (`CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)`).
 - **DUPLICATE KEY and AGGREGATE KEY tables work with no table property changes**, but only for insert-only workloads. A `DELETE`/`TRUNCATE` against one of these tables (or a dropped/rewritten partition, a schema-rewriting `ALTER`, or a bucket/reshard change on any table) makes any CHANGES window spanning it non-trackable — see [Limitations](#limitations).
-- **UNIQUE KEY tables are not supported.** `CHANGES` cannot read them, and `StarRocksCdcSourceConnector` rejects the configuration outright at startup rather than letting a task fail later.
+- **UNIQUE KEY tables are not supported.** `CHANGES` cannot read them, and `StarRocksCdcSourceConnector` rejects the configuration outright at startup rather than letting a task fail later. The same applies to a table whose `TABLE_MODEL` the connector does not recognise (anything but `PRIMARY_KEYS`, `DUP_KEYS`, `AGG_KEYS`, `UNIQUE_KEYS`): it is refused by name rather than captured on a guess.
 - **No FE version requirement beyond the above.** The connector only relies on already-shipped capabilities (`bookmark_create`/`bookmark_release`, the `[_CHANGES_]`/`[_BOOKMARK_]` query hints); there is no minimum-version check in the code. `bookmark_renew` is an optional enhancement: without it every renewal fails and is logged, and idle tables fall back to the no-renewal semantics (Limitation 1).
 
 ---

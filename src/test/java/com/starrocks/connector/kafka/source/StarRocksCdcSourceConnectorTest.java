@@ -150,6 +150,23 @@ public class StarRocksCdcSourceConnectorTest {
         }
     }
 
+    /** A model this connector does not know is refused by name, not captured on a guess. */
+    @Test
+    public void testPreflightRejectsATableModelItDoesNotKnow() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.modelByTable.put("t1", "XYZ_KEYS");
+        Map<String, String> props = base();
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
+        try {
+            newConnector(fake).start(props);
+            fail("expected ConnectException for an unknown table model");
+        } catch (ConnectException e) {
+            assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+            assertTrue("the message must name the spelling; was: " + e.getMessage(),
+                    e.getMessage().contains("XYZ_KEYS"));
+        }
+    }
+
     @Test
     public void testPreflightRejectsPkTableWithoutCdc() {
         FakeCdcClient fake = new FakeCdcClient();

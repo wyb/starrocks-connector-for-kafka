@@ -106,8 +106,8 @@
   <h1>CDC Source Connector 代码逐文件详解</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>主代码<b>20 个类 / 约 4000 行</b></span>
-    <span>测试<b>239 个</b></span>
+    <span>主代码<b>20 个类 / 约 4100 行</b></span>
+    <span>测试<b>241 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -232,7 +232,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">314 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">316 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -240,10 +240,11 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <p><code>preflightCheckTable</code> 的检查顺序：</p>
 <ol>
-    <li><code>fetchTableConfig</code> 的 <code>model</code> 为空（<code>null</code> 或空串）→ <strong>直接拒绝</strong>。视图、物化视图、外表不是 <code>OlapTable</code>，<code>InformationSchemaDataSource</code> 不会给它们设 <code>table_model</code>，BE 把未设置的 thrift 字段填成 <code>""</code>——所以"未知"长得像空串而不是 null。把它当放行会让后面每一项检查都通过，表最终死在 <code>bookmark_create</code>。</li>
-<li><code>model</code> 含 <code>UNQ</code> 或 <code>UNIQUE</code> 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。两种拼写都匹配，因为 FE 实际发 <code>UNIQUE_KEYS</code>，而文档里写的是 <code>UNQ_KEYS</code>；主键那一侧只需一个子串——<code>"PRIMARY"</code> 本身就含 <code>"PRI"</code>。</li>
-  <li>含 <code>DUP</code> → 记一条 WARN，见下。<code>AGG</code> 与 <code>PRI</code> 都不警告。</li>
-  <li>含 <code>PRI</code> → 再看 <code>cdcEnabled()</code>（到这一步才解析同一行的 <code>PROPERTIES</code>），未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
+    <li><code>fetchTableConfig</code> 的 <code>model</code> 为 <code>NONE</code>（<code>TABLE_MODEL</code> 为 <code>null</code> 或空串）→ <strong>直接拒绝</strong>。视图、物化视图、外表不是 <code>OlapTable</code>，<code>InformationSchemaDataSource</code> 不会给它们设 <code>table_model</code>，BE 把未设置的 thrift 字段填成 <code>""</code>——所以"未知"长得像空串而不是 null。把它当放行会让后面每一项检查都通过，表最终死在 <code>bookmark_create</code>。</li>
+  <li><code>OTHER</code>（不是 FE <code>KeysType</code> 的四个名字，也不是文档里的 <code>UNQ_KEYS</code>）→ 拒绝并点名拼写。StarRocks 长出新模型时在这里暴露，而不是等 CHANGES 读失败。</li>
+  <li><code>UNIQUE</code> → 直接拒绝（CHANGES 读不了 UNIQUE KEY 表）。<code>TableConfig.Model.parse</code> 同时认 FE 实际发的 <code>UNIQUE_KEYS</code> 和文档里写的 <code>UNQ_KEYS</code>。</li>
+  <li><code>DUPLICATE</code> → 记一条 WARN，见下。<code>AGGREGATE</code> 与 <code>PRIMARY</code> 都不警告。</li>
+  <li><code>PRIMARY</code> → 再看 <code>cdcEnabled()</code>（到这一步才解析同一行的 <code>PROPERTIES</code>），未开启则拒绝，<strong>错误信息里直接给出可复制的 <code>ALTER TABLE</code> 语句</strong>。</li>
   <li><code>fetchColumns</code> 遍历每列，四项检查：列名撞上 <code>__CHANGE_TYPE__</code>/<code>__ROW_VERSION__</code> 则拒绝；<code>isNonExportable</code> 为真（HLL/BITMAP/PERCENTILE）则拒绝；ARRAY/MAP/STRUCT 列的 <code>COLUMN_TYPE</code> 解析失败（<code>type.kind == OPAQUE</code>）则记 WARN 但放行——该列退化为文本，不会得到错的 schema；<code>isUnrecognized</code> 为真（类型名不在 <code>KNOWN_DATA_TYPES</code> 封闭集里）则记 WARN 但放行——文本能保住值，只是说明 StarRocks 长出了本连接器没听说过的类型。</li>
 </ol>
 <p>整段包在 <code>try/catch (SQLException)</code> 里，任何 SQL 异常都包成 <code>ConnectException</code> 并带上表名——包括"表不存在"。</p>
@@ -438,7 +439,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <h3 id="CdcClient"><span class="fn">CdcClient</span><span class="sz">89 行</span></h3>
 <p class="role">10 个方法的接口。存在的意义是让 Task 和 Connector 的单测能注入假实现。</p>
 <p>使用者分布并不对称：<code>fetchTableConfig</code> 只有 Connector 用，<code>fetchKeyColumns</code>/<code>fetchHeldBookmarks</code>/<code>streamSnapshot</code>/<code>streamChanges</code>/<code>bookmarkRenew</code> 只有 Task 用，其余四个（<code>bookmarkCreate</code>、<code>bookmarkRelease</code>、<code>fetchColumns</code>、<code>close</code>）两边都用。</p>
-<p><code>fetchTableConfig</code> 返回 <code>TableConfig</code>：一行 <code>tables_config</code> 的 <code>tableId</code>、<code>model</code> 与原始 <code>PROPERTIES</code>，<code>cdcEnabled()</code> 到用时才解析——视图的 <code>PROPERTIES</code> 为空，而它的模型检查在前。</p>
+<p><code>fetchTableConfig</code> 返回 <code>TableConfig</code>：一行 <code>tables_config</code> 的 <code>tableId</code>、解析好的 <code>model</code>（<code>Model</code> 枚举：FE <code>KeysType</code> 的四个名字精确匹配，加文档里的 <code>UNQ_KEYS</code> 别名；空为 <code>NONE</code>，其余为 <code>OTHER</code>，原拼写留在 <code>modelName</code>）与原始 <code>PROPERTIES</code>，<code>cdcEnabled()</code> 到用时才解析——视图的 <code>PROPERTIES</code> 为空，而它的模型检查在前。</p>
 <p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
@@ -586,7 +587,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>59</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup 与空窗口 head 留作 base、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）+ poll 失败（抛 Retriable 前先睡一个 poll 间隔、持续失败超时转致命、成功重置计时、-1 永远重试、0 首次即停、致命时即使别的表有记录也抛）。含重启续读、启动接管 holder 的遗留引用并由围栏释放、引用表读不出不影响启动、畸形 offset 恢复为 fresh</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
-  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>20</td><td>preflight 各条拒绝、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
+  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>21</td><td>preflight 各条拒绝（含不认识的模型名点名拒绝）、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>12</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact、MySQL 会话钉住的二进制编码与文本读取器一致而 Arrow 不设。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>11</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中、<code>tables_config</code> 一行带 <code>TABLE_ID</code>、引用查询按 <code>TABLE_ID + HOLDER_ID</code> 过滤</td></tr>
@@ -597,7 +598,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>MysqlValueReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlValueReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>
   <tr><td><code>ValueReaderTest</code></td><td>17</td><td>逐类型用对 getter、DECIMAL 按声明 scale 而 DATE/DATETIME 在此成文本且微秒保留、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器、Arrow 子类逆转驱动的时区平移而 MySQL 子类不动、每个实例自有 Calendar、<code>forTransport</code> 按传输选子类、嵌套列经两个子类读出同一值、Arrow 顶层数组从 <code>java.sql.Array</code> 解包、OPAQUE 列仍走 <code>getString</code>、<code>readRow</code> 只读声明过的列；DATE/DATETIME 文本逐位对齐 StarRocks（小数非零才出现且恒六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分）</td></tr>
-  <tr><td><code>TableConfigTest</code></td><td>4</td><td>全部四条都在 <code>cdcEnabled()</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
+  <tr><td><code>TableConfigTest</code></td><td>5</td><td>模型名按 <code>KeysType</code> 精确解析（含 <code>UNQ_KEYS</code> 别名、空为 NONE、其余为 OTHER 且保留原拼写）；其余四条都在 <code>cdcEnabled()</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
   <tr><td><code>OffsetStateTest</code></td><td>6</td><td>往返、Integer/Long 容错、缺字段降级、<code>snapshot_done=false</code> 不被读成已完成、id 解不出非负数（字符串/布尔/null/负值）时整条回 fresh</td></tr>
   <tr><td><code>NonTrackableExceptionTest</code></td><td>4</td><td>五种写法分三组识别（BE 执行期、bookmark 失效、FE 规划期），加一条不过度匹配</td></tr>
   <tr><td><code>VersionTest</code></td><td>3</td><td>资源存在且被过滤——盯的是构建接线，不是逻辑</td></tr>

@@ -125,37 +125,39 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     private void preflightCheckTable(CdcClient client, String db, String table) {
         try {
             TableConfig cfg = client.fetchTableConfig(db, table);
-            String model = cfg.model;
-            // Empty, not null, is what "unknown" looks like: InformationSchemaDataSource sets
-            // table_model only after casting to OlapTable, so a view or an external table leaves the
-            // thrift field unset and the BE fills the column with "". Treating that as permission
-            // would let every check below pass and the table fail later, at bookmark_create.
-            if (model == null || model.trim().isEmpty()) {
-                throw new ConnectException(
-                        "could not determine the table model of " + db + "." + table
-                                + " (information_schema.tables_config reports it empty), so this connector"
-                                + " cannot tell whether the table is capturable. Views, materialized views"
-                                + " and external tables have no table model; capture the base table instead.");
+            switch (cfg.model) {
+                case NONE:
+                    // Treating no model as permission would let every check below pass and the
+                    // table fail later, at bookmark_create.
+                    throw new ConnectException(
+                            "could not determine the table model of " + db + "." + table
+                                    + " (information_schema.tables_config reports it empty), so this connector"
+                                    + " cannot tell whether the table is capturable. Views, materialized views"
+                                    + " and external tables have no table model; capture the base table instead.");
+                case OTHER:
+                    throw new ConnectException(
+                            "table " + db + "." + table + " has table model '" + cfg.modelName
+                                    + "', which this connector does not know, so it cannot tell whether CHANGES"
+                                    + " can read it");
+                case UNIQUE:
+                    throw new ConnectException(
+                            "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
+                case DUPLICATE:
+                    // AGG needs no warning: rows sharing an aggregate key are folded into one, so the
+                    // key identifies a row exactly as a primary key does. DUP's key is a sort key and
+                    // admits duplicates, which is fine for partitioning but not for compaction.
+                    LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
+                            + "and are not unique, so several rows can share one Kafka key. Partitioning "
+                            + "and per-key ordering still hold; log compaction does not -- it would drop "
+                            + "rows that are not duplicates, and with {}=true a tombstone would delete "
+                            + "every row sharing the deleted row's key.",
+                            db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
+                    break;
+                default:
+                    break;
             }
-            // TABLE_MODEL is KeysType.toString(), so the live value is "UNIQUE_KEYS"; some docs
-            // spell it "UNQ_KEYS". Both are checked so the guard cannot go inert against either.
-            if (model.contains("UNQ") || model.contains("UNIQUE")) {
-                throw new ConnectException(
-                        "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
-            }
-            // AGG needs no warning: rows sharing an aggregate key are folded into one, so the key
-            // identifies a row exactly as a primary key does. DUP's key is a sort key and admits
-            // duplicates, which is fine for partitioning but not for compaction.
-            if (model.contains("DUP")) {
-                LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
-                        + "and are not unique, so several rows can share one Kafka key. Partitioning "
-                        + "and per-key ordering still hold; log compaction does not -- it would drop "
-                        + "rows that are not duplicates, and with {}=true a tombstone would delete "
-                        + "every row sharing the deleted row's key.",
-                        db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
-            }
-            // "PRIMARY_KEYS" contains "PRI"; only a primary key table can carry the property.
-            if (model.contains("PRI") && !cfg.cdcEnabled()) {
+            // Only a primary key table can carry the property.
+            if (cfg.model == TableConfig.Model.PRIMARY && !cfg.cdcEnabled()) {
                 throw new ConnectException(
                         "primary key table " + db + "." + table + " does not have change data capture enabled; "
                                 + "run: ALTER TABLE " + db + "." + table

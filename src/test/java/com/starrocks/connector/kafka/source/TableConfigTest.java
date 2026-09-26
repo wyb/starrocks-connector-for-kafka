@@ -24,12 +24,13 @@ import org.junit.Test;
 
 import java.sql.SQLException;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Reading the CDC property out of {@code information_schema.tables_config.PROPERTIES}.
+ * The table model and the CDC property, as read out of one {@code information_schema.tables_config} row.
  *
  * <p>FE writes that column as {@code new Gson().toJson(table.getProperties())} over a
  * {@code Map<String, String>}, so values are JSON strings, not JSON booleans. The samples below
@@ -41,6 +42,28 @@ public class TableConfigTest {
             "{\"compression\":\"LZ4\",\"datacache.enable\":\"true\","
                     + "\"enable_change_data_capture\":\"%s\",\"enable_persistent_index\":\"true\","
                     + "\"replication_num\":\"1\",\"storage_volume\":\"builtin_storage_volume\"}";
+
+    private static TableConfig.Model modelOf(String tableModel) {
+        return new TableConfig("db1", "t1", 1L, tableModel, "{}").model;
+    }
+
+    /** TABLE_MODEL is FE's KeysType name; UNQ_KEYS is a docs spelling; anything else is OTHER, not a guess. */
+    @Test
+    public void testModelIsParsedFromTheKeysTypeName() {
+        assertEquals(TableConfig.Model.PRIMARY, modelOf("PRIMARY_KEYS"));
+        assertEquals(TableConfig.Model.DUPLICATE, modelOf("DUP_KEYS"));
+        assertEquals(TableConfig.Model.AGGREGATE, modelOf("AGG_KEYS"));
+        assertEquals(TableConfig.Model.UNIQUE, modelOf("UNIQUE_KEYS"));
+        assertEquals(TableConfig.Model.UNIQUE, modelOf("UNQ_KEYS"));
+        assertEquals(TableConfig.Model.DUPLICATE, modelOf(" dup_keys "));
+        for (String none : new String[] {null, "", "   "}) {
+            assertEquals(TableConfig.Model.NONE, modelOf(none));
+        }
+        for (String other : new String[] {"PRIMARY", "PRIMARY_KEY", "XYZ_KEYS"}) {
+            assertEquals(other, TableConfig.Model.OTHER, modelOf(other));
+        }
+        assertEquals("XYZ_KEYS", new TableConfig("db1", "t1", 1L, "XYZ_KEYS", "{}").modelName);
+    }
 
     private static boolean enabledFor(String properties) throws SQLException {
         return new TableConfig("db1", "t1", 1L, "PRIMARY_KEYS", properties).cdcEnabled();

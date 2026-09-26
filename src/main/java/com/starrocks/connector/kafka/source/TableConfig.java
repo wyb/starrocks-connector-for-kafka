@@ -25,9 +25,39 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.Locale;
 
 /** One table's row of {@code information_schema.tables_config}, as far as preflight and the bookmark queries need it. */
 final class TableConfig {
+
+    /** {@code TABLE_MODEL}, which FE renders as its {@code KeysType} name. */
+    enum Model {
+        PRIMARY, DUPLICATE, AGGREGATE, UNIQUE,
+        /** FE never set the field -- a view, a materialized view or an external table -- and the BE fills it with "". */
+        NONE,
+        /** A spelling this connector does not know. */
+        OTHER;
+
+        /** Exact names; {@code UNQ_KEYS} is how some docs spell {@code UNIQUE_KEYS}. */
+        static Model parse(String tableModel) {
+            String m = tableModel == null ? "" : tableModel.trim().toUpperCase(Locale.ROOT);
+            switch (m) {
+                case "":
+                    return NONE;
+                case "PRIMARY_KEYS":
+                    return PRIMARY;
+                case "DUP_KEYS":
+                    return DUPLICATE;
+                case "AGG_KEYS":
+                    return AGGREGATE;
+                case "UNIQUE_KEYS":
+                case "UNQ_KEYS":
+                    return UNIQUE;
+                default:
+                    return OTHER;
+            }
+        }
+    }
 
     private static final ObjectMapper JSON = new ObjectMapper();
     static final String CDC_PROPERTY = "enable_change_data_capture";
@@ -35,16 +65,18 @@ final class TableConfig {
     private final String db;
     private final String table;
     final long tableId;
-    /** {@code TABLE_MODEL}: {@code KeysType.toString()}, or "" when FE never set it (a view, an external table). */
-    final String model;
+    final Model model;
+    /** {@code TABLE_MODEL} as the server spelled it, for messages. */
+    final String modelName;
     /** {@code PROPERTIES}: the table's property map as JSON, which is how FE writes it. */
     private final String properties;
 
-    TableConfig(String db, String table, long tableId, String model, String properties) {
+    TableConfig(String db, String table, long tableId, String tableModel, String properties) {
         this.db = db;
         this.table = table;
         this.tableId = tableId;
-        this.model = model;
+        this.model = Model.parse(tableModel);
+        this.modelName = tableModel;
         this.properties = properties;
     }
 
