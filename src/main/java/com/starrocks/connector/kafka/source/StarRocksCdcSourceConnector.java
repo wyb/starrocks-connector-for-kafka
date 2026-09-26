@@ -125,84 +125,93 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      */
     private void preflightCheckTable(CdcClient client, String db, String table) {
         try {
-            TableConfig cfg = client.fetchTableConfig(db, table);
-            switch (cfg.model) {
-                case NONE:
-                    // Treating no model as permission would let every check below pass and the
-                    // table fail later, at bookmark_create.
-                    throw new ConnectException(
-                            "could not determine the table model of " + db + "." + table
-                                    + " (information_schema.tables_config reports it empty), so this connector"
-                                    + " cannot tell whether the table is capturable. Views, materialized views"
-                                    + " and external tables have no table model; capture the base table instead.");
-                case OTHER:
-                    throw new ConnectException(
-                            "table " + db + "." + table + " has table model '" + cfg.modelName
-                                    + "', which this connector does not know, so it cannot tell whether CHANGES"
-                                    + " can read it");
-                case UNIQUE:
-                    throw new ConnectException(
-                            "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
-                case DUPLICATE:
-                    // DUP's key is a sort key and admits duplicates: fine for partitioning, not for compaction.
-                    LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
-                            + "and are not unique, so several rows can share one Kafka key. Partitioning "
-                            + "and per-key ordering still hold; log compaction does not -- it would drop "
-                            + "rows that are not duplicates, and with {}=true a tombstone would delete "
-                            + "every row sharing the deleted row's key.",
-                            db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
-                    break;
-                case PRIMARY:
-                    // The only model that carries the property.
-                    if (!cfg.cdcEnabled()) {
-                        throw new ConnectException(
-                                "primary key table " + db + "." + table + " does not have change data capture "
-                                        + "enabled; run: ALTER TABLE " + db + "." + table
-                                        + " SET (\"enable_change_data_capture\" = \"true\")");
-                    }
-                    break;
-                case AGGREGATE:
-                    // Rows sharing an aggregate key are folded into one, so the key identifies a row
-                    // exactly as a primary key does: nothing to warn about.
-                    break;
-            }
-
-            for (ColumnMeta col : client.fetchColumns(db, table)) {
-                // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
-                // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
-                // lowercase __change_type__ would leave our bare projection reading the user's column.
-                if (CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name) || ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
-                    throw new ConnectException(
-                            "table " + db + "." + table + " has a column named " + col.name
-                                    + " which collides with a CDC metadata column");
-                }
-                // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can interpret.
-                if (ColumnMeta.isNonExportable(col.srDataType)) {
-                    throw new ConnectException(
-                            "table " + db + "." + table + " has column '" + col.name + "' of type "
-                                    + col.srDataType + ", whose value cannot be exported by a SELECT"
-                                    + " -- it is an aggregate sketch, not a value. Capture a view that"
-                                    + " projects only the columns you need, or remove this column from"
-                                    + " the captured table.");
-                }
-                // COLUMN_TYPE is a display string; when it does not parse the column is still
-                // captured, as text, and this says so once.
-                if (ColumnMeta.isComplex(col.srDataType) && col.type.kind == ColumnType.Kind.OPAQUE) {
-                    LOG.warn("Column {}.{}.{} is declared as '{}', which this connector could not parse"
-                                    + " into a nested schema; it will be carried as text.",
-                            db, table, col.name, col.srColumnType);
-                }
-                // Not fatal -- text preserves the value -- but StarRocks grew a type this connector
-                // was never told about, worth saying once at startup.
-                if (ColumnMeta.isUnrecognized(col.srDataType)) {
-                    LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
-                                    + " recognise; it will be carried as text. This usually means StarRocks"
-                                    + " added a type.",
-                            db, table, col.name, col.srDataType, col.srColumnType);
-                }
-            }
+            checkModel(db, table, client.fetchTableConfig(db, table));
+            checkColumns(db, table, client.fetchColumns(db, table));
         } catch (SQLException e) {
             throw new ConnectException("Failed CDC preflight check for table " + db + "." + table, e);
+        }
+    }
+
+    /** Refuses a missing, unknown or UNIQUE KEY model, requires the CDC property on a primary key table,
+     *  and warns that a DUPLICATE KEY is not unique. */
+    private static void checkModel(String db, String table, TableConfig cfg) throws SQLException {
+        switch (cfg.model) {
+            case NONE:
+                // Treating no model as permission would let the column checks pass and the table
+                // fail later, at bookmark_create.
+                throw new ConnectException(
+                        "could not determine the table model of " + db + "." + table
+                                + " (information_schema.tables_config reports it empty), so this connector"
+                                + " cannot tell whether the table is capturable. Views, materialized views"
+                                + " and external tables have no table model; capture the base table instead.");
+            case OTHER:
+                throw new ConnectException(
+                        "table " + db + "." + table + " has table model '" + cfg.modelName
+                                + "', which this connector does not know, so it cannot tell whether CHANGES"
+                                + " can read it");
+            case UNIQUE:
+                throw new ConnectException(
+                        "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
+            case DUPLICATE:
+                // DUP's key is a sort key and admits duplicates: fine for partitioning, not for compaction.
+                LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
+                        + "and are not unique, so several rows can share one Kafka key. Partitioning "
+                        + "and per-key ordering still hold; log compaction does not -- it would drop "
+                        + "rows that are not duplicates, and with {}=true a tombstone would delete "
+                        + "every row sharing the deleted row's key.",
+                        db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
+                break;
+            case PRIMARY:
+                // The only model that carries the property.
+                if (!cfg.cdcEnabled()) {
+                    throw new ConnectException(
+                            "primary key table " + db + "." + table + " does not have change data capture "
+                                    + "enabled; run: ALTER TABLE " + db + "." + table
+                                    + " SET (\"enable_change_data_capture\" = \"true\")");
+                }
+                break;
+            case AGGREGATE:
+                // Rows sharing an aggregate key are folded into one, so the key identifies a row
+                // exactly as a primary key does: nothing to warn about.
+                break;
+        }
+    }
+
+    /** Refuses a column that collides with a CDC pseudo-column or holds an aggregate sketch; warns where
+     *  one is carried as text. */
+    private static void checkColumns(String db, String table, List<ColumnMeta> cols) {
+        for (ColumnMeta col : cols) {
+            // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
+            // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
+            // lowercase __change_type__ would leave our bare projection reading the user's column.
+            if (CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name) || ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
+                throw new ConnectException(
+                        "table " + db + "." + table + " has a column named " + col.name
+                                + " which collides with a CDC metadata column");
+            }
+            // Aggregate sketches, not values: a plain SELECT yields nothing a consumer can interpret.
+            if (ColumnMeta.isNonExportable(col.srDataType)) {
+                throw new ConnectException(
+                        "table " + db + "." + table + " has column '" + col.name + "' of type "
+                                + col.srDataType + ", whose value cannot be exported by a SELECT"
+                                + " -- it is an aggregate sketch, not a value. Leave this table out of "
+                                + StarRocksCdcSourceConfig.TABLE_NAMES + ", or drop the column.");
+            }
+            // COLUMN_TYPE is a display string; when it does not parse the column is still
+            // captured, as text, and this says so once.
+            if (ColumnMeta.isComplex(col.srDataType) && col.type.kind == ColumnType.Kind.OPAQUE) {
+                LOG.warn("Column {}.{}.{} is declared as '{}', which this connector could not parse"
+                                + " into a nested schema; it will be carried as text.",
+                        db, table, col.name, col.srColumnType);
+            }
+            // Not fatal -- text preserves the value -- but StarRocks grew a type this connector
+            // was never told about, worth saying once at startup.
+            if (ColumnMeta.isUnrecognized(col.srDataType)) {
+                LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
+                                + " recognise; it will be carried as text. This usually means StarRocks"
+                                + " added a type.",
+                        db, table, col.name, col.srDataType, col.srColumnType);
+            }
         }
     }
 

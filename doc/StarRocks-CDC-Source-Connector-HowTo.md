@@ -270,7 +270,7 @@ The Kafka record key is a `Struct` built from just the table's primary key colum
 
 `ARRAY`, `MAP` and `STRUCT` deliberately do **not** claim `io.debezium.data.Json`. They render in a JSON-like shape, but that name would promise every value parses as JSON, and that has not been verified at the edges — NULLs, embedded quotes, deep nesting. The name says what the column is; it makes no promise about how the text parses.
 
-`HLL`, `BITMAP` and `PERCENTILE` hold aggregate sketches rather than values: a plain `SELECT` of one returns nothing a consumer can interpret or load back. A table containing one is refused during preflight, with the offending column named, rather than started and streamed as a non-value. Capture a view that projects only the columns you need instead.
+`HLL`, `BITMAP` and `PERCENTILE` hold aggregate sketches rather than values: a plain `SELECT` of one returns nothing a consumer can interpret or load back. A table containing one is refused during preflight, with the offending column named, rather than started and streamed as a non-value. Views cannot be captured either (they have no table model), so either leave the table out of `starrocks.table.names` or drop the column.
 
 ---
 

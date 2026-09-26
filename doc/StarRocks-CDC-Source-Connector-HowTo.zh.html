@@ -419,7 +419,7 @@ source.connect.timeout.ms=1000</code></pre>
 
 <p><code>ARRAY</code>/<code>MAP</code>/<code>STRUCT</code> <strong>刻意不使用</strong> <code>io.debezium.data.Json</code>：它们渲染出的形态确实像 JSON，但用那个名字等于承诺每个值都能按 JSON 解析，而这一点在边界情况上（NULL、内嵌引号、深层嵌套）尚未验证。逻辑名只说明这一列是什么，不对文本如何解析作任何承诺。</p>
 
-<p><code>HLL</code>/<code>BITMAP</code>/<code>PERCENTILE</code> 存的是聚合中间态而非值：直接 <code>SELECT</code> 出来的内容消费者既无法解释也无法回灌。含这类列的表会在 preflight 阶段被拒绝并指明是哪一列，而不是启动后源源不断地往 Kafka 发无意义内容。需要时改为捕获一个只投影所需列的视图。</p>
+<p><code>HLL</code>/<code>BITMAP</code>/<code>PERCENTILE</code> 存的是聚合中间态而非值：直接 <code>SELECT</code> 出来的内容消费者既无法解释也无法回灌。含这类列的表会在 preflight 阶段被拒绝并指明是哪一列，而不是启动后源源不断地往 Kafka 发无意义内容。视图同样抓不了（它没有表模型），所以只能把这张表从 <code>starrocks.table.names</code> 里去掉，或者删掉该列。</p>
 
 <h2 id="semantics"><span class="no">5</span>语义</h2>
 <ul>
