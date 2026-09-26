@@ -306,9 +306,9 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
 
-<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">713 行 · 正确性核心</span></h3>
+<h3 id="StarRocksCdcSourceTask"><span class="fn">StarRocksCdcSourceTask</span><span class="sz">724 行 · 正确性核心</span></h3>
 <p class="role">poll 循环 + 每表一份 bookmark 状态。整个连接器最容易写错的地方都在这个文件里。</p>
-<p>文件按生命周期排：<code>start</code> 一组（<code>assignedTables</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarks</code>/<code>partitionsOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
+<p>文件按生命周期排：<code>start</code> 一组（<code>assignedTables</code>、<code>tableStates</code>、<code>durableOffsets</code>、<code>adoptHeldBookmarks</code>、<code>restoreOffset</code>，按调用顺序），<code>poll</code> 一组（<code>pollTable</code>、<code>bootstrap</code>、窗口整形的 <code>WindowRow</code>/<code>appendWindow</code>/<code>demoteAllButLast</code>/<code>retain</code>/<code>discardFrom</code>，失败处理的 <code>failUnlessRetriable</code>/<code>applyPolicy</code>/<code>leaseStateNote</code>，每轮维护的 <code>drainPendingReleases</code>/<code>renewLiveBookmarks</code>），然后 <code>commit</code>/<code>durableBookmarks</code>/<code>partitionsOf</code>/<code>stop</code>，四个测试桩（<code>createClient</code>、<code>idleSleep</code>、<code>monotonicMs</code>、<code>nanoTime</code>）收尾。下文按同一顺序讲。</p>
 
 <h4>TableState —— 每张表的全部状态</h4>
 <div class="tablewrap">
@@ -329,7 +329,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 <p>只有 <code>liveBookmarks</code> 在监视器下：commit 线程在里面挑出低于围栏的 id，poll 线程在里面追加、并为续租取快照。<code>committedBookmark</code> 用 <code>volatile</code> 而不进监视器，因为读它的那一步（<code>Math.min</code>）不需要与 deque 的修改原子。<code>pendingReleases</code> 自带线程安全，其余字段只在 poll 线程上动。task 级的 <code>tables</code> 与 <code>client</code> 是 <code>volatile</code>：前者在 <code>start()</code> 末尾赋值、由 commit 线程读，后者的 <code>stop()</code> 按 API 可能来自别的线程。</p>
 
 <h4>start(props)</h4>
-<p>读配置 → <code>assignedTables</code> 解析 <code>task.tables</code>，空、重复、不在 <code>starrocks.table.names</code> 里的都拒绝启动（连接器从不生成这三种，出现即手写配置；重复的表会每行发两遍，且一份的围栏会释放另一份的 base）→ 建 client → 逐表建 <code>TableState</code>（<code>fetchColumns</code>、建 mapper，都是构造参数）→ 全部表的 partition 一次交给 <code>offsetStorageReader().offsets(...)</code> 读回 raw offset，与 <code>durableBookmarks</code> 同一趟读法 → 逐表 <code>adoptHeldBookmarks</code> 把 holder 在这张表上仍持有的引用全部压回 <code>liveBookmarks</code> → <code>restoreOffset</code>。接管在恢复之前：恢复出来的那个 id 通常已在接管名单里，<code>retain</code> 去重。<code>restoreOffset</code> 在每个出口记一行 INFO 说明这张表从哪里开始：持久 offset、最旧的持有引用，或 fresh。</p>
+<p>读配置 → <code>assignedTables</code> 解析 <code>task.tables</code>，空、重复、不在 <code>starrocks.table.names</code> 里的都拒绝启动（连接器从不生成这三种，出现即手写配置；重复的表会每行发两遍，且一份的围栏会释放另一份的 base）→ 建 client → <code>tableStates</code> 逐表建 <code>TableState</code>（<code>fetchColumns</code>、建 mapper，都是构造参数）→ <code>durableOffsets</code> 把全部表的 partition 一次交给 <code>offsetStorageReader().offsets(...)</code> 读回 raw offset，<code>durableBookmarks</code> 也经它读 → 逐表 <code>adoptHeldBookmarks</code> 把 holder 在这张表上仍持有的引用全部压回 <code>liveBookmarks</code> → <code>restoreOffset</code>。接管在恢复之前：恢复出来的那个 id 通常已在接管名单里，<code>retain</code> 去重。<code>restoreOffset</code> 在每个出口记一行 INFO 说明这张表从哪里开始：持久 offset、最旧的持有引用，或 fresh。</p>
 <p><code>context</code> 为 null 时（单测直接 new 一个 task）每张表都按首次运行处理，这是刻意留的口子。</p>
 
 <h4>restoreOffset(t, raw)</h4>
@@ -419,7 +419,7 @@ LOG.info("... starts at bookmark {}, the oldest reference the holder still holds
   long fence = Math.min(durable.getOrDefault(t.table, -1), t.committedBookmark);
   if (fence &lt; 0) continue;
   迭代 liveBookmarks，凡 live &lt; fence 的移出并放进 pendingReleases</code></pre>
-<p><code>durableBookmarks</code> 把全部表的 partition（<code>partitionsOf</code>，<code>start</code> 也用它）一次交给 <code>offsetStorageReader().offsets(...)</code>，取每个的 <code>bookmark_id</code>——Connect 的 <code>offset(partition)</code> 只是 <code>offsets(singletonList)</code> 的委托，每次调用都是一趟 offset topic 的读到末尾，逐表读就是 N 趟。不从"<code>commit()</code> 被调用了"去推断落盘进度：<code>WorkerSourceTask.commitOffsets()</code> 在 <code>shouldFlush</code> 为假时也会调 <code>commitSourceTask()</code>，一次 flush 都没发生。</p>
+<p><code>durableBookmarks</code> 经 <code>durableOffsets</code>（<code>start</code> 也用它，partition 列表由 <code>partitionsOf</code> 生成）一次交给 <code>offsetStorageReader().offsets(...)</code>，取每个的 <code>bookmark_id</code>——Connect 的 <code>offset(partition)</code> 只是 <code>offsets(singletonList)</code> 的委托，每次调用都是一趟 offset topic 的读到末尾，逐表读就是 N 趟。不从"<code>commit()</code> 被调用了"去推断落盘进度：<code>WorkerSourceTask.commitOffsets()</code> 在 <code>shouldFlush</code> 为假时也会调 <code>commitSourceTask()</code>，一次 flush 都没发生。</p>
 <p>方向上是安全的：<code>OffsetStorageReaderImpl.offsets()</code> 是穿透读，看不到尚未 flush 的写入，所以只会偏旧不会偏新，而偏旧只是这一轮少释放几个。</p>
 <p><code>Math.min</code> 是跨代保护：offset store 以 connector 名而非 task 世代为键，仍在 flush 的僵尸前任会让答案越过本 task 自己的位置，不钳制就会释放掉本 task 刚恢复所依赖的那个 bookmark。</p>
 <p>读失败记一条 WARN，全部释放推迟到下次 <code>commit()</code>；读被中断则恢复中断标志后返回——Connect 的 reader 把中断包成 <code>ConnectException</code>，不恢复标志。</p>

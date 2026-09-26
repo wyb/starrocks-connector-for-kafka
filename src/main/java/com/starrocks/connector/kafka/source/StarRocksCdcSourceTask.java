@@ -146,18 +146,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
         client = createClient(config);
 
         try {
-            List<TableState> started = new ArrayList<>();
-            for (String t : taskTables) {
-                List<ColumnMeta> cols = client.fetchColumns(db, t);
-                started.add(new TableState(t, cols, new ChangeRecordMapper(db, t, config.topicFor(t), cols)));
-            }
-            // One read for every table, as in durableBookmarks(). context is set by the framework
-            // via initialize(SourceTaskContext) before start(); it is null in unit tests that
-            // construct a task directly, and every table is then fresh, as on a first-ever run.
-            Map<Map<String, String>, Map<String, Object>> durable = Collections.emptyMap();
-            if (context != null && context.offsetStorageReader() != null) {
-                durable = context.offsetStorageReader().offsets(partitionsOf(started));
-            }
+            List<TableState> started = tableStates(taskTables, config);
+            Map<Map<String, String>, Map<String, Object>> durable = durableOffsets(started);
             for (TableState ts : started) {
                 adoptHeldBookmarks(ts);
                 restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
@@ -199,6 +189,30 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
         }
         return assigned;
+    }
+
+    /** One state per assigned table, its columns read from the server and its mapper built. */
+    private List<TableState> tableStates(List<String> taskTables, StarRocksCdcSourceConfig config)
+            throws SQLException {
+        List<TableState> states = new ArrayList<>(taskTables.size());
+        for (String t : taskTables) {
+            List<ColumnMeta> cols = client.fetchColumns(db, t);
+            states.add(new TableState(t, cols, new ChangeRecordMapper(db, t, config.topicFor(t), cols)));
+        }
+        return states;
+    }
+
+    /**
+     * Every table's durable offset in one read: Connect's per-partition {@code offset} is a pass
+     * over the offset topic each. {@code context} is set by the framework via
+     * {@code initialize(SourceTaskContext)} before {@code start()}; it is null in unit tests that
+     * construct a task directly, and every table is then fresh, as on a first-ever run.
+     */
+    private Map<Map<String, String>, Map<String, Object>> durableOffsets(List<TableState> states) {
+        if (context == null || context.offsetStorageReader() == null) {
+            return Collections.emptyMap();
+        }
+        return context.offsetStorageReader().offsets(partitionsOf(states));
     }
 
     /**
@@ -642,13 +656,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * transformation filtered or {@code errors.tolerance=all} dropped, which are never written.
      */
     private Map<String, Long> durableBookmarks() {
-        Map<String, Long> result = new HashMap<>();
-        if (context == null || context.offsetStorageReader() == null) {
-            return result;
-        }
         Map<Map<String, String>, Map<String, Object>> offsets;
         try {
-            offsets = context.offsetStorageReader().offsets(partitionsOf(tables));
+            offsets = durableOffsets(tables);
         } catch (RuntimeException e) {
             if (e.getCause() instanceof InterruptedException) {
                 // Connect's reader wraps the interrupt without restoring the flag.
@@ -658,8 +668,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
             return null;
         }
+        Map<String, Long> result = new HashMap<>();
         for (TableState t : tables) {
-            Map<String, Object> offset = offsets == null ? null : offsets.get(OffsetState.sourcePartition(db, t.table));
+            Map<String, Object> offset = offsets.get(OffsetState.sourcePartition(db, t.table));
             Object raw = offset == null ? null : offset.get(OffsetState.KEY_BOOKMARK_ID);
             result.put(t.table, raw instanceof Number ? ((Number) raw).longValue() : -1L);
         }
