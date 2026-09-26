@@ -40,10 +40,11 @@ import java.util.Map;
  * Validates configuration, runs fail-fast preflight against every captured table, and shards the
  * table list round-robin across {@code maxTasks} tasks.
  *
- * <p>Preflight rejects at {@link #start} rather than mid-stream: the UNIQUE KEY model; a PRIMARY KEY
- * table without {@code enable_change_data_capture} (the message names the exact ALTER); a column
- * colliding with {@code __CHANGE_TYPE__} or {@code __ROW_VERSION__}; a column whose type cannot be
- * exported; and disabled bookmark meta functions, proven by {@link #probeBookmarkFunctions}.
+ * <p>Preflight rejects at {@link #start} rather than mid-stream: a table with no model (a view, an
+ * external table) or one this connector does not know; the UNIQUE KEY model; a PRIMARY KEY table
+ * without {@code enable_change_data_capture} (the message names the exact ALTER); a column colliding
+ * with {@code __CHANGE_TYPE__} or {@code __ROW_VERSION__}; a column whose type cannot be exported;
+ * and disabled bookmark meta functions, proven by {@link #probeBookmarkFunctions}.
  */
 public class StarRocksCdcSourceConnector extends SourceConnector {
 
