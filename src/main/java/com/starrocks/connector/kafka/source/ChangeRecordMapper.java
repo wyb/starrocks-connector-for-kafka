@@ -33,7 +33,7 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Turns a raw row plus column metadata into a Debezium envelope {@link SourceRecord}. Pure: never
+ * Turns a raw row plus its column meta into a Debezium envelope {@link SourceRecord}. Pure: never
  * touches JDBC, and every schema is built once in the constructor.
  *
  * <p>The envelope comes from Debezium's own {@link Envelope}, which owns the field order and the

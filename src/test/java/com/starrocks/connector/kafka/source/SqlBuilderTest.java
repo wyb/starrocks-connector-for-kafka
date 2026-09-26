@@ -62,7 +62,7 @@ public class SqlBuilderTest {
 
     /** TABLE_ID, the model and PROPERTIES ride one row, so one query serves preflight and the reference lookup. */
     @Test
-    public void testMetadataSql() {
+    public void testTableConfigSql() {
         assertEquals("SELECT TABLE_ID, TABLE_MODEL, PROPERTIES FROM information_schema.tables_config"
                 + " WHERE TABLE_SCHEMA = 'db1' AND TABLE_NAME = 't1'", SqlBuilder.tableConfigSql("db1", "t1"));
     }
@@ -93,18 +93,18 @@ public class SqlBuilderTest {
     }
 
     /**
-     * The Arrow Flight transport's only route to column metadata.
+     * The Arrow Flight transport's only route to column meta.
      *
      * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
-     * matched positionally against the projected result set by {@code RowExtractor}, so any other
+     * matched positionally against the projected result set by {@code ValueReader#readRow}, so any other
      * order silently reads every value into the wrong field.
      */
     @Test
-    public void testColumnsMetadataSqlSelectsOrderedByOrdinalPosition() {
+    public void testColumnsMetaSqlSelectsOrderedByOrdinalPosition() {
         assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
                         + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
                         + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
-                SqlBuilder.columnsMetadataSql("db1", "t1"));
+                SqlBuilder.columnsMetaSql("db1", "t1"));
     }
 
     /**
@@ -114,15 +114,15 @@ public class SqlBuilderTest {
      * either one silently disables a guard downstream, so both are asserted by name.
      */
     @Test
-    public void testColumnsMetadataSqlSelectsBothTypeColumns() {
-        String sql = SqlBuilder.columnsMetadataSql("db1", "t1");
+    public void testColumnsMetaSqlSelectsBothTypeColumns() {
+        String sql = SqlBuilder.columnsMetaSql("db1", "t1");
         assertTrue("DATA_TYPE is what the HLL/BITMAP guard reads", sql.contains("DATA_TYPE"));
         assertTrue("COLUMN_TYPE carries the nested type", sql.contains("COLUMN_TYPE"));
     }
 
     /** Identifiers reach information_schema as string literals, so they are quoted, not backticked. */
     @Test
-    public void testColumnsMetadataSqlEscapesStringLiterals() {
-        assertTrue(SqlBuilder.columnsMetadataSql("db'1", "t1").contains("TABLE_SCHEMA = 'db\\'1'"));
+    public void testColumnsMetaSqlEscapesStringLiterals() {
+        assertTrue(SqlBuilder.columnsMetaSql("db'1", "t1").contains("TABLE_SCHEMA = 'db\\'1'"));
     }
 }

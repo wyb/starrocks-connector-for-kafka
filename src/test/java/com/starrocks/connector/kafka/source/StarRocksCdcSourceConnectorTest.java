@@ -190,7 +190,7 @@ public class StarRocksCdcSourceConnectorTest {
      * column: deletes would arrive as creates and unrelated rows as deletes, with no error.
      */
     @Test
-    public void testPreflightRejectsMetadataColumnCollisionInAnyCase() {
+    public void testPreflightRejectsPseudoColumnCollisionInAnyCase() {
         for (String name : new String[] {
                 "__CHANGE_TYPE__", "__change_type__", "__Change_Type__", "__ROW_VERSION__", "__row_version__"}) {
             FakeCdcClient fake = new FakeCdcClient();

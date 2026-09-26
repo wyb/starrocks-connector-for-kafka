@@ -78,7 +78,7 @@ public final class SqlBuilder {
      * <p>Scale from the standard {@code NUMERIC_SCALE}; precision is not read, Connect's Decimal
      * has no use for it.
      */
-    public static String columnsMetadataSql(String db, String table) {
+    public static String columnsMetaSql(String db, String table) {
         return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
                 + " FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";

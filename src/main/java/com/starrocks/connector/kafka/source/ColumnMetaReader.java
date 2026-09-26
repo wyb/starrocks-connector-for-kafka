@@ -55,7 +55,7 @@ final class ColumnMetaReader {
      * producing two schemas depending on the URL scheme.
      */
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException {
-        String sql = SqlBuilder.columnsMetadataSql(db, table);
+        String sql = SqlBuilder.columnsMetaSql(db, table);
         try {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement();

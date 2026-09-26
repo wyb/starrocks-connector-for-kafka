@@ -229,7 +229,7 @@ public class ChangeRecordMapperTest {
     }
 
     /**
-     * Temporals arrive already as text (RowExtractor canonicalizes them) and go through untouched,
+     * Temporals arrive already as text (ValueReader canonicalizes them) and go through untouched,
      * including into a DATE key column, whose key schema is STRING too.
      */
     @Test
