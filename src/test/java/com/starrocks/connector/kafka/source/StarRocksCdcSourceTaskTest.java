@@ -1869,4 +1869,34 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(140L, task.tables.get(0).committedBookmark);
         assertEquals(0, fake.snapshotCalls);
     }
+
+    /** The connector never writes a duplicated or unlisted assignment; a duplicate would ship every row twice. */
+    @Test
+    public void testStartRejectsADuplicateOrUnlistedTableAssignment() {
+        Map<String, String> duplicated = baseProps();
+        duplicated.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders, orders");
+        try {
+            newTask(new FakeCdcClient()).start(duplicated);
+            fail("expected ConnectException for a duplicated assignment");
+        } catch (ConnectException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("more than once"));
+        }
+        Map<String, String> unlisted = baseProps();
+        unlisted.put(StarRocksCdcSourceConfig.TASK_TABLES, "users");
+        try {
+            newTask(new FakeCdcClient()).start(unlisted);
+            fail("expected ConnectException for an assignment outside starrocks.table.names");
+        } catch (ConnectException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TABLE_NAMES));
+        }
+    }
+
+    /** What the start log says per table comes straight from restoreOffset. */
+    @Test
+    public void testRestoreOffsetSaysWhereTheTableStarts() throws Exception {
+        task.start(baseProps());
+        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
+        assertEquals("at bookmark 130, the durable offset", task.restoreOffset(t, OffsetState.sourceOffset(130L, true)));
+        assertTrue(task.restoreOffset(t, null).startsWith("fresh: the first poll takes the snapshot"));
+    }
 }

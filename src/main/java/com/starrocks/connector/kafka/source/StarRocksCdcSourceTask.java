@@ -142,11 +142,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         tombstones = config.tombstonesOnDelete();
         policyResnapshot = StarRocksCdcSourceConfig.NONTRACKABLE_POLICY_RESNAPSHOT.equals(config.nonTrackablePolicy());
 
-        List<String> taskTables = StarRocksCdcSourceConfig.splitNames(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
-        if (taskTables.isEmpty()) {
-            throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES
-                    + " names no table; the connector sets it for every task it creates");
-        }
+        List<String> taskTables = assignedTables(props, config);
         client = createClient(config);
 
         try {
@@ -164,11 +160,12 @@ public class StarRocksCdcSourceTask extends SourceTask {
             }
             for (TableState ts : started) {
                 adoptHeldBookmarks(ts);
-                restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
+                LOG.info("Table {}.{} starts {}", db, ts.table,
+                        restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table))));
             }
             tables = started;
-            LOG.info("CDC source task started: tables={}, holder={}, {}={}, {}={}, {}={}, {}={}, {}={}",
-                    taskTables, holder,
+            LOG.info("CDC source task started: database={}, tables={}, holder={}, {}={}, {}={}, {}={}, {}={}, {}={}",
+                    db, taskTables, holder,
                     StarRocksCdcSourceConfig.SNAPSHOT_MODE, config.snapshotMode(),
                     StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, config.nonTrackablePolicy(),
                     StarRocksCdcSourceConfig.POLL_INTERVAL_MS, pollIntervalMs,
@@ -177,6 +174,32 @@ public class StarRocksCdcSourceTask extends SourceTask {
         } catch (SQLException e) {
             throw new ConnectException("Failed to start CDC source task", e);
         }
+    }
+
+    /**
+     * The tables the connector assigned to this task. The connector never writes an empty,
+     * duplicated or unlisted assignment, so any of them is a hand-written config; a duplicate would
+     * ship every row twice while one copy's fence releases the other's base.
+     */
+    private static List<String> assignedTables(Map<String, String> props, StarRocksCdcSourceConfig config) {
+        List<String> assigned = StarRocksCdcSourceConfig.splitNames(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
+        if (assigned.isEmpty()) {
+            throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES
+                    + " names no table; the connector sets it for every task it creates");
+        }
+        List<String> captured = config.tableNames();
+        Set<String> seen = new HashSet<>();
+        for (String table : assigned) {
+            if (!captured.contains(table)) {
+                throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES + " names " + table + ", which "
+                        + StarRocksCdcSourceConfig.TABLE_NAMES + "=" + captured + " does not list");
+            }
+            if (!seen.add(table)) {
+                throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES + " names " + table
+                        + " more than once; one task would capture it twice");
+            }
+        }
+        return assigned;
     }
 
     /**
@@ -210,8 +233,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
      * an earlier start pinned, and resuming from it keeps every change since. A reset through the
      * offsets REST API releases those references first, so it still starts from the current
      * version. Package-visible so tests can drive it without a real offset store.
+     *
+     * @return where the table starts, worded for the start log
      */
-    void restoreOffset(TableState t, Map<String, Object> raw) {
+    String restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;
@@ -220,21 +245,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // table per restart until its TTL. Safe, because commit() releases strictly below the
             // durable offset, and at restore time this id is exactly that offset.
             retain(t, state.bookmarkId);
-            return;
+            return "at bookmark " + state.bookmarkId + ", the durable offset";
         }
         if (snapshotInitial) {
-            return;
+            return "fresh: the first poll takes the snapshot";
         }
         Long oldest;
         synchronized (t.liveBookmarks) {
             oldest = t.liveBookmarks.isEmpty() ? null : Collections.min(t.liveBookmarks);
         }
-        if (oldest != null) {
-            t.committedBookmark = oldest;
-            t.snapshotDone = true;
-            LOG.info("No durable offset for {}.{}; resuming CHANGES from bookmark {}, the oldest {} still holds "
-                    + "from an earlier start", db, t.table, oldest, holder);
+        if (oldest == null) {
+            return "fresh: the first poll pins the current version and streams from there";
         }
+        t.committedBookmark = oldest;
+        t.snapshotDone = true;
+        return "at bookmark " + oldest + ", the oldest reference " + holder + " still holds from an earlier start";
     }
 
     /**
