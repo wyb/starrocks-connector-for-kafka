@@ -166,6 +166,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                     // exactly as a primary key does: nothing to warn about.
                     break;
             }
+
             for (ColumnMeta col : client.fetchColumns(db, table)) {
                 // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
                 // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
