@@ -37,11 +37,11 @@ import java.util.List;
 public class StarRocksJdbcClient implements CdcClient {
 
     private final FeConnection connection;
-    private final ColumnMetaReader columns;
+    private final ColumnMetaReader columnMetaReader;
 
     public StarRocksJdbcClient(StarRocksCdcSourceConfig config) {
         this.connection = new FeConnection(config);
-        this.columns = new ColumnMetaReader(connection);
+        this.columnMetaReader = new ColumnMetaReader(connection);
     }
 
     @Override
@@ -109,7 +109,7 @@ public class StarRocksJdbcClient implements CdcClient {
 
     @Override
     public List<ColumnMeta> fetchColumns(String db, String table) throws SQLException {
-        return columns.fetchColumns(db, table);
+        return columnMetaReader.fetchColumns(db, table);
     }
 
     /**
