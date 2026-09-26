@@ -143,9 +143,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                     throw new ConnectException(
                             "table " + db + "." + table + " uses UNIQUE KEY model, which CHANGES does not support");
                 case DUPLICATE:
-                    // AGG needs no warning: rows sharing an aggregate key are folded into one, so the
-                    // key identifies a row exactly as a primary key does. DUP's key is a sort key and
-                    // admits duplicates, which is fine for partitioning but not for compaction.
+                    // DUP's key is a sort key and admits duplicates: fine for partitioning, not for compaction.
                     LOG.warn("Table {}.{} uses the DUPLICATE KEY model, whose key columns are a sort key "
                             + "and are not unique, so several rows can share one Kafka key. Partitioning "
                             + "and per-key ordering still hold; log compaction does not -- it would drop "
@@ -153,15 +151,19 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                             + "every row sharing the deleted row's key.",
                             db, table, StarRocksCdcSourceConfig.TOMBSTONES_ON_DELETE);
                     break;
-                default:
+                case PRIMARY:
+                    // The only model that carries the property.
+                    if (!cfg.cdcEnabled()) {
+                        throw new ConnectException(
+                                "primary key table " + db + "." + table + " does not have change data capture "
+                                        + "enabled; run: ALTER TABLE " + db + "." + table
+                                        + " SET (\"enable_change_data_capture\" = \"true\")");
+                    }
                     break;
-            }
-            // Only a primary key table can carry the property.
-            if (cfg.model == TableConfig.Model.PRIMARY && !cfg.cdcEnabled()) {
-                throw new ConnectException(
-                        "primary key table " + db + "." + table + " does not have change data capture enabled; "
-                                + "run: ALTER TABLE " + db + "." + table
-                                + " SET (\"enable_change_data_capture\" = \"true\")");
+                case AGGREGATE:
+                    // Rows sharing an aggregate key are folded into one, so the key identifies a row
+                    // exactly as a primary key does: nothing to warn about.
+                    break;
             }
             for (ColumnMeta col : client.fetchColumns(db, table)) {
                 // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
