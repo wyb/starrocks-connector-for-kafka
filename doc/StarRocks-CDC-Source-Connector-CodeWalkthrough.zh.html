@@ -232,7 +232,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">331 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">327 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -263,9 +263,8 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 </div>
 
 <h4>taskConfigs(maxTasks)</h4>
-<pre><code>int groups = Math.min(maxTasks, tables.size());
-for (int i = 0; i &lt; tables.size(); i++)
-    groupTables.get(i % groups).add(tables.get(i));</code></pre>
+<pre><code>int taskCount = Math.min(maxTasks, tables.size());
+task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</code></pre>
 <p>每组拷一份完整 props，只多塞一个内部键 <code>task.tables</code>。这个键不在 <code>CONFIG_DEF</code> 里，是 Connector 与 Task 之间的私有通道，不对用户暴露。</p>
 
 <h4>exactlyOnceSupport(props) —— 只在不做快照时答 SUPPORTED</h4>

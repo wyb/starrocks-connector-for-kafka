@@ -251,19 +251,15 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     /** Round-robin: table i goes to task i mod min(maxTasks, tables). The config rejects an empty list. */
     @Override
     public List<Map<String, String>> taskConfigs(int maxTasks) {
-        int groups = Math.min(maxTasks, tables.size());
-        List<List<String>> groupTables = new ArrayList<>(groups);
-        for (int i = 0; i < groups; i++) {
-            groupTables.add(new ArrayList<>());
-        }
-        for (int i = 0; i < tables.size(); i++) {
-            groupTables.get(i % groups).add(tables.get(i));
-        }
-
-        List<Map<String, String>> result = new ArrayList<>(groups);
-        for (List<String> group : groupTables) {
+        int taskCount = Math.min(maxTasks, tables.size());
+        List<Map<String, String>> result = new ArrayList<>(taskCount);
+        for (int task = 0; task < taskCount; task++) {
+            List<String> own = new ArrayList<>();
+            for (int i = task; i < tables.size(); i += taskCount) {
+                own.add(tables.get(i));
+            }
             Map<String, String> taskProps = new HashMap<>(props);
-            taskProps.put(StarRocksCdcSourceConfig.TASK_TABLES, String.join(",", group));
+            taskProps.put(StarRocksCdcSourceConfig.TASK_TABLES, String.join(",", own));
             result.add(taskProps);
         }
         return result;
