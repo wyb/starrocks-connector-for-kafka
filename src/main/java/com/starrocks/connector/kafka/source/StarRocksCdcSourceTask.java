@@ -635,8 +635,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /** Test injection point: test subclasses override to return a scripted fake. */
-    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
-        return new StarRocksJdbcClient(cfg);
+    protected CdcClient createClient(StarRocksCdcSourceConfig config) {
+        return new StarRocksJdbcClient(config);
     }
 
     /** Overridden in tests so idle polls do not really sleep. */

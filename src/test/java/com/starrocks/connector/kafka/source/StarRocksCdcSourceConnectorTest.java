@@ -59,7 +59,7 @@ public class StarRocksCdcSourceConnectorTest {
     private StarRocksCdcSourceConnector newConnector(final FakeCdcClient fake) {
         return new StarRocksCdcSourceConnector() {
             @Override
-            protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+            protected CdcClient createClient(StarRocksCdcSourceConfig config) {
                 return fake;
             }
         };
@@ -394,6 +394,10 @@ public class StarRocksCdcSourceConnectorTest {
                 " " + StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT + " ");
         assertEquals(ExactlyOnceSupport.SUPPORTED,
                 new StarRocksCdcSourceConnector().exactlyOnceSupport(onlyMode));
+        Map<String, String> nullMode = new HashMap<>();
+        nullMode.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, null);
+        assertEquals(ExactlyOnceSupport.UNSUPPORTED,
+                new StarRocksCdcSourceConnector().exactlyOnceSupport(nullMode));
     }
 
     private static Map<Map<String, ?>, Map<String, ?>> offsetRequest(Object bookmarkId, Object snapshotDone) {

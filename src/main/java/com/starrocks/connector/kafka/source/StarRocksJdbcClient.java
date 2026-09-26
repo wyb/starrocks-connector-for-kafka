@@ -193,9 +193,8 @@ public class StarRocksJdbcClient implements CdcClient {
                 connection.applyStreamingFetchSize(stmt);
                 ValueReader reader = ValueReader.forTransport(connection.isArrowFlight());
                 try (ResultSet rs = stmt.executeQuery(sql)) {
-                    // The last two projected columns are always __CHANGE_TYPE__ (int) and
-                    // __ROW_VERSION__ (long); extractRow only covers the leading business columns,
-                    // so they are peeled off directly here.
+                    // changesSql appends __CHANGE_TYPE__ (int) and __ROW_VERSION__ (long) after the
+                    // table's columns; readRow covers only those, so the two are read here by index.
                     int changeTypeIdx = cols.size() + 1;
                     int rowVersionIdx = cols.size() + 2;
                     while (rs.next()) {

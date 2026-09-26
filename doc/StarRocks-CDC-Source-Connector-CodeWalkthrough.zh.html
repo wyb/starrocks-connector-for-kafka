@@ -232,7 +232,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">344 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">342 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -442,7 +442,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>bookmarkRenew</code> 是唯一有返回值语义需要留意的：它返回<strong>服务端授予的</strong> TTL，而不是传入值——集群侧的上限可能把租约压低，而该上限是 <code>mutable=true</code> 的 FE 配置，随时可变。返回 <code>-1</code> 只说明此刻没有上限，不代表以后没有，所以连接器改为按固定节奏重新探测而不是就此停续。</p>
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
-<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">232 行</span></h3>
+<h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">231 行</span></h3>
 <p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
 
 <div class="tablewrap">
@@ -516,9 +516,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><strong>顶层两处。</strong>驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值、传什么 Calendar 都一样（UTC+8 的 worker 上 12:34:56 变成 04:34:56Z），<code>timestamp()</code> 覆写后经自己的 <code>fromJvmWallClock</code> 逆转（用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定；DST 跳变那一小时不可逆，是唯一残留）；Avatica 的 <code>getObject</code> 按 JDBC 类型码分发，ARRAY(2003) 拿到 <code>java.sql.Array</code>、MAP/STRUCT(2000) 拿到 vector 的 <code>Map</code>，<code>nested()</code> 先把 <code>Array</code> 用 <code>getArray()</code> 解成 <code>List</code>。这两条都是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 <code>List</code>，但 <code>ResultSet.getObject</code> 根本不走那里。</p>
 <p><strong>嵌套值是 vector 自己的对象。</strong>list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 和 INT/BIGINT 一模一样，所以 <code>leaf()</code> 只看声明类型，再由 <code>dateOfEpochDays</code>/<code>dateTimeOfEpochMicros</code> 换成基类那种文本。嵌套的 map 是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>，<code>asMap()</code> 覆写后两种形态都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。</p>
 
-<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">136 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">163 行</span></h3>
+<h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">140 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">163 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
-<p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。</p>
+<p><code>SqlBuilder</code> 里唯一有分量的是 <code>changesSql</code> 末尾那句 <code>ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC</code>：BE 的自然输出是版本降序、同版本内 INSERT 在前，直接透传会让一次 UPDATE 变成"先写新值再删除"，那一行在下游凭空消失。两个伪列名是这里的常量 <code>CHANGE_TYPE_COLUMN</code>/<code>ROW_VERSION_COLUMN</code>，<code>changesSql</code> 的投影和连接器的撞名检查都引用它，字面量只在这里出现一次。</p>
 <p><code>quoteStr</code> 先转义反斜杠再转义单引号，顺序不能反，否则引号转义引入的反斜杠会被二次转义。</p>
 <p><code>heldBookmarksSql</code> 按 <code>TABLE_ID + HOLDER_ID</code> 查 <code>information_schema.table_bookmark_references</code>，所以 <code>tableConfigSql</code> 顺带投影 <code>TABLE_ID</code>；holder 作字符串字面量照常经 <code>quoteStr</code>。</p>
 <p><code>ColumnMeta</code> 只保留服务端视角：<code>srDataType</code>（<code>DATA_TYPE</code>，规范化为小写）与 <code>srColumnType</code>（<code>COLUMN_TYPE</code>），并在构造时把它们折成<strong>一棵 <code>ColumnType</code>，每一列都有</strong>。一个 switch 对应 FE <code>Type.toMysqlDataTypeString()</code> 的封闭集：ARRAY/MAP/STRUCT 交给 <code>ColumnTypeParser</code>，解析成功是嵌套树，失败是 <code>OPAQUE</code>（按文本承载，逻辑名 <code>com.starrocks.data.Array/Map/Struct</code>）；<code>tinyint</code> 要看 <code>COLUMN_TYPE</code>——FE 把 BOOLEAN 的 <code>DATA_TYPE</code> 也写成 <code>tinyint</code>，只有 <code>COLUMN_TYPE</code> 是 <code>tinyint(1)</code>，只看类型名 BOOLEAN 会变成 int8；<code>bigint unsigned</code> 是 LARGEINT，128 位整数，schema 是 scale 0 的 <code>Decimal</code>，不管 <code>NUMERIC_SCALE</code> 说什么（FE 对它不填，NULL→0 只是巧合）；<code>decimal</code> 取 <code>NUMERIC_SCALE</code>；<code>json</code> 是 JSON 种类；<code>hll</code>/<code>bitmap</code>/<code>percentile</code> 与没见过的类型都是无逻辑名的 <code>OPAQUE</code>。三个包可见判定跟在旁边：<code>isComplex</code>；<code>isUnrecognized</code>，类型名不在 <code>KNOWN_DATA_TYPES</code> 里即为真，这个集合逐条镜像 switch 的 case，switch 自己分不出"有意按文本承载"和"没见过"；<code>isNonExportable</code>，对三种聚合草图为真，preflight 据此拒绝整张表。</p>
@@ -586,7 +586,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>59</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup 与空窗口 head 留作 base、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）+ poll 失败（抛 Retriable 前先睡一个 poll 间隔、持续失败超时转致命、成功重置计时、-1 永远重试、0 首次即停、致命时即使别的表有记录也抛）。含重启续读、启动接管 holder 的遗留引用并由围栏释放、引用表读不出不影响启动、畸形 offset 恢复为 fresh</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
-  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>22</td><td>preflight 各条拒绝（含不认识的模型名点名拒绝）、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
+  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>22</td><td>preflight 各条拒绝（含不认识的模型名点名拒绝）、探针 holder 独立、round-robin 分表、精确一次的适用与拒绝（缺键或值为 null 都不抛）、<code>alterOffsets</code> 对重置放行而对引号 id/负数/非布尔/畸形 partition 拒绝</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>12</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact、MySQL 会话钉住的二进制编码与文本读取器一致而 Arrow 不设。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>11</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中、<code>tables_config</code> 一行带 <code>TABLE_ID</code>、引用查询按 <code>TABLE_ID + HOLDER_ID</code> 过滤</td></tr>

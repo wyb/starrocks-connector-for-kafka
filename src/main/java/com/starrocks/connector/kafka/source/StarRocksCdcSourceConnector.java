@@ -37,8 +37,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Validates configuration, runs fail-fast preflight against every captured table, and shards the
- * table list round-robin across {@code maxTasks} tasks.
+ * Validates configuration, runs fail-fast preflight against every captured table, shards the table
+ * list round-robin across {@code maxTasks} tasks, and vets the offsets the REST API is about to
+ * write ({@link #alterOffsets}). {@link #exactlyOnceSupport} says when exactly-once is on offer.
  *
  * <p>Preflight rejects at {@link #start} rather than mid-stream: a table with no model (a view, an
  * external table) or one this connector does not know; the UNIQUE KEY model; a PRIMARY KEY table
@@ -49,11 +50,6 @@ import java.util.Map;
 public class StarRocksCdcSourceConnector extends SourceConnector {
 
     private static final Logger LOG = LoggerFactory.getLogger(StarRocksCdcSourceConnector.class);
-
-    /** The pseudo-columns every CHANGES projection appends (see {@code StarRocksJdbcClient#streamChanges});
-     *  a real column of either name would be indistinguishable from them downstream. */
-    private static final String CHANGE_TYPE_COLUMN = "__CHANGE_TYPE__";
-    private static final String ROW_VERSION_COLUMN = "__ROW_VERSION__";
 
     /** The probe's bookmark is released right after creation; if that fails it expires on its own. */
     private static final long PROBE_BOOKMARK_TTL_MS = 60_000L;
@@ -88,13 +84,13 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * offset it commits is the bookmark to resume from, written in the same transaction.
      *
      * <p>Read from the raw properties rather than through {@link StarRocksCdcSourceConfig}: the
-     * herder calls this while validating, so a half-filled config must not throw here.
+     * herder calls this while validating, so a half-filled config -- the key missing or null -- must
+     * not throw here.
      */
     @Override
     public ExactlyOnceSupport exactlyOnceSupport(Map<String, String> props) {
-        String mode = props.getOrDefault(StarRocksCdcSourceConfig.SNAPSHOT_MODE,
-                StarRocksCdcSourceConfig.SNAPSHOT_MODE_INITIAL);
-        return StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT.equals(mode.trim())
+        String mode = props.get(StarRocksCdcSourceConfig.SNAPSHOT_MODE);
+        return mode != null && StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT.equals(mode.trim())
                 ? ExactlyOnceSupport.SUPPORTED
                 : ExactlyOnceSupport.UNSUPPORTED;
     }
@@ -135,8 +131,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
 
     /** Refuses a missing, unknown or UNIQUE KEY model, requires the CDC property on a primary key table,
      *  and warns that a DUPLICATE KEY is not unique. */
-    private static void checkModel(String db, String table, TableConfig cfg) throws SQLException {
-        switch (cfg.model) {
+    private static void checkModel(String db, String table, TableConfig tableConfig) throws SQLException {
+        switch (tableConfig.model) {
             case NONE:
                 // Treating no model as permission would let the column checks pass and the table
                 // fail later, at bookmark_create.
@@ -147,7 +143,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                                 + " and external tables have no table model; capture the base table instead.");
             case OTHER:
                 throw new ConnectException(
-                        "table " + db + "." + table + " has table model '" + cfg.modelName
+                        "table " + db + "." + table + " has table model '" + tableConfig.modelName
                                 + "', which this connector does not know, so it cannot tell whether CHANGES"
                                 + " can read it");
             case UNIQUE:
@@ -164,11 +160,11 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 break;
             case PRIMARY:
                 // The only model that carries the property.
-                if (!cfg.cdcEnabled()) {
+                if (!tableConfig.cdcEnabled()) {
                     throw new ConnectException(
                             "primary key table " + db + "." + table + " does not have change data capture "
                                     + "enabled; run: ALTER TABLE " + db + "." + table
-                                    + " SET (\"enable_change_data_capture\" = \"true\")");
+                                    + " SET (\"" + TableConfig.CDC_PROPERTY + "\" = \"true\")");
                 }
                 break;
             case AGGREGATE:
@@ -183,9 +179,10 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     private static void checkColumns(String db, String table, List<ColumnMeta> cols) {
         for (ColumnMeta col : cols) {
             // Case-insensitive, matching StarRocks: ChangesMetaDescriptor.resolve compares with
-            // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a
-            // lowercase __change_type__ would leave our bare projection reading the user's column.
-            if (CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name) || ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
+            // CASE_INSENSITIVE_ORDER and renames its own pseudo-column on a collision, so a lowercase
+            // __change_type__ would leave changesSql's bare projection reading the user's column.
+            if (SqlBuilder.CHANGE_TYPE_COLUMN.equalsIgnoreCase(col.name)
+                    || SqlBuilder.ROW_VERSION_COLUMN.equalsIgnoreCase(col.name)) {
                 throw new ConnectException(
                         "table " + db + "." + table + " has a column named " + col.name
                                 + " which collides with a CDC metadata column");
@@ -285,8 +282,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 continue;
             }
             Map<String, ?> partition = entry.getKey();
-            requireNonEmptyString(partition, OffsetState.KEY_DB, "partition");
-            requireNonEmptyString(partition, OffsetState.KEY_TABLE, "partition");
+            requirePartitionString(partition, OffsetState.KEY_DB);
+            requirePartitionString(partition, OffsetState.KEY_TABLE);
             if (partition.size() != 2) {
                 // A task looks its partition up by Map equality, so any extra key matches nothing.
                 throw new ConnectException("partition " + partition + " must carry exactly "
@@ -320,10 +317,11 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
         return true;
     }
 
-    private static void requireNonEmptyString(Map<String, ?> map, String key, String what) {
-        Object value = map == null ? null : map.get(key);
+    /** {@code partition} itself may be null: Connect passes a request's {@code "partition": null} through as is. */
+    private static void requirePartitionString(Map<String, ?> partition, String key) {
+        Object value = partition == null ? null : partition.get(key);
         if (!(value instanceof String) || ((String) value).isEmpty()) {
-            throw new ConnectException(what + " " + map + " must carry " + key
+            throw new ConnectException("partition " + partition + " must carry " + key
                     + " as a non-empty string, not " + describe(value));
         }
     }
@@ -338,7 +336,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     }
 
     /** Test injection point: test subclasses override to return a scripted fake. */
-    protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
-        return new StarRocksJdbcClient(cfg);
+    protected CdcClient createClient(StarRocksCdcSourceConfig config) {
+        return new StarRocksJdbcClient(config);
     }
 }

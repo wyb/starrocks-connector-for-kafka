@@ -24,10 +24,14 @@ import java.util.List;
 
 /**
  * Every statement the CDC source issues, as pure functions. Identifiers are backtick-quoted and
- * literals single-quoted; the pseudo-columns {@code __CHANGE_TYPE__} and {@code __ROW_VERSION__}
- * are never quoted.
+ * literals single-quoted; the pseudo-columns {@link #CHANGE_TYPE_COLUMN} and
+ * {@link #ROW_VERSION_COLUMN} are never quoted.
  */
 public final class SqlBuilder {
+
+    /** The two columns CHANGES appends; {@link #changesSql} projects them after the table's own. */
+    public static final String CHANGE_TYPE_COLUMN = "__CHANGE_TYPE__";
+    public static final String ROW_VERSION_COLUMN = "__ROW_VERSION__";
 
     private SqlBuilder() {
     }
@@ -114,9 +118,9 @@ public final class SqlBuilder {
      * and the row would vanish downstream.
      */
     public static String changesSql(String db, String table, List<String> cols, long base, long head) {
-        return "SELECT " + quoteCols(cols) + ",__CHANGE_TYPE__,__ROW_VERSION__ FROM " +
+        return "SELECT " + quoteCols(cols) + "," + CHANGE_TYPE_COLUMN + "," + ROW_VERSION_COLUMN + " FROM " +
                 qualifiedTable(db, table) + " [_CHANGES_" + base + "_" + head + "_]" +
-                " ORDER BY __ROW_VERSION__, __CHANGE_TYPE__ DESC";
+                " ORDER BY " + ROW_VERSION_COLUMN + ", " + CHANGE_TYPE_COLUMN + " DESC";
     }
 
     private static String qualifiedTable(String db, String table) {

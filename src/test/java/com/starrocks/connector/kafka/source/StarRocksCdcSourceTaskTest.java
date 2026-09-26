@@ -138,7 +138,7 @@ public class StarRocksCdcSourceTaskTest {
     private StarRocksCdcSourceTask newBareTask(final FakeCdcClient fake) {
         return new StarRocksCdcSourceTask() {
             @Override
-            protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+            protected CdcClient createClient(StarRocksCdcSourceConfig config) {
                 return fake;
             }
 
@@ -1378,7 +1378,7 @@ public class StarRocksCdcSourceTaskTest {
         final List<Long> sleeps = new ArrayList<>();
         StarRocksCdcSourceTask paced = new StarRocksCdcSourceTask() {
             @Override
-            protected CdcClient createClient(StarRocksCdcSourceConfig cfg) {
+            protected CdcClient createClient(StarRocksCdcSourceConfig config) {
                 return fake;
             }
 
