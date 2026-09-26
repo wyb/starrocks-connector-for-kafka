@@ -303,6 +303,8 @@ public class StarRocksCdcSourceConnectorTest {
             assertTrue("message was: " + e.getMessage(), e.getMessage().contains(
                     "ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\")"));
             assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+            assertTrue("the FE's own reason must be in the message, was: " + e.getMessage(),
+                    e.getMessage().contains("Set enable_bookmark_meta_functions=true"));
         }
     }
 

@@ -110,7 +110,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             for (String t : tables) {
                 preflightCheckTable(client, db, t);
             }
-            probeBookmarkFunctions(client, config, db, tables.get(0));
+            probeBookmarkFunctions(client, db, tables.get(0), config.holderId());
         } finally {
             client.close();
         }
@@ -225,17 +225,19 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * shared holder would hand the probe the task's committed bookmark and the release would delete
      * it, failing every restart of an idle table with "bookmark not found".
      */
-    private void probeBookmarkFunctions(CdcClient client, StarRocksCdcSourceConfig config, String db, String table) {
-        String holder = config.holderId() + PROBE_HOLDER_SUFFIX;
+    private void probeBookmarkFunctions(CdcClient client, String db, String table, String taskHolder) {
+        String holder = taskHolder + PROBE_HOLDER_SUFFIX;
         long bookmarkId;
         try {
             bookmarkId = client.bookmarkCreate(db, table, holder, PROBE_BOOKMARK_TTL_MS);
         } catch (SQLException e) {
+            // The FE names the failed gate itself (functions disabled, no OPERATE privilege, not the
+            // leader), so its message goes first; the flag is per FE and not persisted.
             throw new ConnectException(
-                    "Failed to create a bookmark on " + db + "." + table + "; bookmark meta functions are most "
-                            + "likely disabled (Config.enable_bookmark_meta_functions defaults to false). On the FE "
-                            + "leader run: ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\") "
-                            + "-- and make sure the connector user holds OPERATE ON SYSTEM.", e);
+                    "Failed to create a bookmark on " + db + "." + table + ": " + e.getMessage()
+                            + ". The bookmark meta functions must be enabled on every FE, with"
+                            + " ADMIN SET FRONTEND CONFIG (\"enable_bookmark_meta_functions\" = \"true\") and the same"
+                            + " line in fe.conf to survive a restart, and the connector user needs OPERATE ON SYSTEM.", e);
         }
         try {
             client.bookmarkRelease(db, table, bookmarkId, holder);
