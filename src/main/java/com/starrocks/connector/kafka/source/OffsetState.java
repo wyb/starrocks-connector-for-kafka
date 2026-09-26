@@ -42,9 +42,8 @@ public final class OffsetState {
         this.snapshotDone = snapshotDone;
     }
 
-    public static OffsetState fresh() {
-        return new OffsetState(-1L, false);
-    }
+    /** No position: the table is captured from scratch. */
+    public static final OffsetState NONE = new OffsetState(-1L, false);
 
     public static Map<String, String> sourcePartition(String db, String table) {
         Map<String, String> partition = new HashMap<>();
@@ -71,14 +70,14 @@ public final class OffsetState {
      */
     public static OffsetState fromMap(Map<String, Object> raw) {
         if (raw == null) {
-            return fresh();
+            return NONE;
         }
         // Missing, unparsable and negative all land on the -1 sentinel, and all three mean the
         // same thing: no position.
         Object bmId = raw.get(KEY_BOOKMARK_ID);
         long bookmarkId = bmId instanceof Number ? ((Number) bmId).longValue() : -1L;
         if (bookmarkId < 0) {
-            return fresh();
+            return NONE;
         }
         return new OffsetState(bookmarkId, Boolean.TRUE.equals(raw.get(KEY_SNAPSHOT_DONE)));
     }

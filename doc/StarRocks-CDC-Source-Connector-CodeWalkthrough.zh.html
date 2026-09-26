@@ -426,11 +426,11 @@ LOG.info("... starts at bookmark {}, the oldest reference the holder still holds
 <p>读失败记一条 WARN，全部释放推迟到下次 <code>commit()</code>；读被中断则恢复中断标志后返回——Connect 的 reader 把中断包成 <code>ConnectException</code>，不恢复标志。</p>
 <p><strong>这个方法不发任何 SQL</strong>，只读 offset store 和入队。</p>
 
-<h3 id="OffsetState"><span class="fn">OffsetState</span><span class="sz">85 行</span></h3>
+<h3 id="OffsetState"><span class="fn">OffsetState</span><span class="sz">84 行</span></h3>
 <p class="role">Connect offset 的编解码。四个 key 常量 + 三个静态构造（<code>fresh</code>、<code>sourcePartition</code>、<code>sourceOffset</code>）+ 一个容错的解析。</p>
 <pre><code>sourcePartition = {"db": db, "table": table}
 sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;}</code></pre>
-<p><code>fromMap</code> 只认一种成功：<code>bookmark_id</code> 是非负 <code>Number</code>。<code>raw</code> 为 null、键缺失、值不是 <code>Number</code>（例如被引号包成字符串）、值为负——四种情况都落到 <code>-1</code> 哨兵，一律 <code>fresh()</code>，<strong>连 <code>snapshot_done</code> 都不再看</strong>。读成 <code>Number</code> 而不是 cast 成 <code>Long</code>，是因为 offset store 走 JSON 往返，小 id 回来是 <code>Integer</code>。</p>
+<p><code>fromMap</code> 只认一种成功：<code>bookmark_id</code> 是非负 <code>Number</code>。<code>raw</code> 为 null、键缺失、值不是 <code>Number</code>（例如被引号包成字符串）、值为负——四种情况都落到 <code>-1</code> 哨兵，一律 <code>OffsetState.NONE</code>，<strong>连 <code>snapshot_done</code> 都不再看</strong>。读成 <code>Number</code> 而不是 cast 成 <code>Long</code>，是因为 offset store 走 JSON 往返，小 id 回来是 <code>Integer</code>。</p>
 <p>把 <code>-1</code> 和 <code>snapshot_done=true</code> 配在一起会恢复出"快照完成于位点 -1"这种自相矛盾的状态：该表永远跳过快照、从 <code>-1</code> 开窗、续租一个不存在的 bookmark，并且 <code>commit()</code> 的 <code>fence = min(durable, -1)</code> 永远为负，于是再也释放不了任何东西。<code>snapshot_done</code> 不是 <code>Boolean.TRUE</code> 时同样按 false 处理。</p>
 <p>按表拆分 partition 的后果：表之间互相独立，rebalance 把表挪到别的 task 上也能各自恢复。</p>
 
