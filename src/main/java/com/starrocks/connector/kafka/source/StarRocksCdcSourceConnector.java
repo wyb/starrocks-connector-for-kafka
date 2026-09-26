@@ -269,11 +269,13 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * Validates what the offsets REST API is about to write. Connect writes the payload to the
      * offset store whether or not a connector overrides this, so without the check a malformed one
      * -- {@code bookmark_id} quoted as a string, say -- lands silently and only surfaces when a task
-     * restarts and reads it back as "no position at all".
+     * restarts and reads it back as "no position at all". A partition naming a table the config does
+     * not capture is refused for the same reason: no task would ever read it.
      */
     @Override
     public boolean alterOffsets(Map<String, String> connectorConfig,
                                 Map<Map<String, ?>, Map<String, ?>> offsets) {
+        StarRocksCdcSourceConfig config = null; // built on first use, so a reset never depends on the config parsing
         for (Map.Entry<Map<String, ?>, Map<String, ?>> entry : offsets.entrySet()) {
             Map<String, ?> offset = entry.getValue();
             if (offset == null) {
@@ -289,6 +291,16 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // A task looks its partition up by Map equality, so any extra key matches nothing.
                 throw new ConnectException("partition " + partition + " must carry exactly "
                         + OffsetState.KEY_DB + " and " + OffsetState.KEY_TABLE + "; with any other key no task reads it");
+            }
+            if (config == null) {
+                config = new StarRocksCdcSourceConfig(connectorConfig);
+            }
+            if (!config.databaseName().equals(partition.get(OffsetState.KEY_DB))
+                    || !config.tableNames().contains(partition.get(OffsetState.KEY_TABLE))) {
+                throw new ConnectException("partition " + partition + " names no table this connector captures ("
+                        + StarRocksCdcSourceConfig.DATABASE_NAME + "=" + config.databaseName() + ", "
+                        + StarRocksCdcSourceConfig.TABLE_NAMES + "=" + config.tableNames()
+                        + "), so no task would read the offset");
             }
             Object bookmarkId = offset.get(OffsetState.KEY_BOOKMARK_ID);
             if (!(bookmarkId instanceof Number) || ((Number) bookmarkId).longValue() < 0) {

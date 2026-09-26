@@ -474,4 +474,18 @@ public class StarRocksCdcSourceConnectorTest {
         extraKey.put(partition, offset);
         assertOffsetRejected("a partition with an extra key matches nothing the task reads", extraKey, "exactly");
     }
+
+    /** A well-formed partition for a table the config does not list would land and never be read. */
+    @Test
+    public void testAlterOffsetsRejectsAPartitionNoTaskWouldRead() {
+        for (String[] db_table : new String[][] {{"db1", "order"}, {"db2", "orders"}}) {
+            Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
+            Map<String, Object> offset = new HashMap<>();
+            offset.put(OffsetState.KEY_BOOKMARK_ID, 11955L);
+            offset.put(OffsetState.KEY_SNAPSHOT_DONE, true);
+            request.put(OffsetState.sourcePartition(db_table[0], db_table[1]), offset);
+            assertOffsetRejected("no task reads " + db_table[0] + "." + db_table[1], request,
+                    StarRocksCdcSourceConfig.TABLE_NAMES + "=[orders, users]");
+        }
+    }
 }
