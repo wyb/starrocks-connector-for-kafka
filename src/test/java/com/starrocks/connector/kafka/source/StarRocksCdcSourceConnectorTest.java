@@ -52,6 +52,7 @@ public class StarRocksCdcSourceConnectorTest {
         m.put(StarRocksCdcSourceConfig.USERNAME, "root");
         m.put(StarRocksCdcSourceConfig.PASSWORD, "");
         m.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders, users");
+        m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "c1");
         return m;
     }
 
@@ -337,7 +338,6 @@ public class StarRocksCdcSourceConnectorTest {
         fake.modelByTable.put("t2", "DUP_KEYS");
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1,t2");
-        props.put("name", "c1");
 
         newConnector(fake).start(props);
 
@@ -357,7 +357,6 @@ public class StarRocksCdcSourceConnectorTest {
         fake.modelByTable.put("t1", "DUP_KEYS");
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
-        props.put("name", "c1");
 
         newConnector(fake).start(props);
 
@@ -475,7 +474,7 @@ public class StarRocksCdcSourceConnectorTest {
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
         assertTrue(newConnector(fake).alterOffsets(base(), request));
         // Only the shape a task writes can have references on the FE; the stale one is just cleared.
-        assertEquals(Collections.singletonList("db1.orders:kc:default"), fake.heldBookmarkQueries);
+        assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
     }
 
     /**
@@ -489,7 +488,6 @@ public class StarRocksCdcSourceConnectorTest {
         fake.setHeldBookmarks("orders", 3L, 4L);
         fake.setHeldBookmarks("users", 5L);
         Map<String, String> config = base();
-        config.put("name", "c1");
         Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
 
@@ -509,7 +507,6 @@ public class StarRocksCdcSourceConnectorTest {
         FakeCdcClient fake = new FakeCdcClient();
         fake.setHeldBookmarks("orders", 3L);
         Map<String, String> config = base();
-        config.put("name", "c1");
 
         assertTrue(newConnector(fake).alterOffsets(config, new HashMap<>()));
 

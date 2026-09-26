@@ -53,7 +53,7 @@ public class FeConnectionTest {
         props.put(StarRocksCdcSourceConfig.USERNAME, "root");
         props.put(StarRocksCdcSourceConfig.PASSWORD, "");
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders");
-        props.put("name", "c1");
+        props.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "c1");
         FeConnection fe = new FeConnection(new StarRocksCdcSourceConfig(props));
         fe.close();
         try {

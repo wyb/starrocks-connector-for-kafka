@@ -66,6 +66,10 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     // it is not part of CONFIG_DEF and must never be surfaced to users.
     public static final String TASK_TABLES = "task.tables";
 
+    /** The connector name, which Connect puts into every connector and task config; the bookmark holder
+     *  is derived from it. */
+    public static final String CONNECTOR_NAME = "name";
+
     public static final ConfigDef CONFIG_DEF = newConfigDef();
 
     private final Map<String, String> table2Topic;
@@ -73,9 +77,27 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public StarRocksCdcSourceConfig(Map<String, String> props) {
         super(CONFIG_DEF, props);
         this.table2Topic = parseTable2Topic(getString(TABLE2TOPIC_MAP));
+        rejectMissingName();
         rejectEmptyTableList();
         rejectDuplicateTableNames();
         rejectNoSnapshotWithResnapshot();
+    }
+
+    /**
+     * Rejects a config without the connector name. Connect sets it for every connector and task, so
+     * one without it was not built by Connect; and two such connectors would share a holder and mix
+     * their positions on the FE.
+     */
+    private void rejectMissingName() {
+        if (connectorName() == null) {
+            throw new ConfigException(CONNECTOR_NAME, null,
+                    "is missing; Connect sets it for every connector and task, and the bookmark holder is derived from it.");
+        }
+    }
+
+    private String connectorName() {
+        String name = originalsStrings().get(CONNECTOR_NAME);
+        return name == null || name.trim().isEmpty() ? null : name.trim();
     }
 
     /**
@@ -262,9 +284,9 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         return topicPrefix() + "." + databaseName() + "." + table;
     }
 
-    /** The bookmark holder of this connector's tasks, from the connector name Connect puts in the properties. */
+    /** The bookmark holder of this connector's tasks: {@code kc:} and the connector name. */
     public String holderId() {
-        return "kc:" + originalsStrings().getOrDefault("name", "default");
+        return "kc:" + connectorName();
     }
 
     public String jdbcUrl() {

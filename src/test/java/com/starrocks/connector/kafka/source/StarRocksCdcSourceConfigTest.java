@@ -35,7 +35,33 @@ public class StarRocksCdcSourceConfigTest {
         m.put(StarRocksCdcSourceConfig.USERNAME, "root");
         m.put(StarRocksCdcSourceConfig.PASSWORD, "");
         m.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders, users");
+        m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "c1");
         return m;
+    }
+
+    /** Connect sets name for every connector and task; a config without it would share a holder with every
+     *  other such one. */
+    @Test
+    public void testMissingConnectorNameIsRejected() {
+        for (String name : new String[] {null, "", "  "}) {
+            Map<String, String> m = base();
+            if (name == null) {
+                m.remove(StarRocksCdcSourceConfig.CONNECTOR_NAME);
+            } else {
+                m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, name);
+            }
+            try {
+                new StarRocksCdcSourceConfig(m);
+                fail("expected ConfigException for name=" + name);
+            } catch (ConfigException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.CONNECTOR_NAME));
+            }
+        }
+    }
+
+    @Test
+    public void testHolderIdIsDerivedFromTheConnectorName() {
+        assertEquals("kc:c1", new StarRocksCdcSourceConfig(base()).holderId());
     }
 
     /** 0 hot-loops the FE leader and a negative reaches Thread.sleep; neither may be configurable. */

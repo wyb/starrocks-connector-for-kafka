@@ -163,7 +163,7 @@ public class StarRocksCdcSourceTaskTest {
         m.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders");
         m.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders");
         m.put(StarRocksCdcSourceConfig.POLL_INTERVAL_MS, "1");
-        m.put("name", "c1");
+        m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "c1");
         return m;
     }
 

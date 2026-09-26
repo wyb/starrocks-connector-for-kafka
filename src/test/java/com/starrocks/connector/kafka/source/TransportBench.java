@@ -214,6 +214,7 @@ public class TransportBench {
         m.put(StarRocksCdcSourceConfig.USERNAME, user);
         m.put(StarRocksCdcSourceConfig.PASSWORD, password);
         m.put(StarRocksCdcSourceConfig.TABLE_NAMES, String.join(",", tables));
+        m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "bench");
         return new StarRocksCdcSourceConfig(m);
     }
 
