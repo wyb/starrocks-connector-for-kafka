@@ -153,15 +153,10 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
             }
             tables = started;
-            LOG.info("CDC source task started: database={}, tables={}, holder={}, {}={}, {}={}, {}={}, {}={}, {}={}",
-                    db, taskTables, holder,
-                    StarRocksCdcSourceConfig.SNAPSHOT_MODE, config.snapshotMode(),
-                    StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, config.nonTrackablePolicy(),
-                    StarRocksCdcSourceConfig.POLL_INTERVAL_MS, pollIntervalMs,
-                    StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, pollRetryTimeoutMs,
-                    StarRocksCdcSourceConfig.BOOKMARK_TTL_MS, ttlMs);
+            // The config values were already logged by AbstractConfig when the config was built.
+            LOG.info("CDC source task started: database={}, tables={}, holder={}", db, taskTables, holder);
         } catch (SQLException e) {
-            throw new ConnectException("Failed to start CDC source task", e);
+            throw new ConnectException("Failed to start CDC source task for " + db + " tables " + taskTables, e);
         }
     }
 
