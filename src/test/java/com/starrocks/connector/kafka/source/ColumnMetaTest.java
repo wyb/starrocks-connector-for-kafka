@@ -95,6 +95,15 @@ public class ColumnMetaTest {
                 new ColumnMeta("v", "VarChar", "varchar(20)", 0, true).toString());
         assertEquals("d(decimal->decimal(2),sql=decimal(18, 2),null=false)",
                 new ColumnMeta("d", "decimal", "decimal(18, 2)", 2, false).toString());
+        assertEquals("id(int->int,sql=int(11),null=false,key)",
+                new ColumnMeta("id", "int", "int(11)", 0, false, true).toString());
+    }
+
+    /** The five-argument constructor is the non-key column; only the reader sets the flag. */
+    @Test
+    public void testKeyFlagDefaultsToFalse() {
+        assertFalse(new ColumnMeta("v", "int", "int(11)", 0, true).key);
+        assertTrue(new ColumnMeta("id", "int", "int(11)", 0, false, true).key);
     }
 
     /** NUMERIC_SCALE reaches DECIMAL only; LARGEINT is integral and stays at scale 0 whatever FE reports. */

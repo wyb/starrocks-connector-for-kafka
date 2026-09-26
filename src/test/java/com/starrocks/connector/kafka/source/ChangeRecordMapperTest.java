@@ -24,7 +24,6 @@ import org.apache.kafka.connect.data.Decimal;
 import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
 
@@ -40,30 +39,9 @@ public class ChangeRecordMapperTest {
 
     private ChangeRecordMapper mapper() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("k", "int", "int(11)", 0, false, true),
                 new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
-        return new ChangeRecordMapper("db1", "orders", "sr.db1.orders",
-                cols, Collections.singletonList("k"));
-    }
-
-    /**
-     * The primary-key list and the column list come from different queries and can disagree, on
-     * casing for instance. Unboxing the miss threw a bare NPE out of the task's start(), naming
-     * neither column nor table.
-     */
-    @Test
-    public void testKeyColumnMissingFromColumnListIsNamed() {
-        List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("k", "int", "int(11)", 0, false),
-                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
-        try {
-            new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols, Collections.singletonList("K"));
-            fail("expected a ConnectException naming the unmatched key column");
-        } catch (ConnectException expected) {
-            String message = expected.getMessage();
-            assertTrue("should name the column, was: " + message, message.contains("'K'"));
-            assertTrue("should name the table, was: " + message, message.contains("db1.orders"));
-        }
+        return new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols);
     }
 
     @Test
@@ -181,8 +159,7 @@ public class ChangeRecordMapperTest {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("k", "int", "int(11)", 0, false),
                 new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "orders", "sr.db1.orders",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols);
 
         SourceRecord r = mapper.toChangeRecord(new Object[]{1, 100L}, 0, 1L, 1L, 1L, false);
         assertNull(r.key());
@@ -196,8 +173,7 @@ public class ChangeRecordMapperTest {
                 new ColumnMeta("dt", "date", "date", 0, true),
                 new ColumnMeta("ts", "datetime", "datetime", 0, true),
                 new ColumnMeta("j", null, null, 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "misc", "sr.db1.misc",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "misc", "sr.db1.misc", cols);
 
         SourceRecord r = mapper.toSnapshotRecord(
                 new Object[]{new BigDecimal("1.50"), "1970-01-01", "1970-01-01 00:00:00", "{}"}, 1L);
@@ -235,10 +211,9 @@ public class ChangeRecordMapperTest {
     @Test
     public void testDateTextPassesThroughIncludingKeyColumns() {
         List<ColumnMeta> cols = Arrays.asList(
-                new ColumnMeta("d", "date", "date", 0, false),
+                new ColumnMeta("d", "date", "date", 0, false, true),
                 new ColumnMeta("ts", "datetime", "datetime", 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t",
-                cols, Collections.singletonList("d"));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t", cols);
 
         SourceRecord r = mapper.toSnapshotRecord(new Object[]{"2026-08-05", "2026-08-05 12:34:56.123456"}, 1L);
 
@@ -257,8 +232,7 @@ public class ChangeRecordMapperTest {
         BigDecimal max = new BigDecimal("170141183460469231731687303715884105727");
         List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta(
                 "big", "bigint unsigned", "bigint(20) unsigned", 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "big", "sr.db1.big",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "big", "sr.db1.big", cols);
 
         SourceRecord r = mapper.toSnapshotRecord(new Object[]{max}, 1L);
 
@@ -282,8 +256,7 @@ public class ChangeRecordMapperTest {
         List<ColumnMeta> cols = Arrays.asList(
                 new ColumnMeta("b", "binary", "binary(4)", 0, false),
                 new ColumnMeta("vb", "varbinary", "varbinary(16)", 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "blobs", "sr.db1.blobs",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "blobs", "sr.db1.blobs", cols);
 
         // 0xFF 0xFE is not valid UTF-8; decoding it as text is exactly the lossy path being guarded.
         byte[] fixed = new byte[]{(byte) 0xFF, (byte) 0xFE, 0x00, 0x41};
@@ -318,8 +291,7 @@ public class ChangeRecordMapperTest {
                 new ColumnMeta("st", "struct", "struct<`x` int(11), `d` date>", 0, false),
                 new ColumnMeta("s", "struct", "struct<x int>", 0, false),
                 new ColumnMeta("v", "varchar", "varchar(20)", 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx", cols);
         java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
         m.put("mk", 11);
         java.util.Map<String, Object> st = new java.util.LinkedHashMap<>();
@@ -359,8 +331,7 @@ public class ChangeRecordMapperTest {
     @Test
     public void testColumnsWithoutStarRocksTypeFallBackToPlainString() {
         List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", null, null, 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx",
-                cols, Collections.emptyList());
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx", cols);
 
         SourceRecord r = mapper.toSnapshotRecord(new Object[]{"x"}, 1L);
         Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();

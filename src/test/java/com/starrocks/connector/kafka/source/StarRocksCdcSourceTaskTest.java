@@ -59,9 +59,8 @@ import static org.junit.Assert.fail;
 public class StarRocksCdcSourceTaskTest {
 
     private static final List<ColumnMeta> ORDERS_COLS = Arrays.asList(
-            new ColumnMeta("id", "int", "int(11)", 0, false),
+            new ColumnMeta("id", "int", "int(11)", 0, false, true),
             new ColumnMeta("amount", "bigint", "bigint(20)", 0, true));
-    private static final List<String> ORDERS_KEYS = Collections.singletonList("id");
 
     private FakeCdcClient fake;
     private StarRocksCdcSourceTask task;
@@ -70,7 +69,6 @@ public class StarRocksCdcSourceTaskTest {
     public void setUp() {
         fake = new FakeCdcClient();
         fake.setColumns("orders", ORDERS_COLS);
-        fake.setKeyColumns("orders", ORDERS_KEYS);
         task = newTask(fake);
     }
 
@@ -569,7 +567,7 @@ public class StarRocksCdcSourceTaskTest {
     /** A tombstone names its row by key, so a keyless one deletes nothing and is only noise. */
     @Test
     public void testKeylessTableGetsNoTombstone() throws Exception {
-        fake.setKeyColumns("orders", Collections.<String>emptyList());
+        fake.setColumns("orders", FakeCdcClient.DEFAULT_COLS); // k, v: no key column
         fake.enqueueHead("orders", 100L);
         task.start(tombstoneProps());
         task.poll();
@@ -1323,7 +1321,6 @@ public class StarRocksCdcSourceTaskTest {
         // A -1 answer is only true of the ceiling as it stands, so re-probing continues.
         FakeCdcClient uncapped = new FakeCdcClient();
         uncapped.setColumns("orders", ORDERS_COLS);
-        uncapped.setKeyColumns("orders", ORDERS_KEYS);
         uncapped.grantedTtlMs = -1L;
         StarRocksCdcSourceTask other = newTask(uncapped);
         uncapped.enqueueHead("orders", 200L);
@@ -1532,7 +1529,6 @@ public class StarRocksCdcSourceTaskTest {
     /** Registers a second table on the shared fake so a two-table task can start. */
     private void addItemsTable() {
         fake.setColumns("items", ORDERS_COLS);
-        fake.setKeyColumns("items", ORDERS_KEYS);
     }
 
     /** Both tables bootstrapped at their first bookmark, emitting nothing. */
@@ -1641,7 +1637,6 @@ public class StarRocksCdcSourceTaskTest {
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders,items");
         props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders,items");
         fake.setColumns("items", ORDERS_COLS);
-        fake.setKeyColumns("items", ORDERS_KEYS);
         fake.enqueueHead("orders", 100L);
         fake.enqueueHead("items", 500L);
         task.start(props);
@@ -1745,7 +1740,6 @@ public class StarRocksCdcSourceTaskTest {
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "orders,items");
         props.put(StarRocksCdcSourceConfig.TASK_TABLES, "orders,items");
         fake.setColumns("items", ORDERS_COLS);
-        fake.setKeyColumns("items", ORDERS_KEYS);
         fake.enqueueHead("orders", 100L);
         fake.enqueueHead("items", 500L);
         task.start(props);

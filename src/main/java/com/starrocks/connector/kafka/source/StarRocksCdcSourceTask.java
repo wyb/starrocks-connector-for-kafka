@@ -153,8 +153,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             List<TableState> started = new ArrayList<>();
             for (String t : taskTables) {
                 List<ColumnMeta> cols = client.fetchColumns(db, t);
-                List<String> keyCols = client.fetchKeyColumns(db, t);
-                started.add(new TableState(t, cols, new ChangeRecordMapper(db, t, config.topicFor(t), cols, keyCols)));
+                started.add(new TableState(t, cols, new ChangeRecordMapper(db, t, config.topicFor(t), cols)));
             }
             // One read for every table, as in durableBookmarks(). context is set by the framework
             // via initialize(SourceTaskContext) before start(); it is null in unit tests that

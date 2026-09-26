@@ -55,9 +55,8 @@ public interface CdcClient extends AutoCloseable {
      *  no longer exists. */
     List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException;
 
+    /** The table's columns in declaration order, key columns flagged; a table it does not list is an SQLException. */
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException;
-
-    List<String> fetchKeyColumns(String db, String table) throws SQLException;
 
     /** The table's {@code tables_config} row; a table it does not list is an SQLException. */
     TableConfig fetchTableConfig(String db, String table) throws SQLException;

@@ -77,23 +77,16 @@ public final class SqlBuilder {
      *
      * <p>Scale from the standard {@code NUMERIC_SCALE}; precision is not read, Connect's Decimal
      * has no use for it.
+     *
+     * <p>{@code COLUMN_KEY} marks the key columns of any table model with the model's own tag
+     * (PRI/AGG/DUP/UNI). {@code tables_config.PRIMARY_KEY} is not usable for that: FE computes the
+     * key columns for every model but publishes them only for PRIMARY_KEYS and UNIQUE_KEYS, leaving
+     * AGG and DUP tables with an empty string.
      */
     public static String columnsMetaSql(String db, String table) {
-        return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
+        return "SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE, COLUMN_KEY"
                 + " FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
                 + " AND TABLE_NAME = " + quoteStr(table) + " ORDER BY ORDINAL_POSITION";
-    }
-
-    /**
-     * The key columns of any table model, in declaration order. {@code tables_config.PRIMARY_KEY} is
-     * not usable here: FE computes the key columns for every model but publishes them only for
-     * PRIMARY_KEYS and UNIQUE_KEYS, leaving AGG and DUP tables with an empty string. {@code
-     * COLUMN_KEY} carries the model's own tag (PRI/AGG/DUP/UNI) on each key column instead.
-     */
-    public static String keyColumnsSql(String db, String table) {
-        return "SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = " + quoteStr(db)
-                + " AND TABLE_NAME = " + quoteStr(table) + " AND COLUMN_KEY <> ''"
-                + " ORDER BY ORDINAL_POSITION";
     }
 
     /**

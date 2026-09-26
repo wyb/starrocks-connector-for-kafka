@@ -39,6 +39,12 @@ public final class ColumnMeta {
 
     public final String name;
     public final boolean nullable;
+    /**
+     * {@code COLUMN_KEY} non-empty: a key column of the table's model, and every model has them. They
+     * make the Kafka key, which puts every row of one key in one partition; a DUP key is not unique,
+     * and preflight warns so.
+     */
+    public final boolean key;
     /** {@code DATA_TYPE}, normalized: "array", "json", "hll", "bigint unsigned"... null when the server was not asked. */
     public final String srDataType;
     /** {@code COLUMN_TYPE}: the full type with nesting, e.g. {@code "map<varchar(10),int>"}, or BOOLEAN's {@code "tinyint(1)"}. */
@@ -50,19 +56,25 @@ public final class ColumnMeta {
      */
     final ColumnType type;
 
-    /** @param scale {@code NUMERIC_SCALE}; DECIMAL is the only type that reads it. */
+    /** A non-key column; tests build most of theirs this way. */
     public ColumnMeta(String name, String srDataType, String srColumnType, int scale, boolean nullable) {
+        this(name, srDataType, srColumnType, scale, nullable, false);
+    }
+
+    /** @param scale {@code NUMERIC_SCALE}; DECIMAL is the only type that reads it. */
+    public ColumnMeta(String name, String srDataType, String srColumnType, int scale, boolean nullable, boolean key) {
         this.name = name;
         this.nullable = nullable;
+        this.key = key;
         this.srDataType = srDataType == null ? null : normalize(srDataType);
         this.srColumnType = srColumnType;
         this.type = typeOf(this.srDataType, srColumnType, scale);
     }
 
-    /** What the server said and what it became: {@code v(varchar->string,sql=varchar(20),null=true)}. */
+    /** What the server said and what it became: {@code v(varchar->string,sql=varchar(20),null=true)}, plus {@code ,key} on a key column. */
     @Override
     public String toString() {
-        return name + "(" + srDataType + "->" + type + ",sql=" + srColumnType + ",null=" + nullable + ")";
+        return name + "(" + srDataType + "->" + type + ",sql=" + srColumnType + ",null=" + nullable + (key ? ",key" : "") + ")";
     }
 
     private static ColumnType typeOf(String dataType, String columnType, int scale) {

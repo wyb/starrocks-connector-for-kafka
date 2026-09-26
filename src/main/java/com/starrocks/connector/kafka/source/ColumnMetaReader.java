@@ -63,9 +63,11 @@ final class ColumnMetaReader {
                 List<ColumnMeta> result = new ArrayList<>();
                 Set<String> seen = new HashSet<>();
                 while (rs.next()) {
+                    String columnKey = rs.getString("COLUMN_KEY");
                     ColumnMeta col = new ColumnMeta(rs.getString("COLUMN_NAME"), rs.getString("DATA_TYPE"),
                             rs.getString("COLUMN_TYPE"), rs.getInt("NUMERIC_SCALE"),
-                            !"NO".equalsIgnoreCase(rs.getString("IS_NULLABLE")));
+                            !"NO".equalsIgnoreCase(rs.getString("IS_NULLABLE")),
+                            columnKey != null && !columnKey.trim().isEmpty());
                     if (!seen.add(col.name)) {
                         throw new SQLException("information_schema.columns lists the column '" + col.name
                                 + "' more than once for " + db + "." + table + ": " + result + " then " + col);

@@ -24,11 +24,10 @@ import io.debezium.data.Envelope;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
-import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.source.SourceRecord;
 
 import java.time.Instant;
-import java.util.HashMap;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 
@@ -61,30 +60,30 @@ public final class ChangeRecordMapper {
     private final String table;
     private final String topic;
     private final List<ColumnMeta> cols;
-    private final List<String> keyCols;
-    private final Map<String, Integer> colIndexByName;
+    /** Positions in {@code cols} of the columns flagged as key, in declaration order. */
+    private final List<Integer> keyIndexes;
 
     private final Schema rowSchema;
-    private final Schema keySchema; // null when keyCols is empty
+    private final Schema keySchema; // null when the table has no key column
     private final Schema bookmarkSchema;
     private final Schema sourceSchema;
     private final Envelope envelope;
 
-    public ChangeRecordMapper(String db, String table, String topic,
-                              List<ColumnMeta> cols, List<String> keyCols) {
+    public ChangeRecordMapper(String db, String table, String topic, List<ColumnMeta> cols) {
         this.db = db;
         this.table = table;
         this.topic = topic;
         this.cols = cols;
-        this.keyCols = keyCols;
 
-        this.colIndexByName = new HashMap<>();
+        this.keyIndexes = new ArrayList<>();
         for (int i = 0; i < cols.size(); i++) {
-            colIndexByName.put(cols.get(i).name, i);
+            if (cols.get(i).key) {
+                keyIndexes.add(i);
+            }
         }
 
         this.rowSchema = buildRowSchema();
-        this.keySchema = keyCols.isEmpty() ? null : buildKeySchema();
+        this.keySchema = keyIndexes.isEmpty() ? null : buildKeySchema();
         this.bookmarkSchema = SchemaBuilder.struct()
                 .name(topic + ".Bookmark")
                 .field(FIELD_BASE, Schema.INT64_SCHEMA)
@@ -178,26 +177,10 @@ public final class ChangeRecordMapper {
             return null;
         }
         Struct key = new Struct(keySchema);
-        for (String keyCol : keyCols) {
-            int idx = indexOf(keyCol);
+        for (int idx : keyIndexes) {
             putValue(key, cols.get(idx), row[idx]);
         }
         return key;
-    }
-
-    /**
-     * The key list and the column list come from two queries against
-     * {@code information_schema.columns} and can still disagree if the table is altered between
-     * them. Unboxing a miss would leave {@code start()} throwing a bare NPE that names neither
-     * column nor table.
-     */
-    private int indexOf(String keyCol) {
-        Integer idx = colIndexByName.get(keyCol);
-        if (idx == null) {
-            throw new ConnectException("key column '" + keyCol + "' of " + db + "." + table
-                    + " is not among the captured columns " + colIndexByName.keySet());
-        }
-        return idx;
     }
 
     /**
@@ -225,8 +208,8 @@ public final class ChangeRecordMapper {
 
     private Schema buildKeySchema() {
         SchemaBuilder builder = SchemaBuilder.struct().name(topic + ".Key");
-        for (String keyCol : keyCols) {
-            ColumnMeta col = cols.get(indexOf(keyCol));
+        for (int idx : keyIndexes) {
+            ColumnMeta col = cols.get(idx);
             builder.field(col.name, schemaFor(col));
         }
         return builder.build();

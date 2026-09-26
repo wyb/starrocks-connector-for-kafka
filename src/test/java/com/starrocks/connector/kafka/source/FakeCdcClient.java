@@ -43,8 +43,7 @@ import java.util.Set;
  *       {@link #failNextChangesWithNonTrackable} -- then it throws once and leaves them queued.</li>
  *   <li>{@link #changesFailureByTable} and {@link #snapshotFailureByTable} fail one named table
  *       once, leaving the others healthy.</li>
- *   <li>{@link #fetchColumns} and {@link #fetchKeyColumns} fall back to a two-column table with no
- *       key columns.</li>
+ *   <li>{@link #fetchColumns} falls back to a two-column table with no key column.</li>
  *   <li>{@link #fetchHeldBookmarks} answers {@link #setHeldBookmarks}, or nothing.</li>
  * </ul>
  */
@@ -58,7 +57,6 @@ final class FakeCdcClient implements CdcClient {
     final Map<String, String> modelByTable = new HashMap<>();
     final Map<String, Boolean> cdcEnabledByTable = new HashMap<>();
     final Map<String, List<ColumnMeta>> colsByTable = new HashMap<>();
-    private final Map<String, List<String>> keyColsByTable = new HashMap<>();
     private final Map<String, Deque<Long>> queuedHeadsByTable = new HashMap<>();
     private final Map<String, Long> lastHeadByTable = new HashMap<>();
     private final Map<String, List<Object[]>> queuedSnapshotRowsByTable = new HashMap<>();
@@ -107,10 +105,6 @@ final class FakeCdcClient implements CdcClient {
 
     void setColumns(String table, List<ColumnMeta> cols) {
         colsByTable.put(table, cols);
-    }
-
-    void setKeyColumns(String table, List<String> keyCols) {
-        keyColsByTable.put(table, keyCols);
     }
 
     /** What the holder still references on the table when the task starts. */
@@ -201,12 +195,6 @@ final class FakeCdcClient implements CdcClient {
     public List<ColumnMeta> fetchColumns(String db, String table) {
         List<ColumnMeta> cols = colsByTable.get(table);
         return cols != null ? cols : DEFAULT_COLS;
-    }
-
-    @Override
-    public List<String> fetchKeyColumns(String db, String table) {
-        List<String> keyCols = keyColsByTable.get(table);
-        return keyCols != null ? keyCols : new ArrayList<>();
     }
 
     @Override

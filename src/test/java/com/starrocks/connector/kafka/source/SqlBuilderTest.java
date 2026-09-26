@@ -76,23 +76,6 @@ public class SqlBuilderTest {
     }
 
     /**
-     * Key columns come from COLUMN_KEY, not from {@code tables_config.PRIMARY_KEY}: FE computes the
-     * key columns of every model but publishes them only for PRIMARY_KEYS and UNIQUE_KEYS, so an AGG
-     * or DUP table would otherwise yield no key and every record would carry a null Kafka key.
-     */
-    @Test
-    public void testKeyColumnsSqlSelectsEveryModelsKeyColumns() {
-        assertEquals("SELECT COLUMN_NAME FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
-                + " AND TABLE_NAME = 't1' AND COLUMN_KEY <> '' ORDER BY ORDINAL_POSITION",
-                SqlBuilder.keyColumnsSql("db1", "t1"));
-    }
-
-    @Test
-    public void testKeyColumnsSqlEscapesStringLiterals() {
-        assertTrue(SqlBuilder.keyColumnsSql("d'b", "t1").contains("'d\\'b'"));
-    }
-
-    /**
      * The Arrow Flight transport's only route to column meta.
      *
      * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
@@ -101,7 +84,7 @@ public class SqlBuilderTest {
      */
     @Test
     public void testColumnsMetaSqlSelectsOrderedByOrdinalPosition() {
-        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE"
+        assertEquals("SELECT COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, IS_NULLABLE, NUMERIC_SCALE, COLUMN_KEY"
                         + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
                         + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
                 SqlBuilder.columnsMetaSql("db1", "t1"));
@@ -118,6 +101,16 @@ public class SqlBuilderTest {
         String sql = SqlBuilder.columnsMetaSql("db1", "t1");
         assertTrue("DATA_TYPE is what the HLL/BITMAP guard reads", sql.contains("DATA_TYPE"));
         assertTrue("COLUMN_TYPE carries the nested type", sql.contains("COLUMN_TYPE"));
+    }
+
+    /**
+     * Key columns come from COLUMN_KEY, not from {@code tables_config.PRIMARY_KEY}: FE computes the
+     * key columns of every model but publishes them only for PRIMARY_KEYS and UNIQUE_KEYS, so an AGG
+     * or DUP table would otherwise yield no key and every record would carry a null Kafka key.
+     */
+    @Test
+    public void testColumnsMetaSqlSelectsColumnKeyForEveryModel() {
+        assertTrue(SqlBuilder.columnsMetaSql("db1", "t1").contains("COLUMN_KEY"));
     }
 
     /** Identifiers reach information_schema as string literals, so they are quoted, not backticked. */
