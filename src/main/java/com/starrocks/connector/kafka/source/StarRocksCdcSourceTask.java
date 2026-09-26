@@ -149,6 +149,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             List<TableState> started = tableStates(taskTables, config);
             Map<Map<String, String>, Map<String, Object>> durable = durableOffsets(started);
             for (TableState ts : started) {
+                // Adopt first: under no_snapshot, restoreOffset falls back to the oldest adopted reference.
                 adoptHeldBookmarks(ts);
                 restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
             }
