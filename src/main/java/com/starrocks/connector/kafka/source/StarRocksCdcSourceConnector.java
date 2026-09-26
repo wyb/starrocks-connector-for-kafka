@@ -206,7 +206,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
             // was never told about, worth saying once at startup.
             if (ColumnMeta.isUnrecognized(col.srDataType)) {
                 LOG.warn("Column {}.{}.{} has type '{}' (declared as: {}), which this connector does not"
-                                + " recognise; it will be carried as text. This usually means StarRocks"
+                                + " recognize; it will be carried as text. This usually means StarRocks"
                                 + " added a type.",
                         db, table, col.name, col.srDataType, col.srColumnType);
             }

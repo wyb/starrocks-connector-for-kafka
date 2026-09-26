@@ -258,7 +258,7 @@ public class StarRocksCdcSourceConnectorTest {
                 new ColumnMeta("m", "map", "map<varchar(10),int>", 0, true),
                 new ColumnMeta("s", "struct", "struct<x int>", 0, true),
                 new ColumnMeta("j", "json", "json", 0, true),
-                // An unrecognised type warns but must not block; "variant" is a real StarRocks type.
+                // An unrecognized type warns but must not block; "variant" is a real StarRocks type.
                 new ColumnMeta("u", "variant", "variant", 0, true),
                 // A declaration the parser refuses is carried as text: warns, must not block either.
                 unparsable));
