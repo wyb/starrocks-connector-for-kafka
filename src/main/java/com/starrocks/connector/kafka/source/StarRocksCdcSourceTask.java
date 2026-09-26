@@ -26,7 +26,6 @@ import org.apache.kafka.connect.errors.ConnectException;
 import org.apache.kafka.connect.errors.RetriableException;
 import org.apache.kafka.connect.source.SourceRecord;
 import org.apache.kafka.connect.source.SourceTask;
-import org.apache.kafka.connect.storage.OffsetStorageReader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,6 +33,7 @@ import java.sql.SQLException;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -74,10 +74,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     static final class TableState {
         final String table;
-        final String topic;
-        List<ColumnMeta> cols;
-        List<String> keyCols;
-        ChangeRecordMapper mapper;
+        final List<ColumnMeta> cols;
+        final ChangeRecordMapper mapper;
         // volatile: commit() reads it from the offset-committer thread to clamp the fence, while
         // the poll thread writes it. Every other TableState field stays poll-thread-only.
         volatile long committedBookmark = -1L;
@@ -102,13 +100,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
         // Monotonic ms of the first failed poll in the current run of failures; -1 after a success.
         long firstFailureMs = -1L;
 
-        TableState(String table, String topic) {
+        TableState(String table, List<ColumnMeta> cols, ChangeRecordMapper mapper) {
             this.table = table;
-            this.topic = topic;
+            this.cols = cols;
+            this.mapper = mapper;
         }
     }
 
-    private CdcClient client;
+    /** Volatile: the API lets stop() run on another thread than the start() that set it. */
+    private volatile CdcClient client;
     private String db;
     private String holder;
     private long ttlMs;
@@ -118,8 +118,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
     private boolean tombstones;
     private boolean policyResnapshot;
 
-    // Package-visible so tests can reach a started task's per-table state directly.
-    List<TableState> tables;
+    // Volatile: written once at the end of start() on the poll thread, read by commit() on the
+    // offset committer's thread. Package-visible so tests can reach a started task's state.
+    volatile List<TableState> tables;
     /** Origin of {@link #monotonicMs}, taken at its first reading. */
     private long monotonicOriginNanos = Long.MIN_VALUE;
 
@@ -142,46 +143,41 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
         client = createClient(config);
 
-        List<String> taskTables = parseTaskTables(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
-        // context is set by the framework via initialize(SourceTaskContext) before start(); it is
-        // null in unit tests that construct/start a task directly, and every table is then
-        // treated as fresh, same as a first-ever run.
-        OffsetStorageReader reader = context == null ? null : context.offsetStorageReader();
+        List<String> taskTables = StarRocksCdcSourceConfig.splitNames(props.get(StarRocksCdcSourceConfig.TASK_TABLES));
+        if (taskTables.isEmpty()) {
+            throw new ConnectException(StarRocksCdcSourceConfig.TASK_TABLES
+                    + " names no table; the connector sets it for every task it creates");
+        }
 
         try {
             List<TableState> started = new ArrayList<>();
             for (String t : taskTables) {
-                TableState ts = new TableState(t, config.topicFor(t));
-                ts.cols = client.fetchColumns(db, t);
-                ts.keyCols = client.fetchKeyColumns(db, t);
-                ts.mapper = new ChangeRecordMapper(db, t, ts.topic, ts.cols, ts.keyCols);
-                Map<String, Object> raw = reader == null ? null : reader.offset(OffsetState.sourcePartition(db, t));
+                List<ColumnMeta> cols = client.fetchColumns(db, t);
+                List<String> keyCols = client.fetchKeyColumns(db, t);
+                started.add(new TableState(t, cols, new ChangeRecordMapper(db, t, config.topicFor(t), cols, keyCols)));
+            }
+            // One read for every table, as in durableBookmarks(). context is set by the framework
+            // via initialize(SourceTaskContext) before start(); it is null in unit tests that
+            // construct a task directly, and every table is then fresh, as on a first-ever run.
+            Map<Map<String, String>, Map<String, Object>> durable = Collections.emptyMap();
+            if (context != null && context.offsetStorageReader() != null) {
+                durable = context.offsetStorageReader().offsets(partitionsOf(started));
+            }
+            for (TableState ts : started) {
                 adoptHeldBookmarks(ts);
-                restoreOffset(ts, raw);
-                started.add(ts);
+                restoreOffset(ts, durable.get(OffsetState.sourcePartition(db, ts.table)));
             }
             tables = started;
-            LOG.info("CDC source task started: tables={}, holder={}, snapshot.mode={}, nontrackable.policy={}, "
-                            + "poll.interval.ms={}, poll.retry.timeout.ms={}, bookmark.ttl.ms={}",
-                    taskTables, holder, config.snapshotMode(), config.nonTrackablePolicy(), pollIntervalMs,
-                    pollRetryTimeoutMs, ttlMs);
+            LOG.info("CDC source task started: tables={}, holder={}, {}={}, {}={}, {}={}, {}={}, {}={}",
+                    taskTables, holder,
+                    StarRocksCdcSourceConfig.SNAPSHOT_MODE, config.snapshotMode(),
+                    StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, config.nonTrackablePolicy(),
+                    StarRocksCdcSourceConfig.POLL_INTERVAL_MS, pollIntervalMs,
+                    StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS, pollRetryTimeoutMs,
+                    StarRocksCdcSourceConfig.BOOKMARK_TTL_MS, ttlMs);
         } catch (SQLException e) {
             throw new ConnectException("Failed to start CDC source task", e);
         }
-    }
-
-    private static List<String> parseTaskTables(String raw) {
-        List<String> result = new ArrayList<>();
-        if (raw == null) {
-            return result;
-        }
-        for (String part : raw.split(",")) {
-            String trimmed = part.trim();
-            if (!trimmed.isEmpty()) {
-                result.add(trimmed);
-            }
-        }
-        return result;
     }
 
     /**
@@ -263,7 +259,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
             // Connect retries only RetriableException and kills the task for anything else; it also
             // re-polls at once after one, so the pacing has to happen here.
             idleSleep(pollIntervalMs);
-            throw new RetriableException("CDC poll failed for table " + failedTable, failure);
+            throw new RetriableException("CDC poll failed for table " + db + "." + failedTable, failure);
         }
         if (out.isEmpty()) {
             idleSleep(pollIntervalMs);
@@ -410,7 +406,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
         long failingForMs = now - t.firstFailureMs;
         if (pollRetryTimeoutMs >= 0 && failingForMs >= pollRetryTimeoutMs) {
-            throw new ConnectException("CDC reads of table " + t.table + " have failed for " + failingForMs
+            throw new ConnectException("CDC reads of table " + db + "." + t.table + " have failed for " + failingForMs
                     + " ms, longer than " + StarRocksCdcSourceConfig.POLL_RETRY_TIMEOUT_MS + "="
                     + pollRetryTimeoutMs, e);
         }
@@ -433,7 +429,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                     db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY,
                     e.getMessage() + note);
             throw new ConnectException(
-                    "CHANGES window not trackable for table " + t.table + "." + note, e);
+                    "CHANGES window not trackable for table " + db + "." + t.table + "." + note, e);
         }
     }
 
@@ -603,13 +599,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
         if (context == null || context.offsetStorageReader() == null) {
             return result;
         }
-        List<Map<String, String>> partitions = new ArrayList<>(tables.size());
-        for (TableState t : tables) {
-            partitions.add(OffsetState.sourcePartition(db, t.table));
-        }
         Map<Map<String, String>, Map<String, Object>> offsets;
         try {
-            offsets = context.offsetStorageReader().offsets(partitions);
+            offsets = context.offsetStorageReader().offsets(partitionsOf(tables));
         } catch (RuntimeException e) {
             if (e.getCause() instanceof InterruptedException) {
                 // Connect's reader wraps the interrupt without restoring the flag.
@@ -625,6 +617,15 @@ public class StarRocksCdcSourceTask extends SourceTask {
             result.put(t.table, raw instanceof Number ? ((Number) raw).longValue() : -1L);
         }
         return result;
+    }
+
+    /** Every table's partition, for the one read the offset store makes per call. */
+    private List<Map<String, String>> partitionsOf(List<TableState> states) {
+        List<Map<String, String>> partitions = new ArrayList<>(states.size());
+        for (TableState t : states) {
+            partitions.add(OffsetState.sourcePartition(db, t.table));
+        }
+        return partitions;
     }
 
     @Override

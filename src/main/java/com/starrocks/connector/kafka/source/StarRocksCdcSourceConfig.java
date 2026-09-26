@@ -235,9 +235,18 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     public List<String> tableNames() {
+        return splitNames(getString(TABLE_NAMES));
+    }
+
+    /** Comma-separated names, trimmed, empty entries dropped; null names nothing. The task reads
+     *  {@link #TASK_TABLES} with it. */
+    public static List<String> splitNames(String raw) {
         List<String> result = new ArrayList<>();
-        for (String rawName : getString(TABLE_NAMES).split(",")) {
-            String trimmed = rawName.trim();
+        if (raw == null) {
+            return result;
+        }
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
             if (!trimmed.isEmpty()) {
                 result.add(trimmed);
             }

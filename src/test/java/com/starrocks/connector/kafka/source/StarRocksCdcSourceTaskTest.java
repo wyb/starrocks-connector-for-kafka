@@ -1798,4 +1798,24 @@ public class StarRocksCdcSourceTaskTest {
         assertNotNull(out);
         assertEquals(1, out.size());
     }
+
+    /** The connector sets task.tables for every task it creates; a hand-written config without it
+     *  must not idle silently. */
+    @Test
+    public void testStartRejectsAnEmptyTableAssignment() {
+        for (String assignment : new String[] {null, " , "}) {
+            Map<String, String> props = baseProps();
+            if (assignment == null) {
+                props.remove(StarRocksCdcSourceConfig.TASK_TABLES);
+            } else {
+                props.put(StarRocksCdcSourceConfig.TASK_TABLES, assignment);
+            }
+            try {
+                newTask(new FakeCdcClient()).start(props);
+                fail("expected ConnectException for task.tables=" + assignment);
+            } catch (ConnectException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains(StarRocksCdcSourceConfig.TASK_TABLES));
+            }
+        }
+    }
 }

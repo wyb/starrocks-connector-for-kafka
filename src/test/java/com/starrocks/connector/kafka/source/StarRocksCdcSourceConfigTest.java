@@ -89,6 +89,14 @@ public class StarRocksCdcSourceConfigTest {
         assertEquals(Arrays.asList("orders", "users"), new StarRocksCdcSourceConfig(base()).tableNames());
     }
 
+    /** The splitter tableNames() and the task's table assignment share. */
+    @Test
+    public void testSplitNamesTrimsAndDropsEmptyEntries() {
+        assertEquals(Arrays.asList("a", "b"), StarRocksCdcSourceConfig.splitNames(" a, ,b ,"));
+        assertTrue(StarRocksCdcSourceConfig.splitNames(null).isEmpty());
+        assertTrue(StarRocksCdcSourceConfig.splitNames(" , ").isEmpty());
+    }
+
     @Test
     public void testTopicForUsesMapThenPrefix() {
         Map<String, String> m = base();

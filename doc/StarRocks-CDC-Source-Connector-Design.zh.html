@@ -564,7 +564,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <h3>3.2 恢复路径</h3>
 
 <ol class="seq">
-  <li><span class="who">start()</span>拿到本 task 分到的表清单，逐表 <code>reader.offset(sourcePartition(db, t))</code> 读回 raw map。</li>
+  <li><span class="who">start()</span>拿到本 task 分到的表清单，把全部表的 partition 一次交给 <code>reader.offsets(...)</code> 读回 raw map，与 <code>commit()</code> 同一趟读法。</li>
   <li><span class="who">restoreOffset()</span><code>OffsetState.fromMap</code> 解码，容忍 <code>bookmark_id</code> 被反序列化成 <code>Integer</code> 或 <code>Long</code>；解不出非负数就整条丢弃回 <code>fresh()</code>，不把 <code>-1</code> 哨兵和 <code>snapshot_done</code> 配成矛盾状态。</li>
   <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）保持 fresh，下次 poll 重做整表快照。</li>
   <li><span class="who">restoreOffset()</span>把恢复出来的 bookmark <strong>重新压回 <code>liveBookmarks</code></strong>。</li>
@@ -583,7 +583,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
   <rect class="bx" x="264" y="8" width="232" height="42" rx="5"/>
   <text class="tb" x="380" y="26" text-anchor="middle">start()</text>
-  <text class="tms" x="380" y="42" text-anchor="middle">reader.offset({db, table})</text>
+  <text class="tms" x="380" y="42" text-anchor="middle">reader.offsets([{db, table}…])</text>
   <line class="ln" x1="380" y1="50" x2="380" y2="66" marker-end="url(#a3)"/>
 
   <path class="bxa" d="M380 70 L492 102 L380 134 L268 102 Z"/>
@@ -650,7 +650,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <p>每次 <code>commit()</code> 逐表求出 <code>fence</code>，释放严格早于它的 bookmark（进 <code>pendingReleases</code>，由 poll 线程实际调用 <code>bookmark_release</code>）。<code>fence</code> 自身<strong>不释放</strong>——它正是重启时的恢复点。</p>
 
-<p>安全性来自 reader 的读取方向：<code>OffsetStorageReaderImpl.offset()</code> 是穿透读（<code>offsetReadFuture.get()</code>），<strong>看不到尚未 flush 的写入</strong>。也就是说它只会偏旧，不会偏新；而偏旧的后果仅仅是这一轮少释放几个，下一轮补上。</p>
+<p>安全性来自 reader 的读取方向：<code>OffsetStorageReaderImpl.offsets()</code> 是穿透读（<code>offsetReadFuture.get()</code>），<strong>看不到尚未 flush 的写入</strong>。也就是说它只会偏旧，不会偏新；而偏旧的后果仅仅是这一轮少释放几个，下一轮补上。</p>
 
 <p><code>Math.min</code> 那一步是跨代保护：offset store 以 connector 名而非 task 世代为键，一个仍在 flush 的僵尸前任会让 store 的答案越过本 task 自己的位置——不钳制的话，task 就会释放掉它自己刚刚恢复所依赖的那个 bookmark。</p>
 
