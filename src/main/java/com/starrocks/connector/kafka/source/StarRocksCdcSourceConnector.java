@@ -62,6 +62,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     private static final String PROBE_HOLDER_SUFFIX = ":preflight";
 
     private Map<String, String> props;
+    private List<String> tables;
 
     @Override
     public String version() {
@@ -102,13 +103,13 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     public void start(Map<String, String> props) {
         StarRocksCdcSourceConfig config = new StarRocksCdcSourceConfig(props);
         this.props = props;
+        this.tables = config.tableNames();
 
         String db = config.databaseName();
-        List<String> tables = config.tableNames();
         CdcClient client = createClient(config);
         try {
-            for (String t : tables) {
-                preflightCheckTable(client, db, t);
+            for (String table : tables) {
+                preflightCheckTable(client, db, table);
             }
             probeBookmarkFunctions(client, db, tables.get(0), config.holderId());
         } finally {
@@ -250,7 +251,6 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     /** Round-robin: table i goes to task i mod min(maxTasks, tables). The config rejects an empty list. */
     @Override
     public List<Map<String, String>> taskConfigs(int maxTasks) {
-        List<String> tables = new StarRocksCdcSourceConfig(props).tableNames();
         int groups = Math.min(maxTasks, tables.size());
         List<List<String>> groupTables = new ArrayList<>(groups);
         for (int i = 0; i < groups; i++) {
