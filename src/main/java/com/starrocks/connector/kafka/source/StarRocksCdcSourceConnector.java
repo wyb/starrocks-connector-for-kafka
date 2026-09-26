@@ -272,10 +272,14 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * naming a table the config does not capture is refused for the same reason: no task would ever
      * read it.
      *
-     * <p>A reset also releases every bookmark the tasks' holder still references on the reset table.
-     * Under {@code no_snapshot} a task with no durable offset resumes from the oldest of those, so
-     * leaving them would undo the reset at the next start. That needs the FE, hence a config that
-     * parses; a release that fails refuses the reset rather than leaving it half done.
+     * <p>A reset also releases the bookmarks the tasks' holder still references: on every table the
+     * request maps to null and, when the request is empty, on every configured table. Under
+     * {@code no_snapshot} a task with no durable offset resumes from the oldest of those, so leaving
+     * them would undo the reset at the next start. A DELETE lists only what Connect has stored and
+     * arrives empty when that is nothing, so a table that never reached a durable offset is reset
+     * either by that empty DELETE or by a PATCH naming its partition with a null offset. That needs
+     * the FE, hence a config that parses; a release that fails refuses the reset rather than
+     * leaving it half done.
      */
     @Override
     public boolean alterOffsets(Map<String, String> connectorConfig,
@@ -326,6 +330,14 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                         + OffsetState.KEY_BOOKMARK_ID + ".");
             }
         }
+        if (offsets.isEmpty()) {
+            // Only a DELETE arrives empty (PATCH refuses an empty request): Connect has nothing
+            // stored, so every configured table is the target, above all one never durable.
+            config = parseConfig(connectorConfig);
+            for (String table : config.tableNames()) {
+                resets.add(OffsetState.sourcePartition(config.databaseName(), table));
+            }
+        }
         if (!resets.isEmpty()) {
             if (config == null) {
                 config = parseConfig(connectorConfig);
@@ -359,8 +371,12 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                     for (Long id : held) {
                         client.bookmarkRelease(db, table, id, holder);
                     }
-                    LOG.info("Offset reset of {}.{}: released {} bookmark(s) {} still held: {}",
-                            db, table, held.size(), holder, held);
+                    if (held.isEmpty()) {
+                        LOG.debug("Offset reset of {}.{}: {} held no bookmark", db, table, holder);
+                    } else {
+                        LOG.info("Offset reset of {}.{}: released {} bookmark(s) {} still held: {}",
+                                db, table, held.size(), holder, held);
+                    }
                 } catch (SQLException e) {
                     throw new ConnectException("Reset refused: could not release the bookmarks " + holder + " holds on "
                             + db + "." + table + ": " + e.getMessage() + ". Left in place, a task with no offset would"

@@ -1045,7 +1045,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <div class="invariant warn">
   <span class="tag">缺口 2（已补）· bootstrap 未产生记录时，首个窗口持久化之前曾存在丢数据窗口</span>
   <p>当 bootstrap 没有发出任何记录时——<code>no_snapshot</code> 模式，或者 <code>initial</code> 模式下快照时表为空——不会有任何 offset 落盘。<code>initial</code> 下重启只是把快照在当前版本重做，最终状态一条不少；<code>no_snapshot</code> 下重启曾经会在<em>当前版本</em>重开 bookmark，崩溃到重启之间的变更被静默跳过，那一小段是 at-most-once。</p>
-  <p>现在的修法：holder 仍持有的引用在启动时被接管，<code>no_snapshot</code> 下没有 offset 就从其中最旧的一个续读——它正是上一次启动钉住的版本。配套地，REST 重置 offset 时 Connector 的 <code>alterOffsets</code> 先释放这些引用，重置仍是"从当前版本开始"。残留：引用列表读不出（记 WARN）或引用已过 TTL 时，仍按首次运行处理。</p>
+  <p>现在的修法：holder 仍持有的引用在启动时被接管，<code>no_snapshot</code> 下没有 offset 就从其中最旧的一个续读——它正是上一次启动钉住的版本。配套地，REST 重置 offset 时 Connector 的 <code>alterOffsets</code> 先释放这些引用（请求里置 null 的表，空 map 的 DELETE 则是配置里所有表；从未落盘的表要 PATCH 置 null），重置仍是"从当前版本开始"。残留：引用列表读不出（记 WARN）或引用已过 TTL 时，仍按首次运行处理。</p>
 </div>
 
 <figure>

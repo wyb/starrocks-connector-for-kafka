@@ -29,7 +29,6 @@ import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 
@@ -481,23 +480,41 @@ public class StarRocksCdcSourceConnectorTest {
 
     /**
      * Under no_snapshot a task with no offset resumes from the oldest bookmark its holder still
-     * references, so a reset that left them would be undone at the next start.
+     * references, so a reset that left them would be undone at the next start. Only the partitions
+     * the request maps to null are touched: a PATCH resetting one table must not cost another its position.
      */
     @Test
     public void testAlterOffsetsResetReleasesTheHoldersReferences() {
         FakeCdcClient fake = new FakeCdcClient();
         fake.setHeldBookmarks("orders", 3L, 4L);
+        fake.setHeldBookmarks("users", 5L);
         Map<String, String> config = base();
         config.put("name", "c1");
         Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
-        request.put(OffsetState.sourcePartition("db1", "users"), null);
 
         assertTrue(newConnector(fake).alterOffsets(config, request));
 
-        assertEquals(new HashSet<>(Arrays.asList("db1.orders:kc:c1", "db1.users:kc:c1")),
-                new HashSet<>(fake.heldBookmarkQueries));
+        assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
         assertEquals(Arrays.asList("db1.orders:3:kc:c1", "db1.orders:4:kc:c1"), fake.releasedBookmarks);
+    }
+
+    /**
+     * A DELETE lists only what Connect has stored and arrives empty when that is nothing -- a
+     * no_snapshot table that never reached a durable offset, or a connector re-created under an old
+     * name. Then every configured table is the target.
+     */
+    @Test
+    public void testAlterOffsetsEmptyResetReleasesEveryConfiguredTable() {
+        FakeCdcClient fake = new FakeCdcClient();
+        fake.setHeldBookmarks("orders", 3L);
+        Map<String, String> config = base();
+        config.put("name", "c1");
+
+        assertTrue(newConnector(fake).alterOffsets(config, new HashMap<>()));
+
+        assertEquals(Arrays.asList("db1.orders:kc:c1", "db1.users:kc:c1"), fake.heldBookmarkQueries);
+        assertEquals(Collections.singletonList("db1.orders:3:kc:c1"), fake.releasedBookmarks);
     }
 
     /** A reset left half done would be undone at the next start, so it fails whole. */
@@ -524,6 +541,12 @@ public class StarRocksCdcSourceConnectorTest {
         try {
             newConnector(new FakeCdcClient()).alterOffsets(new HashMap<>(), request);
             fail("expected ConnectException for a reset with an unparsable config");
+        } catch (ConnectException e) {
+            assertTrue(e.getMessage(), e.getMessage().contains("does not parse"));
+        }
+        try {
+            newConnector(new FakeCdcClient()).alterOffsets(new HashMap<>(), new HashMap<>());
+            fail("expected ConnectException for an empty reset with an unparsable config");
         } catch (ConnectException e) {
             assertTrue(e.getMessage(), e.getMessage().contains("does not parse"));
         }

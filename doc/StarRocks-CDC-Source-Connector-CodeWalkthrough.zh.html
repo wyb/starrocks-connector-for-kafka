@@ -107,7 +107,7 @@
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
     <span>主代码<b>20 个类 / 约 4200 行</b></span>
-    <span>测试<b>253 个</b></span>
+    <span>测试<b>254 个</b></span>
   </div>
   <p class="lead">这份文档讲<strong>每个文件在做什么、怎么做的</strong>。为什么这么设计见《设计文档》，怎么配置和使用见《使用指南》——三者不重复。</p>
 </header>
@@ -232,7 +232,7 @@ Connect 运行时发往 Kafka → offset flush → commit() 读 offset store 后
 
 <h2 id="entry"><span class="no">2</span>入口层</h2>
 
-<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">410 行</span></h3>
+<h3 id="StarRocksCdcSourceConnector"><span class="fn">StarRocksCdcSourceConnector</span><span class="sz">426 行</span></h3>
 <p class="role">Connect 创建的第一个对象。四件事：启动期校验、把表分配给 task、声明精确一次的适用范围、把住 offset 改写的入口。它<strong>不搬运任何数据</strong>。</p>
 
 <h4>start(props) —— 全部的失败都在这里暴露</h4>
@@ -275,7 +275,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 <p><code>SourceConnector</code> 的默认实现返回 <code>false</code>（字节码就是 <code>iconst_0; ireturn</code>）。按 KIP-875 的语义这表示"连接器没有自行处理"，框架照样把运维 <code>PATCH /connectors/{name}/offsets</code> 提交的 JSON 原样写进 offset store——<strong>不覆写就等于对任意 payload 敞开</strong>。</p>
 <p>覆写后逐条校验：offset 为 <code>null</code> 表示重置，<strong>先于一切校验放行</strong>；否则 partition 必须恰好是非空字符串 <code>db</code> 和 <code>table</code> 两个键（task 按 Map 相等查找，多一个键就再也匹配不上），且库名等于 <code>starrocks.database.name</code>、表名在 <code>starrocks.table.names</code> 里（否则没有任何 task 会读它），<code>bookmark_id</code> 必须是非负 <code>Number</code>，<code>snapshot_done</code> 必须是 <code>Boolean</code>。任一项不满足抛 <code>ConnectException</code>，整个改写请求失败。错误信息里带上值的<em>类型</em>——<code>String 11955</code> 和 <code>Integer 11955</code> 打印出来一模一样。</p>
 <p>顺序不能反：<code>DELETE /connectors/{name}/offsets</code> 是把 offset store 里<em>每一个</em>已存 partition 映射成 <code>null</code> 交进来，其中可能有本连接器已经不再写的形状。校验放在 null 判断之前，这类残留就再也清不掉了——重置是唯一的清理入口。</p>
-<p>重置多做一步：对每个形如 <code>{db, table}</code> 的重置 partition，用 <code>createClient</code> 建一个 client，<code>fetchHeldBookmarks</code> 列出 task 的 holder 在这张表上仍持有的引用并逐个 <code>bookmarkRelease</code>（<code>releaseReferences</code>）。原因在 Task 的 <code>restoreOffset</code>：<code>no_snapshot</code> 下没有 offset 时它从最旧的持有引用续读，引用不清，重置在下一次启动就被撤销。这一步需要能解析的配置（<code>parseConfig</code> 把 <code>ConfigException</code> 包成说明用途的 <code>ConnectException</code>）和能应答的 FE，任一释放失败整个重置拒绝，不留半截；本连接器不写的形状（<code>namesATable</code> 为假）没有引用可释放，照旧直接清，不需要配置。表已不存在时 <code>fetchHeldBookmarks</code> 返回空。</p>
+<p>重置多做一步：对请求里每个映射成 null、形如 <code>{db, table}</code> 的 partition，以及请求为空 map 时配置里的每张表（空 map 只可能来自 store 里什么都没存的 DELETE，PATCH 的空请求被 REST 层直接 400），用 <code>createClient</code> 建一个 client，<code>fetchHeldBookmarks</code> 列出 task 的 holder 在这张表上仍持有的引用并逐个 <code>bookmarkRelease</code>（<code>releaseReferences</code>）。DELETE 的清单只有 Connect 已存的 partition，从未落盘的表不在其中，要重置它就 PATCH 它的 partition 为 null；不去动请求没列出的表，因为 PATCH 部分置 null 时越界释放会让别的未落盘表丢变更。原因在 Task 的 <code>restoreOffset</code>：<code>no_snapshot</code> 下没有 offset 时它从最旧的持有引用续读，引用不清，重置在下一次启动就被撤销。这一步需要能解析的配置（<code>parseConfig</code> 把 <code>ConfigException</code> 包成说明用途的 <code>ConnectException</code>）和能应答的 FE，任一释放失败整个重置拒绝，不留半截；本连接器不写的形状（<code>namesATable</code> 为假）没有引用可释放，照旧直接清，不需要配置。表已不存在时 <code>fetchHeldBookmarks</code> 返回空。</p>
 <p>不校验的代价不是立刻报错，而是几分钟后：写进去的畸形 offset 要等到某个 task 重启读回来，才表现为"窗口读不出来"加"续租一直失败"，跟当初那对引号已经联系不起来。</p>
 <p>文件按 Connect 调用它的顺序排：<code>version</code>/<code>taskClass</code>/<code>config</code>，校验期的 <code>exactlyOnceSupport</code>，<code>start</code> 及其检查（<code>preflightCheckTable</code> 与它的 <code>checkModel</code>/<code>checkColumns</code> 在前，<code>probeBookmarkFunctions</code> 在后，与调用顺序一致），<code>taskConfigs</code>，<code>alterOffsets</code> 与它的助手（<code>parseConfig</code>、<code>releaseReferences</code>、<code>namesATable</code>、<code>requirePartitionString</code>、<code>stringAt</code>、<code>describe</code>），<code>stop</code>；测试注入点 <code>createClient</code> 放最后，与 Task 相同。</p>
 
@@ -596,7 +596,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><th>文件</th><th>数量</th><th>盯什么</th></tr>
   <tr><td><code>StarRocksCdcSourceTaskTest</code></td><td>64</td><td>六条不变式（释放围栏取自持久 offset、快照崩溃语义、idle dedup 与空窗口 head 留作 base、只有窗口末条带 head、一表失败不丢另一表的记录、墓碑只跟真删除）+ 租约续期（节奏跟服务端授予值、失败退避、部分成功、全失败即时重试）+ poll 失败（抛 Retriable 前先睡一个 poll 间隔、持续失败超时转致命、成功重置计时、-1 永远重试、0 首次即停、致命时即使别的表有记录也抛）。含重启续读、启动接管 holder 的遗留引用并由围栏释放、引用表读不出不影响启动、畸形 offset 恢复为 fresh、空的 <code>task.tables</code> 拒绝启动、<code>no_snapshot</code> 无 offset 时从最旧的持有引用续读（有 offset 时 offset 优先，<code>initial</code> 不用，引用读不出则按首次运行）</td></tr>
   <tr><td><code>ChangeRecordMapperTest</code></td><td>15</td><td>envelope 字段顺序与 <code>transaction</code> 恒 null、d/c 拆分、快照 row_version 不压过后续变更、BINARY 走 BYTES、LARGEINT 保全 128 位精度、DATE/DATETIME 文本原样透传（含作 key 列）、复杂列解析成功即原生 schema 与值而解析失败回退带名文本、无 key 列时 key 为 null、墓碑复用 key 与 offset、key 列不在列清单时点名</td></tr>
-  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>27</td><td>preflight 各条拒绝（无模型、不认识的模型名、UNIQUE、PK 无 CDC、撞名、草图列）与放行（DUP/AGG/PK、复杂列含解析失败的）、元数据查询失败包成带表名的异常、探针 holder 独立且 release 失败只警告、round-robin 分表、精确一次的适用与拒绝（缺键或值为 null 都不抛）、<code>alterOffsets</code> 对重置放行并释放 holder 的引用（配置解析不了或 FE 不应答则拒绝，本连接器不写的形状直接清），对引号 id/负数/非布尔/畸形或 null partition/不在配置里的表拒绝</td></tr>
+  <tr><td><code>StarRocksCdcSourceConnectorTest</code></td><td>28</td><td>preflight 各条拒绝（无模型、不认识的模型名、UNIQUE、PK 无 CDC、撞名、草图列）与放行（DUP/AGG/PK、复杂列含解析失败的）、元数据查询失败包成带表名的异常、探针 holder 独立且 release 失败只警告、round-robin 分表、精确一次的适用与拒绝（缺键或值为 null 都不抛）、<code>alterOffsets</code> 对重置放行并释放 holder 的引用（只动请求置 null 的表，空 map 的 DELETE 释放配置里每张表；配置解析不了或 FE 不应答则拒绝，本连接器不写的形状直接清），对引号 id/负数/非布尔/畸形或 null partition/不在配置里的表拒绝</td></tr>
   <tr><td><code>KeyValueListParserTest</code></td><td>9</td><td>五条解析规则与错误信息内容</td></tr>
   <tr><td><code>FeConnectionTest</code></td><td>12</td><td>URL 扇出（query string 与 database path 都复制到每个 host、空 host 丢弃、缺 <code>://</code> 拒绝）、只重写 mysql scheme、<code>close</code> 是终态不再重连、每种传输只点名自己的驱动且缺失时报出 artifact、MySQL 会话钉住的二进制编码与文本读取器一致而 Arrow 不设。<strong>leader 轮转与重试无单测</strong>，只有冒烟覆盖</td></tr>
   <tr><td><code>SqlBuilderTest</code></td><td>11</td><td>强制 ORDER BY、快照 SQL 钉住 bookmark、标识符与字符串两种转义、列元数据按 <code>ORDINAL_POSITION</code> 排序且两个类型列都被选中、<code>tables_config</code> 一行带 <code>TABLE_ID</code>、引用查询按 <code>TABLE_ID + HOLDER_ID</code> 过滤</td></tr>
