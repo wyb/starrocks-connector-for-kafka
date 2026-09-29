@@ -62,21 +62,24 @@ mvn -q test -Dtest=TransportBench \
   -Dbench.rounds=5 -Dbench.mutation.sql='UPDATE {db}.{table} SET v = v + 1'
 ```
 
-`bench-cluster.sh` is the end-to-end half: it generates a table (or uses `BENCH_DB`/`BENCH_TABLE`),
-runs one `connect-standalone` worker per transport with identical settings, and times the
-snapshot and the CHANGES phase by polling the topic's end offsets. It also reads Connect's own
-`poll-batch-avg/max-time-ms` over JMX and samples the worker's RSS and CPU. Everything after
-`poll()` is the same on both sides, so a small gap here next to a large one in `TransportBench`
-means the pipeline, not the transport, is the bottleneck.
+`bench-cluster.sh` measures StarRocks → Connect → Kafka for each transport. By default it creates
+separate tables with identical data, so one transport's UPDATE does not change the other's
+snapshot. Each transport uses the same worker settings and its own topic. The report separates
+worker startup, snapshot delivery, and CHANGES delivery, using Kafka topic end offsets; it also
+shows Connect poll time from JMX and worker RSS/CPU. The record-count check does not validate
+payloads, so run `smoke-cluster.sh` for correctness first.
 
 ```bash
 SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
 KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
-BENCH_ROWS=1000000 ./bench-cluster.sh
+BENCH_ROWS=1000000 BENCH_TRANSPORTS='mysql arrow-flight' ./bench-cluster.sh
 ```
 
-Knobs are listed at the top of the script. The snapshot is one poll batch, so `BENCH_HEAP`
-(default 4g) has to hold the whole table on both sides, or the run measures GC instead.
+Build a fresh plugin jar with `mvn -DskipTests package` before the benchmark. The snapshot
+returns at most `BENCH_SNAPSHOT_BATCH_SIZE` records per poll (default 4096). For a comparison,
+repeat the benchmark with `BENCH_TRANSPORTS='arrow-flight mysql'` to reveal order/cache effects.
+`BENCH_DB`/`BENCH_TABLE` can be used for a single transport only; the default mutation changes
+every row of that existing table.
 
 The rest of this page covers the Docker variant.
 

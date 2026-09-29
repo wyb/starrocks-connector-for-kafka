@@ -34,20 +34,20 @@ note() { printf '  %s\n' "$1"; }
 # that transport, and it checks conditionally.
 verify_plugin_jar() {
   [ -f "$JAR" ] || fail "plugin jar not found at $JAR -- run: (cd $REPO_ROOT && mvn -DskipTests package)"
-  jar tf "$JAR" | grep -q 'com/starrocks/connector/kafka/source/StarRocksCdcSourceConnector.class' \
+  jar tf "$JAR" | grep -Fx 'com/starrocks/connector/kafka/source/StarRocksCdcSourceConnector.class' >/dev/null \
     || fail "connector class missing from $JAR"
-  jar tf "$JAR" | grep -q 'org/mariadb/jdbc/Driver.class' \
+  jar tf "$JAR" | grep -Fx 'org/mariadb/jdbc/Driver.class' >/dev/null \
     || fail "mariadb JDBC driver missing from $JAR -- the primary maven-shade execution must include org.mariadb.jdbc:mariadb-java-client"
   # Envelope's class-init also pulls these two. Unit tests run on the full compile classpath
   # and cannot see a missing shade include; it surfaces only here, or in a real worker.
   for cls in io/debezium/data/Envelope.class \
              io/debezium/pipeline/txmetadata/TransactionMonitor.class \
              io/debezium/util/SchemaNameAdjuster.class; do
-    jar tf "$JAR" | grep -q "^$cls$" \
+    jar tf "$JAR" | grep -Fx "$cls" >/dev/null \
       || fail "$cls missing from $JAR -- the primary maven-shade execution must include io.debezium:debezium-core"
   done
   # Without this filtered resource every version() answers "unknown".
-  jar tf "$JAR" | grep -q '^starrocks-connector.properties$' \
+  jar tf "$JAR" | grep -Fx 'starrocks-connector.properties' >/dev/null \
     || fail "starrocks-connector.properties missing from $JAR -- the <resources> filtering block in pom.xml is what puts it there"
   note "plugin jar OK (connector + JDBC driver + Debezium envelope + version resource)"
 }
