@@ -168,10 +168,7 @@ public class StarRocksSinkTaskTest {
         Assert.assertEquals("{\"id\":1,\"name\":null}", row);
     }
 
-    /**
-     * Connect surfaces version() to operators over the REST API. The hand-maintained constant this
-     * replaced said 1.0.3 while the POM said 1.0.5, so it reported a release that was never built.
-     */
+    /** Both sink entry points report the Maven-filtered version. */
     @Test
     public void testVersionIsTheOneThatWasBuilt() {
         Assert.assertEquals(Version.get(), new StarRocksSinkTask().version());

@@ -23,9 +23,9 @@ package com.starrocks.connector.kafka.source;
 import java.util.List;
 
 /**
- * Every statement the CDC source issues, as pure functions. Identifiers are backtick-quoted and
- * literals single-quoted; the pseudo-columns {@link #CHANGE_TYPE_COLUMN} and
- * {@link #ROW_VERSION_COLUMN} are never quoted.
+ * Builds CDC SQL with escaped identifiers and literals.
+ * CHANGES queries project the two pseudo-columns and preserve the row order required to
+ * interpret update pairs and tombstones.
  */
 public final class SqlBuilder {
 

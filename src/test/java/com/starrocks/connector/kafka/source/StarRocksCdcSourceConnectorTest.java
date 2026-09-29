@@ -39,9 +39,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Tests for {@link StarRocksCdcSourceConnector}: the fail-fast preflight in {@code start()} (table
- * model, CDC property, columns, bookmark-function probe), the round-robin sharding in {@code
- * taskConfigs()}, {@code exactlyOnceSupport} and the offset vetting in {@code alterOffsets}.
+ * Covers table preflight, task assignments, exactly-once eligibility, and offset changes.
+ * Preflight failures must surface before tasks start; reset requests must release FE bookmarks.
  */
 public class StarRocksCdcSourceConnectorTest {
 
@@ -121,31 +120,18 @@ public class StarRocksCdcSourceConnectorTest {
 
     @Test
     public void testPreflightRejectsUniqueKeyTable() {
-        // Real runtime value: FE's KeysType.UNIQUE_KEYS enum constant rendered via toString()
-        // (see InformationSchemaDataSource), which some docs mislabel as "UNQ_KEYS".
-        FakeCdcClient fakeRealValue = new FakeCdcClient();
-        fakeRealValue.modelByTable.put("t1", "UNIQUE_KEYS");
         Map<String, String> props = base();
         props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t1");
-        StarRocksCdcSourceConnector connectorRealValue = newConnector(fakeRealValue);
-
-        try {
-            connectorRealValue.start(props);
-            fail("expected ConnectException for a UNIQUE KEY table (real FE value UNIQUE_KEYS)");
-        } catch (ConnectException e) {
-            assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
-        }
-
-        // Docs-described spelling; must also be rejected in case any deployment emits it.
-        FakeCdcClient fakeDocsValue = new FakeCdcClient();
-        fakeDocsValue.modelByTable.put("t1", "UNQ_KEYS");
-        StarRocksCdcSourceConnector connectorDocsValue = newConnector(fakeDocsValue);
-
-        try {
-            connectorDocsValue.start(props);
-            fail("expected ConnectException for a UNIQUE KEY table (docs value UNQ_KEYS)");
-        } catch (ConnectException e) {
-            assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+        // FE uses UNIQUE_KEYS; some documentation spells it UNQ_KEYS.
+        for (String model : new String[] {"UNIQUE_KEYS", "UNQ_KEYS"}) {
+            FakeCdcClient fake = new FakeCdcClient();
+            fake.modelByTable.put("t1", model);
+            try {
+                newConnector(fake).start(props);
+                fail("expected ConnectException for " + model);
+            } catch (ConnectException e) {
+                assertTrue("message was: " + e.getMessage(), e.getMessage().contains("db1.t1"));
+            }
         }
     }
 

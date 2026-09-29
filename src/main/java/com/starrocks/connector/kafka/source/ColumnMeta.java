@@ -26,9 +26,9 @@ import java.util.Locale;
 import java.util.Set;
 
 /**
- * One captured column as {@code information_schema.columns} describes it, immutable, folded at
- * construction into the one {@link ColumnType} the schema and the value readers use. Only the
- * server's description, never a driver's; {@link ColumnMetaReader} says why.
+ * Keeps a column's server-reported metadata and parsed ColumnType together.
+ * Schema construction and value reading share that type tree instead of deriving types from
+ * JDBC metadata independently.
  */
 public final class ColumnMeta {
     /** The closed set FE's {@code Type.toMysqlDataTypeString} emits; a name outside it means StarRocks grew a type. */

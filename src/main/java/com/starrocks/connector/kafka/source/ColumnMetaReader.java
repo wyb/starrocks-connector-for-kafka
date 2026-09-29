@@ -33,8 +33,9 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * The authoritative column list, used both to build the Connect schema and to read values back out.
- * One strategy for both transports: ask the server.
+ * Reads columns in declaration order from information_schema for both transports.
+ * Driver ResultSetMetaData cannot describe all Arrow Flight nested types reliably, so the
+ * server's column metadata is authoritative.
  */
 final class ColumnMetaReader {
 

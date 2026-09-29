@@ -58,14 +58,9 @@ import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
 
 /**
- * The real Arrow Flight JDBC driver, in-process: a {@code VectorSchemaRoot} holding one row of
- * every vector shape StarRocks' {@code convert_to_arrow_type_for_flight_sql} produces, turned into
- * the driver's own {@code ResultSet} and read through {@link ArrowValueReader} exactly as at runtime.
- * The same row's BE text form goes through {@link MysqlValueReader}; the two must agree.
- *
- * <p>This is the test the first live run showed was missing: a fake ResultSet only echoes the
- * shapes one believes the driver returns. Two of those beliefs were wrong (Avatica hands a
- * top-level ARRAY over as {@code java.sql.Array}; a nested map is a List of entries).
+ * Reads StarRocks Arrow vector shapes through the real, in-process JDBC driver and compares
+ * them with the MySQL text reader. This catches driver-specific forms a fake ResultSet misses,
+ * including top-level java.sql.Array and nested maps represented as entry lists.
  */
 public class ArrowDriverResultSetTest {
 

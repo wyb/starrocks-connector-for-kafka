@@ -35,19 +35,10 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * The Arrow Flight JDBC driver's quirks, and nothing else.
- *
- * <p>Top level: its {@code getTimestamp(i, calendar)} ends in {@code Timestamp.valueOf(LocalDateTime)}
- * and so builds the value in the JVM's zone whatever calendar was passed; and Avatica's
- * {@code getObject} dispatches on the JDBC type id, so a top-level ARRAY arrives as a
- * {@link java.sql.Array} while MAP and STRUCT arrive as the vector's {@code Map}.
- *
- * <p>Nested: the vectors' own objects. {@code List} for a list, {@code Map} of field name to value
- * for a struct, {@code Text} for varchar, and for what StarRocks sends as something else on the
- * wire, the raw number -- an {@code Integer} of days for a DATE, a {@code Long} of microseconds for
- * a DATETIME, indistinguishable from an INT and a BIGINT by class alone. A map nested inside a list
- * or struct is whatever {@code MapVector.getObject} returns, which {@code MapVector} inherits from
- * {@code ListVector}: a {@code List} of {@code {key, value}} entry maps.
+ * Handles Arrow Flight JDBC values that differ from the MySQL transport.
+ * Top-level arrays arrive as java.sql.Array, while nested maps may arrive as lists of key/value
+ * entries. The Arrow timestamp accessor applies the JVM zone despite the supplied Calendar, so
+ * this reader corrects that shift.
  */
 final class ArrowValueReader extends ValueReader {
 

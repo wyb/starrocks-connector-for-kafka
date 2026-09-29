@@ -31,17 +31,9 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The MySQL protocol's one quirk: a nested column arrives as the text BE's
- * {@code put_mysql_row_buffer} renders, JSON-like but not JSON. A numeric map key is unquoted
- * ({@code {1:2}}), a nested JSON value is wrapped in <em>single</em> quotes, a BOOLEAN is {@code 1}
- * or {@code 0}, strings escape only {@code "} and {@code \} and may contain raw control characters,
- * VARBINARY is hex or base64 per the session's {@code binary_encoding_format}, and fmt prints
- * non-finite floats as {@code inf}/{@code nan}.
- *
- * <p>The text is first cut into a raw tree without knowing any types -- lists, maps keyed by
- * their key token, string tokens, bare {@code null} -- and the shared recursion then reads that
- * tree by the declared {@link ColumnType}, exactly as the Arrow reader reads the driver's objects.
- * Which token is a number, a boolean or a date is the type's call, not the text's.
+ * Decodes the MySQL protocol's nested-value text, which resembles JSON but uses
+ * StarRocks-specific quoting and literal forms. The FE session's binary encoding is pinned
+ * so nested binary values can be decoded consistently.
  */
 final class MysqlValueReader extends ValueReader {
 

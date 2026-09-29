@@ -38,16 +38,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Validates configuration, runs fail-fast preflight against every captured table, shards the table
- * list round-robin across {@code maxTasks} tasks, and vets the offsets the REST API is about to
- * write, releasing the FE references a reset must not leave behind ({@link #alterOffsets}).
- * {@link #exactlyOnceSupport} says when exactly-once is on offer.
- *
- * <p>Preflight rejects at {@link #start} rather than mid-stream: a table with no model (a view, an
- * external table) or one this connector does not know; the UNIQUE KEY model; a PRIMARY KEY table
- * without {@code enable_change_data_capture} (the message names the exact ALTER); a column colliding
- * with {@code __CHANGE_TYPE__} or {@code __ROW_VERSION__}; a column whose type cannot be exported;
- * and disabled bookmark meta functions, proven by {@link #probeBookmarkFunctions}.
+ * Validates captured tables before tasks start, assigns tables across tasks, and checks offset
+ * changes requested through Connect. Resetting offsets also releases the holder's FE bookmarks;
+ * exactlyOnceSupport reflects the configured snapshot and recovery policies.
  */
 public class StarRocksCdcSourceConnector extends SourceConnector {
 
@@ -219,14 +212,9 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     }
 
     /**
-     * Creates and releases one short-TTL bookmark, proving the meta functions work.
-     * {@code enable_bookmark_meta_functions} defaults to false, so this is the likeliest first-run
-     * blocker; without the probe it surfaces two {@code getCause()} levels inside a poll failure.
-     *
-     * <p><b>The probe's holder must differ from the tasks' -- do not "simplify"
-     * {@link #PROBE_HOLDER_SUFFIX} away.</b> {@code bookmark_create} is idempotent per holder, so a
-     * shared holder would hand the probe the task's committed bookmark and the release would delete
-     * it, failing every restart of an idle table with "bookmark not found".
+     * Probes the bookmark functions before tasks start. The probe needs its own holder because
+     * {@code bookmark_create} is idempotent per holder: sharing the task holder could return and
+     * then release the task's pinned position.
      */
     private void probeBookmarkFunctions(CdcClient client, String db, String table, String taskHolder) {
         String holder = taskHolder + PROBE_HOLDER_SUFFIX;
@@ -268,21 +256,10 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
     }
 
     /**
-     * Validates what the offsets REST API is about to write, and makes a reset reach the FE. Connect
-     * writes the payload to the offset store whether or not a connector overrides this, so without
-     * the check a malformed one -- {@code bookmark_id} quoted as a string, say -- lands silently and
-     * only surfaces when a task restarts and reads it back as "no position at all". A partition
-     * naming a table the config does not capture is refused for the same reason: no task would ever
-     * read it.
-     *
-     * <p>A reset also releases the bookmarks the tasks' holder still references: on every table the
-     * request maps to null and, when the request is empty, on every configured table. Under
-     * {@code no_snapshot} a task with no durable offset resumes from the oldest of those, so leaving
-     * them would undo the reset at the next start. A DELETE lists only what Connect has stored and
-     * arrives empty when that is nothing, so a table that never reached a durable offset is reset
-     * either by that empty DELETE or by a PATCH naming its partition with a null offset. That needs
-     * the FE, hence a config that parses; a release that fails refuses the reset rather than
-     * leaving it half done.
+     * Validates offsets before Connect stores them, including their partition and value types.
+     * A reset also releases the holder's FE bookmarks; otherwise {@code no_snapshot} could resume
+     * from an old reference and undo the reset. Empty resets cover all configured tables, and a
+     * failed release rejects the reset rather than leaving it partly applied.
      */
     @Override
     public boolean alterOffsets(Map<String, String> connectorConfig,

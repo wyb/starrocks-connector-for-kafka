@@ -26,18 +26,9 @@ import java.util.Locale;
 import java.util.Optional;
 
 /**
- * Parses {@code information_schema.columns.COLUMN_TYPE} into a {@link ColumnType}.
- *
- * <p>The string is FE's {@code Type.toSql()}, a display form rather than a contract, so this
- * parser accepts exactly the spellings FE produces and refuses everything else with
- * {@link Optional#empty()}; the caller then falls back to carrying the column as text. What FE
- * emits inside a nested type ({@code ScalarType.toSql}): {@code boolean}, {@code tinyint(4)},
- * {@code int(11)}, {@code bigint(20)}, {@code largeint(40)}, {@code decimal(18, 2)},
- * {@code varchar(10)}, {@code varbinary(16)}, {@code date}, {@code datetime}, {@code json} --
- * except that {@code ArrayType.toSql} prints a decimal item through {@code toString()} instead,
- * as {@code DECIMAL64(18,2)}. Struct fields are {@code `name` type} joined by {@code ", "}, with
- * embedded backticks doubled; a field comment is appended unescaped as {@code COMMENT '...'},
- * and nesting past 15 levels prints {@code ...}. Both of those end here as a refusal.
+ * Parses information_schema COLUMN_TYPE into a nested ColumnType.
+ * COLUMN_TYPE is a display string rather than a stable grammar; an unparseable complex type
+ * is kept as opaque text instead of being assigned a guessed schema.
  */
 final class ColumnTypeParser {
 

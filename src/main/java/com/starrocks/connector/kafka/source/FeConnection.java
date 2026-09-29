@@ -34,16 +34,9 @@ import java.util.List;
 import java.util.Properties;
 
 /**
- * Owns the JDBC connection to a StarRocks FE: which URL, when to reconnect, when to rotate, how
- * often to retry. The URL prefix alone selects the transport; there is no separate config key.
- *
- * <p>Arrow Flight needs cluster-side setup the MySQL protocol does not: a non-negative
- * {@code arrow_flight_port} in both {@code fe.conf} and {@code be.conf} (default -1, not mutable),
- * and {@code --add-opens=java.base/java.nio=ALL-UNNAMED} on the FE <em>and</em> the worker.
- *
- * <p><b>Not thread-safe</b>: the reused {@link Connection}, the rotation index and any open
- * streaming {@link ResultSet} are plain mutable state. All JDBC runs on the poll thread except
- * {@link #close}, which the runtime may call concurrently; see {@link #get}'s post-open re-check.
+ * Owns the FE JDBC connection, URL rotation, and leader retries.
+ * The URL selects MySQL or Arrow Flight transport. Connection and streaming state stay on the
+ * poll thread; the runtime may call close() concurrently.
  */
 final class FeConnection implements AutoCloseable {
 
@@ -57,21 +50,17 @@ final class FeConnection implements AutoCloseable {
     private static final long RETRY_PAUSE_MS = 500L;
 
     /**
-     * Run on every MySQL-protocol connection. The text form of a nested VARBINARY is governed by
-     * two session variables that default to exactly this, but a cluster may set them globally:
-     * {@code raw} would put undecodable bytes in the text {@link MysqlValueReader} scans, and
-     * {@code all} would hex-encode top-level VARBINARY under {@code getBytes()}. Pinning them makes
-     * the reader's assumption true whatever the cluster says. Arrow Flight carries binary as
-     * binary and does not consult either.
+     * Pin MySQL's nested binary rendering for {@link MysqlValueReader}. Cluster defaults can
+     * change; {@code raw} breaks text decoding, while encoding {@code all} binary values changes
+     * the top-level {@code getBytes()} result. Arrow Flight does not use these settings.
      */
     static final String SESSION_SETUP_SQL = "SET binary_encoding_format = '"
             + MysqlValueReader.SESSION_BINARY_ENCODING.name().toLowerCase(java.util.Locale.ROOT)
             + "', binary_encoding_level = 'nested'";
 
     /**
-     * MySQL transport only; MariaDB streams row-by-row for any positive fetch size.
-     * <b>Must not be {@code Integer.MIN_VALUE}</b> -- that is Connector/J's idiom, and MariaDB
-     * rejects every negative value with {@code SQLException("invalid fetch size")}.
+     * MariaDB streams rows for positive fetch sizes. Connector/J's
+     * {@code Integer.MIN_VALUE} convention is rejected by MariaDB.
      */
     private static final int STREAM_FETCH_SIZE = 1024;
 
@@ -81,7 +70,6 @@ final class FeConnection implements AutoCloseable {
     private final StarRocksCdcSourceConfig config;
     private final List<String> urls;
     private int urlIndex;
-    /** Volatile because {@code close()} is the one call the runtime may make off the poll thread. */
     private volatile Connection conn;
     private volatile boolean closed;
 

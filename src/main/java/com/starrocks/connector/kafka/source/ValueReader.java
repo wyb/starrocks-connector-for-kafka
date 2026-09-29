@@ -37,20 +37,9 @@ import java.util.Map;
 import java.util.TimeZone;
 
 /**
- * Reads one row out of a {@link ResultSet} into the canonical {@code Object[]} the mapper shapes:
- * decimals at the declared scale, DATE and DATETIME as the text StarRocks prints, nested columns as the
- * neutral value ({@code List}, {@code Map<String, Object>} for both maps and structs, canonical
- * scalars). Every decision is driven by the column's {@link ColumnType}, never by what the driver
- * says a column is.
- *
- * <p>Scalars go through the typed getters -- JDBC's own cross-driver coercion, and the one place a
- * UTC calendar can be handed to the driver -- so they read the same on both transports. Nested
- * columns have no typed getter; {@code getObject} hands over whatever the driver has, and the
- * transport's subclass turns that into the neutral value. The recursion over ARRAY, MAP and STRUCT
- * lives here; a subclass supplies {@link #leaf} for its raw leaves and may widen
- * {@link #asMap}.
- *
- * <p>One instance per streaming read: the calendar is not thread-safe.
+ * Reads JDBC rows according to their declared ColumnType, not driver metadata.
+ * Typed getters normalize scalar values across transports. Subclasses decode transport-specific
+ * nested values into lists and maps, which this class converts into Connect values.
  */
 abstract class ValueReader {
 

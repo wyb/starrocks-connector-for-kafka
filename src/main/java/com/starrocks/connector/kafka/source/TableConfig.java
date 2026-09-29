@@ -27,7 +27,10 @@ import java.io.IOException;
 import java.sql.SQLException;
 import java.util.Locale;
 
-/** One table's row of {@code information_schema.tables_config}, as far as preflight and the bookmark queries need it. */
+/**
+ * Contains the table model and properties from information_schema.tables_config.
+ * The connector uses them during preflight to decide whether a table is capturable.
+ */
 final class TableConfig {
 
     /** {@code TABLE_MODEL}, which FE renders as its {@code KeysType} name. */

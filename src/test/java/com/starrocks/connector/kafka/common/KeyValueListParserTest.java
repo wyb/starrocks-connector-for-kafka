@@ -30,9 +30,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * The sink and the CDC source both route data through this parser, so its failure behaviour is
- * shared contract rather than an implementation detail: every malformed value must raise, never
- * return a partial or empty map that a caller could mistake for "no mapping configured".
+ * Both sink and source use this parser. Malformed mappings must fail instead of returning a
+ * partial map that could be mistaken for an empty configuration.
  */
 public class KeyValueListParserTest {
 

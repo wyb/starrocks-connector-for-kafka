@@ -25,8 +25,8 @@ import java.io.InputStream;
 import java.util.Properties;
 
 /**
- * The version every connector and task here reports, read from a Maven-filtered resource so the
- * POM is the only place it is written; hand-maintained constants had drifted to three answers.
+ * Reads the Maven-filtered resource reported by connectors and tasks.
+ * The POM supplies the version; a missing or unfiltered resource reports "unknown".
  */
 public final class Version {
 

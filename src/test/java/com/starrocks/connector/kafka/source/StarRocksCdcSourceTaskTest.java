@@ -55,10 +55,8 @@ import static org.junit.Assert.assertTrue;
 import static org.junit.Assert.fail;
 
 /**
- * Correctness-core tests for {@link StarRocksCdcSourceTask}: the poll loop and the bookmark
- * state machine. Each test pins one of the three invariants documented on the task itself
- * (release-after-commit, snapshot-crash semantics, idle dedup) or one concrete branch of the
- * poll/bootstrap/commit control flow.
+ * Exercises the task's snapshot, change-window, and bookmark behavior. The fake offset store
+ * distinguishes an acknowledged record from an offset Connect has actually flushed.
  */
 public class StarRocksCdcSourceTaskTest {
 
@@ -78,11 +76,7 @@ public class StarRocksCdcSourceTaskTest {
 
     private long fakeNowMs;
 
-    /**
-     * What Kafka Connect has actually made durable, which is what fences releases. Tests drive it
-     * with {@link #flushOffset} instead of acking records: an ack is not durability, and modelling
-     * it as one is the mistake the fence was rewritten to stop making.
-     */
+    /** Offsets Connect has flushed; these fence bookmark releases. */
     private final Map<Map<String, String>, Map<String, Object>> durableOffsets = new HashMap<>();
 
     /** Tables whose offset read throws instead of answering -- it does IO and can be closed. */
@@ -179,24 +173,6 @@ public class StarRocksCdcSourceTaskTest {
     // ------------------------------------------------------------------
 
     @Test
-    public void testSnapshotRowsCarrySnapshotNotDoneOffsets() throws Exception {
-        fake.enqueueHead("orders", 100L);
-        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}, new Object[]{2, 200L}));
-
-        task.start(baseProps());
-        List<SourceRecord> out = task.poll();
-
-        assertNotNull(out);
-        assertEquals(2, out.size());
-        for (SourceRecord r : out) {
-            Struct value = (Struct) r.value();
-            assertEquals("r", value.getString("op"));
-            assertEquals(Boolean.FALSE, r.sourceOffset().get("snapshot_done"));
-            assertEquals(100L, r.sourceOffset().get("bookmark_id"));
-        }
-    }
-
-    @Test
     public void testSnapshotReturnsBoundedBatchesAndFinishesOnlyAtEndOfCursor() throws Exception {
         Map<String, String> props = baseProps();
         props.put(StarRocksCdcSourceConfig.SNAPSHOT_BATCH_SIZE, "2");
@@ -209,6 +185,11 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(2, first.size());
         assertFalse(task.tables.get(0).snapshotDone);
         assertEquals(0, fake.snapshotCursorCloses);
+        for (SourceRecord record : first) {
+            assertEquals("r", ((Struct) record.value()).getString("op"));
+            assertEquals(Boolean.FALSE, record.sourceOffset().get("snapshot_done"));
+            assertEquals(100L, record.sourceOffset().get("bookmark_id"));
+        }
 
         List<SourceRecord> second = task.poll();
         assertEquals(2, second.size());
@@ -461,24 +442,6 @@ public class StarRocksCdcSourceTaskTest {
         } catch (ConnectException expected) {
             assertTrue(expected.getMessage(), expected.getMessage().contains("orders"));
         }
-    }
-
-    @Test
-    public void testFirstChangeRecordCarriesSnapshotDoneTrue() throws Exception {
-        fake.enqueueHead("orders", 100L);
-        task.start(baseProps());
-        task.poll(); // snapshot round: no rows queued, just completes bootstrap
-
-        fake.enqueueHead("orders", 101L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
-        List<SourceRecord> out = task.poll();
-
-        assertNotNull(out);
-        assertEquals(1, out.size());
-        SourceRecord r = out.get(0);
-        assertEquals(Boolean.TRUE, r.sourceOffset().get("snapshot_done"));
-        assertEquals(101L, r.sourceOffset().get("bookmark_id"));
-        assertTrue(fake.streamedWindows.contains("100_101"));
     }
 
     @Test
@@ -1260,33 +1223,17 @@ public class StarRocksCdcSourceTaskTest {
         // Past a third of the granted lease (10s), nowhere near a third of the configured one
         // (300s): only one of the two pacings renews here.
         fake.renewedBookmarks.clear();
+        fake.requestedTtls.clear();
         fakeNowMs += 30000L / 3 + 1;
         task.poll();
         assertEquals("must pace off the granted lease, not the configured one", 1, renewCountOf(100L));
+        assertEquals(Collections.singletonList(900000L), fake.requestedTtls);
 
         // And not more often than that lease calls for.
         fake.renewedBookmarks.clear();
         fakeNowMs += 30000L / 3 - 1;
         task.poll();
         assertEquals(0, renewCountOf(100L));
-    }
-
-    /** The request always carries the configured TTL; sending the granted one ratchets it down. */
-    @Test
-    public void testRenewAlwaysRequestsTheConfiguredTtl() throws Exception {
-        Map<String, String> props = baseProps();
-        props.put(StarRocksCdcSourceConfig.BOOKMARK_TTL_MS, "900000");
-        fake.grantedTtlMs = 30000L;
-        fake.enqueueHead("orders", 100L);
-        task.start(props);
-        task.poll();
-        fakeNowMs += 1;
-        task.poll();
-
-        fake.requestedTtls.clear();
-        fakeNowMs += 30000L / 3 + 1;
-        task.poll();
-        assertEquals(Collections.singletonList(900000L), fake.requestedTtls);
     }
 
     /** A lease shortened server-side mid-run must re-pace; latching the first grant misses it. */

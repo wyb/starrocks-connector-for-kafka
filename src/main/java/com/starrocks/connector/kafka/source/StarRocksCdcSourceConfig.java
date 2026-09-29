@@ -33,8 +33,9 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * Configuration for the StarRocks CDC source connector and its tasks. Each key's user-facing
- * description lives once, in {@link #newConfigDef()}, which is what Connect surfaces.
+ * Validates configuration shared by the CDC connector and tasks.
+ * User-facing descriptions live in CONFIG_DEF; additional checks reject table assignments
+ * and snapshot policies that would lose or duplicate data.
  */
 public class StarRocksCdcSourceConfig extends AbstractConfig {
 
@@ -88,9 +89,8 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     /**
-     * Rejects a config without the connector name. Connect sets it for every connector and task, so
-     * one without it was not built by Connect; and two such connectors would share a holder and mix
-     * their positions on the FE.
+     * The connector name scopes its FE bookmark holder. Without it, separate connectors could
+     * share a holder and mix positions.
      */
     private void rejectMissingName() {
         if (connectorName() == null) {
@@ -105,8 +105,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     /**
-     * ConfigDef only checks that {@link #TABLE_NAMES} is present, so a value of separators and
-     * whitespace passes and names nothing -- a typo would read as a source with nothing to send.
+     * ConfigDef accepts a present but empty table list after separators are trimmed.
      */
     private void rejectEmptyTableList() {
         if (tableNames().isEmpty()) {
@@ -116,9 +115,8 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     /**
-     * Rejects a table named twice: two TableStates under one holder get the same window from the
-     * idempotent {@code bookmark_create}, so every row ships twice, and split across tasks one
-     * task's {@code commit()} releases the bookmark the other still uses as its base.
+     * Duplicate assignments read the same idempotent bookmark twice; across tasks, one task
+     * could also release the other's base.
      */
     private void rejectDuplicateTableNames() {
         Set<String> seen = new HashSet<>();
@@ -131,9 +129,8 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     }
 
     /**
-     * Rejects {@code no_snapshot} together with {@code resnapshot}: the resnapshot path discards the
-     * position and pins a fresh bookmark, so with no snapshot to rebuild from every change between
-     * the unusable base and the new bookmark is dropped while the table looks healed.
+     * A resnapshot policy without snapshots would advance to a new bookmark and silently skip
+     * changes after an unusable base.
      */
     private void rejectNoSnapshotWithResnapshot() {
         if (SNAPSHOT_MODE_NO_SNAPSHOT.equals(snapshotMode())

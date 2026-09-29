@@ -24,8 +24,9 @@ import java.sql.SQLException;
 import java.util.Locale;
 
 /**
- * A CHANGES read failed because the version range is no longer replayable, as opposed to
- * transiently. Callers use this to decide whether to fall back to a fresh snapshot.
+ * Marks a CHANGES window that StarRocks can no longer replay.
+ * The task distinguishes this from transient SQL failures when applying its fail or resnapshot
+ * policy.
  */
 public class NonTrackableException extends Exception {
 

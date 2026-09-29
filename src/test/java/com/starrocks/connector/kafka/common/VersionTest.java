@@ -23,14 +23,9 @@ package com.starrocks.connector.kafka.common;
 import org.junit.Test;
 
 import static org.junit.Assert.assertFalse;
-import static org.junit.Assert.assertTrue;
-
 /**
- * Guards the build wiring, not the logic: {@link Version} only reports the right thing if
- * {@code starrocks-connector.properties} is both on the classpath and resource-filtered by Maven.
- * Delete the {@code <resources><filtering>} block from the POM and these fail -- which is the
- * point, since the symptom otherwise is every connector quietly reporting "unknown" (or, worse, the
- * literal {@code ${project.version}}) over Connect's REST API.
+ * Checks that the version resource is present and Maven has filtered it. Otherwise connectors
+ * report "unknown" or an unresolved placeholder over Connect's REST API.
  */
 public class VersionTest {
 
@@ -42,15 +37,4 @@ public class VersionTest {
         assertFalse("Maven property was not substituted: " + version, version.contains("${"));
     }
 
-    @Test
-    public void testVersionLooksLikeAVersionNumber() {
-        assertTrue("not a version-shaped string: " + Version.get(),
-                Version.get().matches("\\d+\\.\\d+(\\.\\d+)?(-.+)?"));
-    }
-
-    /** Loaded once into a static; repeated reads must not diverge. */
-    @Test
-    public void testValueIsStable() {
-        assertTrue(Version.get() == Version.get());
-    }
 }

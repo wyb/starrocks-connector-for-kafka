@@ -24,9 +24,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * Connect's offset for one captured table: the partition names {@code (db, table)}, the offset
- * carries the bookmark to resume from and whether the snapshot finished. Keying it per table is
- * what lets a rebalance move a table to another task and still resume it where it left off.
+ * Represents one table's Connect offset: a bookmark and whether its snapshot finished.
+ * The source partition contains database and table names. An unfinished snapshot is replayed
+ * from the beginning on restart.
  */
 public final class OffsetState {
     public static final String KEY_DB = "db";

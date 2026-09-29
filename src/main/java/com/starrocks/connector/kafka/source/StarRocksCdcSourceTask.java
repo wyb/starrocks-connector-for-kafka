@@ -46,20 +46,10 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicReference;
 
 /**
- * Poll loop and bookmark state machine -- the correctness core. Six invariants, all pinned by
- * {@code StarRocksCdcSourceTaskTest}:
- * <ol>
- *   <li>Releases are fenced by the durable offset, read back from the offset store, never by acks.
- *       See {@link #commit()} and {@link #durableBookmarks}.</li>
- *   <li>Snapshot rows carry {@code snapshot_done=false}, change records {@code true}, so a crash
- *       mid-snapshot redoes it whole rather than resuming a half-delivered one.</li>
- *   <li>Idle dedup: {@code bookmarkCreate} returning the committed bookmark opens no window; an
- *       empty window's head becomes the committed bookmark.</li>
- *   <li>Only a window's last record carries its head. See {@link #demoteAllButLast}.</li>
- *   <li>One table's failure never discards another's records. See {@link #poll()}.</li>
- *   <li>A tombstone follows a real deletion only, never the delete half of an update.
- *       See {@link #appendWindow}.</li>
- * </ol>
+ * Polls snapshots and CHANGES windows for each assigned table.
+ * Snapshot rows carry an unfinished offset so a restart redoes the snapshot; only the last
+ * record in a change window advances its bookmark offset. Bookmark releases follow offsets
+ * confirmed durable by Connect.
  */
 public class StarRocksCdcSourceTask extends SourceTask {
 
@@ -203,10 +193,8 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Re-enters every reference this holder still has on the table, so a predecessor's leftovers
-     * are released by the fence instead of expiring by TTL, and so {@link #restoreOffset} can resume
-     * from the oldest of them under {@code no_snapshot}. Required when that mode has no durable
-     * position; otherwise a failed lookup only delays cleanup until the references expire.
+     * Adopts the holder's existing references for release and, under {@code no_snapshot}, restore.
+     * Listing them is required only when there is no durable position to restore from.
      */
     private void adoptHeldBookmarks(TableState t, boolean requiredForRestore) {
         List<Long> held;
@@ -231,22 +219,16 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Restores one table from its durable offset. Only {@code snapshot_done=true} is trusted;
-     * anything else leaves the table fresh so the next poll redoes the snapshot -- except under
-     * {@code no_snapshot}, where nothing is durable before the first change window: there the oldest
-     * bookmark the holder still references, adopted by {@link #adoptHeldBookmarks}, is the position
-     * an earlier start pinned, and resuming from it keeps every change since. With neither a
-     * durable offset nor a held reference, a fresh start is indistinguishable from an expired
-     * reference, so fail unless the operator explicitly configured the latest-position policy.
+     * Restores a completed snapshot or change offset. An unfinished snapshot restarts; under
+     * {@code no_snapshot}, the oldest held bookmark supplies the position if no durable offset
+     * exists. With neither, fail unless the operator allowed a possibly lossy latest start.
      */
     private void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
         if (state.snapshotDone) {
             t.committedBookmark = state.bookmarkId;
             t.snapshotDone = true;
-            // Not optional: without this the resumed bookmark is never released, leaking one per
-            // table per restart until its TTL. Safe, because commit() releases strictly below the
-            // durable offset, and at restore time this id is exactly that offset.
+            // Keep the restored position pinned until a newer offset becomes durable.
             retain(t, state.bookmarkId);
             LOG.info("Table {}.{} starts at bookmark {}, the durable offset", db, t.table, state.bookmarkId);
             return;
@@ -279,12 +261,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Reads one round over every table. A table that fails is skipped, not thrown from: the batch
-     * holds records whose tables have already advanced {@code committedBookmark} in memory, and
-     * Connect discards the return value of a poll that throws -- those records would never reach
-     * Kafka and never be re-read. The failure surfaces only once the batch is empty; two are fatal
-     * and thrown at once: a table failing for longer than {@code source.poll.retry.timeout.ms}, and
-     * a non-trackable window under {@code source.nontrackable.policy=fail}.
+     * Reads every table once. A failure in one table must not discard records already read from
+     * another: Connect drops an entire poll result when poll throws. Report retryable failures
+     * after returning any records; fatal failures still stop the task immediately.
      */
     @Override
     public List<SourceRecord> poll() throws InterruptedException {
@@ -306,8 +285,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 }
             } catch (NonTrackableException e) {
                 checkRunning();
-                // These records carry this window's head; committing them would advance the durable
-                // position past a window never read to the end.
                 discardFrom(out, emittedBefore);
                 closeSnapshot(t);
                 applyPolicy(t, e);
@@ -315,8 +292,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
                 if (stopping) {
                     throw new InterruptedException("CDC source task stopped while reading " + db + "." + t.table);
                 }
-                // Partial window: every record still carries head, so an ack would declare a window
-                // durable that was never read to the end.
                 discardFrom(out, emittedBefore);
                 closeSnapshot(t);
                 failAfterRetryTimeout(t, e);
@@ -533,7 +508,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         }
     }
 
-    /** Truncates {@code out} back to the size it had before the current table's window. */
+    /** Discards an incomplete window so its head offset cannot become durable. */
     private static void discardFrom(List<SourceRecord> out, int from) {
         if (out.size() > from) {
             out.subList(from, out.size()).clear();

@@ -24,28 +24,22 @@ import java.sql.SQLException;
 import java.util.List;
 
 /**
- * StarRocks-facing operations needed by the CDC source task and connector: bookmark lifecycle,
- * table metadata discovery, and streaming reads of a snapshot or a CHANGES range.
- *
- * <p>Implementations own their JDBC connection lifecycle; callers must {@link #close()} the
- * client when done with it.
+ * Defines bookmark, metadata, snapshot, and CHANGES operations used by the connector and task.
+ * Implementations own their JDBC connections; callers close the client when finished.
  */
 public interface CdcClient extends AutoCloseable {
 
     /**
-     * Pins the table's current version, or returns the id this holder already pinned -- create is
-     * idempotent per holder, and on an unchanged table it hands the same id back <em>without</em>
-     * refreshing its lease. Every caller depends on that: it is what makes an unchanged table look
-     * idle, why {@link #bookmarkRenew} has to exist, and why a probe must not share a holder.
+     * Pins the current version. An unchanged table returns this holder's existing id without
+     * extending its lease, so callers must renew it separately.
      */
     long bookmarkCreate(String db, String table, String holder, long ttlMs) throws SQLException;
 
     /**
-     * Refreshes the lease on a bookmark this holder already has -- the only call that moves it.
+     * Refreshes the lease on an existing bookmark.
      *
      * @return the granted TTL in ms ({@code -1} for no expiry), which a cluster-side ceiling may
-     *         have capped below what was asked for. Pace the next renewal against this, not the
-     *         request.
+     *         have capped below the requested value. Pace renewal against this grant.
      */
     long bookmarkRenew(String db, String table, long bookmarkId, String holder, long ttlMs) throws SQLException;
 
@@ -55,10 +49,10 @@ public interface CdcClient extends AutoCloseable {
      *  no longer exists. */
     List<Long> fetchHeldBookmarks(String db, String table, String holder) throws SQLException;
 
-    /** The table's columns in declaration order, key columns flagged; a table it does not list is an SQLException. */
+    /** Columns in declaration order, including key flags. */
     List<ColumnMeta> fetchColumns(String db, String table) throws SQLException;
 
-    /** The table's {@code tables_config} row; a table it does not list is an SQLException. */
+    /** The table's {@code tables_config} row. */
     TableConfig fetchTableConfig(String db, String table) throws SQLException;
 
     /** Opens a pinned snapshot cursor that can be consumed across several poll calls. The cursor
@@ -79,9 +73,7 @@ public interface CdcClient extends AutoCloseable {
     }
 
     /**
-     * Streams the changes in the half-open window {@code (base, head]} -- base exclusive, head
-     * inclusive, which is why the previous head becomes the next base and why the window opened
-     * after a snapshot at {@code b0} does not re-deliver {@code b0}.
+     * Streams the half-open window {@code (base, head]}; the previous head is the next base.
      *
      * @param cols as for {@link #streamSnapshot}.
      */

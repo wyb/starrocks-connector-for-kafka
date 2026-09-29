@@ -36,13 +36,9 @@ import java.util.Set;
 import java.util.StringJoiner;
 
 /**
- * A StarRocks column type with its nesting, as declared. Built by {@link ColumnTypeParser} from
- * {@code information_schema.columns.COLUMN_TYPE}; the value readers walk it to know what a nested
- * element is, and {@link #toConnectSchema} turns it into the record schema.
- *
- * <p>Kept separate from the Connect schema because the two disagree on purpose: a map key is
- * declared {@code int} but travels as STRING (JsonConverter renders a non-string-keyed map as an
- * array of pairs), and a reader still needs the declared type to parse the transport's value.
+ * Represents a StarRocks type, including nested array, map, and struct members.
+ * The same tree builds Connect schemas and converts nested values. Only the top-level column
+ * uses its declared nullability; nested members remain optional.
  */
 final class ColumnType {
 

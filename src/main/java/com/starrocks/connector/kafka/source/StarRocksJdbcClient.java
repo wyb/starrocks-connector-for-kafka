@@ -29,11 +29,9 @@ import java.util.List;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
- * {@link CdcClient} over JDBC. The query layer only: {@link FeConnection},
- * {@link ColumnMetaReader} and {@link ValueReader} sit underneath it.
- *
- * <p><b>Not thread-safe</b>, because {@link FeConnection} is not; drive one client from one thread.
- * Connection behaviour is covered by the integration smoke test, not by unit tests.
+ * Implements CdcClient with FeConnection, ColumnMetaReader, and ValueReader.
+ * The poll thread owns JDBC operations and cursors; only close() may be invoked concurrently
+ * by the runtime.
  */
 public class StarRocksJdbcClient implements CdcClient {
 

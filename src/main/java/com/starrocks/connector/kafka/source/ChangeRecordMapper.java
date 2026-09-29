@@ -32,14 +32,9 @@ import java.util.List;
 import java.util.Map;
 
 /**
- * Turns a raw row plus its column meta into a Debezium envelope {@link SourceRecord}. Pure: never
- * touches JDBC, and every schema is built once in the constructor.
- *
- * <p>The envelope comes from Debezium's own {@link Envelope}, which owns the field order and the
- * {@code op} codes. <b>Do not reassemble it by hand</b>: that order is part of the Avro schema
- * identity registries compare against. Only the row schema and the {@code source} block are ours.
- *
- * <p>{@code transaction} stays null; the CHANGES stream carries no transaction metadata.
+ * Maps raw CDC rows to Debezium SourceRecords without JDBC access.
+ * Debezium's Envelope preserves the outer field order expected by Avro schema registries. The
+ * row and source schemas are built once per table.
  */
 public final class ChangeRecordMapper {
 

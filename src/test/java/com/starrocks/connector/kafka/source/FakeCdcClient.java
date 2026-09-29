@@ -33,20 +33,9 @@ import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 
 /**
- * Scripted-and-recording {@link CdcClient} test double, shared by the connector and task tests.
- *
- * <p>Scripting:
- * <ul>
- *   <li>{@link #bookmarkCreate} consumes the table's {@link #enqueueHead} queue, then repeats the
- *       last id -- that repeat is what makes a table look idle. An unscripted table gets ids from a
- *       counter starting at 1.</li>
- *   <li>{@link #streamChanges} replays and clears {@link #enqueueChanges}, unless armed by
- *       {@link #failNextChangesWithNonTrackable} -- then it throws once and leaves them queued.</li>
- *   <li>{@link #changesFailureByTable} and {@link #snapshotFailureByTable} fail one named table
- *       once, leaving the others healthy.</li>
- *   <li>{@link #fetchColumns} falls back to a two-column table with no key column.</li>
- *   <li>{@link #fetchHeldBookmarks} answers {@link #setHeldBookmarks}, or nothing.</li>
- * </ul>
+ * Scripts responses and records calls for connector and task tests. Once queued heads are
+ * exhausted, bookmarkCreate repeats the last id to model an idle table. One-shot read failures
+ * leave the affected rows queued for retry; other tables remain available.
  */
 final class FakeCdcClient implements CdcClient {
 
@@ -65,21 +54,17 @@ final class FakeCdcClient implements CdcClient {
     private final Map<String, List<Long>> heldBookmarksByTable = new HashMap<>();
     private final Set<String> failNextChangesTables = new HashSet<>();
     private final Set<String> failNextChangesAfterEmittingTables = new HashSet<>();
-    /** When set, every bookmarkCreate fails with it -- i.e. the FE gate is closed. */
+    /** Set to simulate a disabled bookmark function. */
     SQLException bookmarkCreateFailure;
-    /** When set, every bookmarkRenew fails with it. */
     SQLException bookmarkRenewFailure;
-    /** When set, every bookmarkRelease fails with it, after being recorded. */
+    /** Releases are recorded before this failure is thrown. */
     SQLException bookmarkReleaseFailure;
-    /** When set, every fetchTableConfig fails with it -- a table tables_config does not list. */
     SQLException tableConfigFailure;
-    /** When set, every fetchHeldBookmarks fails with it -- a cluster without the reference table. */
     SQLException heldBookmarksFailure;
     /** Thrown once by streamChanges for that table, after any queued rows -- a partial window. */
     final Map<String, SQLException> changesFailureByTable = new HashMap<>();
     /** Thrown once by a snapshot cursor for that table, after any queued rows. */
     final Map<String, SQLException> snapshotFailureByTable = new HashMap<>();
-    /** Overrides what a non-trackable failure says, so a test can pick the cause. */
     String nonTrackableMessage;
     /** Renewals of these ids fail; others succeed -- a partial round. */
     final Set<Long> failRenewOfBookmarks = new HashSet<>();
@@ -92,11 +77,8 @@ final class FakeCdcClient implements CdcClient {
     final List<String> createdBookmarks = new ArrayList<>();
     final List<String> releasedBookmarks = new ArrayList<>();
     final List<String> renewedBookmarks = new ArrayList<>();
-    /** db.table:holder of every fetchHeldBookmarks call. */
     final List<String> heldBookmarkQueries = new ArrayList<>();
-    /** The ttl each renewal asked for, to catch a client that echoes the grant back. */
     final List<Long> requestedTtls = new ArrayList<>();
-    /** Holder ids, verbatim, as handed to bookmarkCreate / bookmarkRelease. */
     final List<String> createHolders = new ArrayList<>();
     final List<String> releaseHolders = new ArrayList<>();
     final List<String> streamedWindows = new ArrayList<>();
@@ -118,7 +100,6 @@ final class FakeCdcClient implements CdcClient {
         colsByTable.put(table, cols);
     }
 
-    /** What the holder still references on the table when the task starts. */
     void setHeldBookmarks(String table, Long... ids) {
         heldBookmarksByTable.put(table, Arrays.asList(ids));
     }

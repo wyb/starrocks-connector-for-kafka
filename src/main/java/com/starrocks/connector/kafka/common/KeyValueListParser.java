@@ -26,11 +26,9 @@ import java.util.HashMap;
 import java.util.Map;
 
 /**
- * The {@code key:value,key:value} config format, used by {@code starrocks.table2topic.map}.
- *
- * <p>Entries split on the first {@code ':'}, so values may contain one. Duplicate keys and empty
- * entries are rejected rather than skipped, and a malformed value always throws rather than
- * returning a sentinel a caller could read as "mapping disabled". Values are returned unvalidated.
+ * Parses comma-separated key:value table mappings.
+ * Entries split at the first colon, so values may contain colons. Empty entries and duplicate
+ * keys fail validation; callers validate the values themselves.
  */
 public final class KeyValueListParser {
 
