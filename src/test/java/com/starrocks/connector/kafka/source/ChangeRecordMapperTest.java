@@ -1,0 +1,357 @@
+/*
+ * Copyright 2021-present StarRocks, Inc. All rights reserved.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.starrocks.connector.kafka.source;
+
+import org.apache.kafka.connect.data.Decimal;
+import org.apache.kafka.connect.data.Field;
+import org.apache.kafka.connect.data.Schema;
+import org.apache.kafka.connect.data.Struct;
+import org.apache.kafka.connect.source.SourceRecord;
+import org.junit.Test;
+
+import java.math.BigDecimal;
+import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
+import java.util.List;
+
+import static org.junit.Assert.*;
+
+public class ChangeRecordMapperTest {
+
+    private ChangeRecordMapper mapper() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("k", "int", "int(11)", 0, false, true),
+                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
+        return new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols);
+    }
+
+    @Test
+    public void testInsertRowBecomesCreateEnvelope() {
+        SourceRecord r = mapper().toChangeRecord(new Object[]{1, 100L}, 0, 11955L, 11952L, 11955L);
+        Struct value = (Struct) r.value();
+        assertEquals("c", value.getString("op"));
+        assertNull(value.get("before"));
+        assertEquals(1, ((Struct) value.get("after")).getInt32("k").intValue());
+        Struct src = (Struct) value.get("source");
+        assertEquals("db1", src.getString("db"));
+        assertEquals("orders", src.getString("table"));
+        assertEquals(11955L, src.getInt64("row_version").longValue());
+        assertEquals(11952L, ((Struct) src.get("bookmark")).getInt64("base").longValue());
+        assertEquals(11955L, ((Struct) src.get("bookmark")).getInt64("head").longValue());
+        assertTrue(value.getInt64("ts_ms") > 0L);
+        assertEquals(1, ((Struct) r.key()).getInt32("k").intValue());
+        assertEquals("sr.db1.orders", r.topic());
+        assertEquals(Boolean.TRUE, r.sourceOffset().get("snapshot_done"));
+        assertEquals(11955L, r.sourceOffset().get("bookmark_id"));
+        assertEquals("db1", r.sourcePartition().get("db"));
+        assertEquals("orders", r.sourcePartition().get("table"));
+    }
+
+    @Test
+    public void testDeleteRowBecomesDeleteEnvelopeWithBeforeImage() {
+        SourceRecord r = mapper().toChangeRecord(new Object[]{2, 200L}, 1, 11960L, 11958L, 11960L);
+        Struct value = (Struct) r.value();
+        assertEquals("d", value.getString("op"));
+        assertEquals(2, ((Struct) value.get("before")).getInt32("k").intValue());
+        assertNull(value.get("after"));
+        // A change record only ever follows a finished snapshot, so its offset always says so.
+        assertEquals(Boolean.TRUE, r.sourceOffset().get("snapshot_done"));
+    }
+
+    @Test
+    public void testSnapshotRowBecomesReadEnvelope() {
+        SourceRecord r = mapper().toSnapshotRecord(new Object[]{3, null}, 7L);
+        Struct value = (Struct) r.value();
+        assertEquals("r", value.getString("op"));
+        Struct after = (Struct) value.get("after");
+        assertEquals(3, after.getInt32("k").intValue());
+        assertNull(after.get("v"));
+        assertEquals(7L, r.sourceOffset().get("bookmark_id"));
+        assertEquals(Boolean.FALSE, r.sourceOffset().get("snapshot_done"));
+        Struct src = (Struct) value.get("source");
+        // Not the bookmark id: row_version lives in the partition-version space while bookmark
+        // ids come from the FE global id generator and are far larger, so reusing one here would
+        // make every snapshot row outrank the changes that follow it.
+        assertEquals(0L, src.getInt64("row_version").longValue());
+        Struct bookmark = (Struct) src.get("bookmark");
+        assertEquals(7L, bookmark.getInt64("base").longValue());
+        assertEquals(7L, bookmark.getInt64("head").longValue());
+    }
+
+    /**
+     * Pins the defect directly: a snapshot row must never report a row_version that can outrank a
+     * later change record's. Change versions start at 1 and climb one publish at a time; bookmark
+     * ids come from the FE global id generator -- a real report had bookmarks 11952/11955 against
+     * partition version 3.
+     */
+    @Test
+    public void testSnapshotRowVersionCannotOutrankLaterChanges() {
+        ChangeRecordMapper m = mapper();
+        SourceRecord snapshot = m.toSnapshotRecord(new Object[]{1, 10L}, 11952L);
+        SourceRecord change = m.toChangeRecord(new Object[]{1, 20L}, 0, 4L, 11952L, 11955L);
+        long snapshotVersion = ((Struct) ((Struct) snapshot.value()).get("source")).getInt64("row_version");
+        long changeVersion = ((Struct) ((Struct) change.value()).get("source")).getInt64("row_version");
+        assertTrue("snapshot row_version " + snapshotVersion + " must not outrank change row_version "
+                + changeVersion, snapshotVersion < changeVersion);
+    }
+
+    /**
+     * The envelope is Debezium's, so its field order is Debezium's canonical order -- not the
+     * op-first order this connector once hand-rolled. Downstream Avro/Protobuf schema identity is
+     * computed from that order, so a reordering is a compatibility break, not a cosmetic change.
+     */
+    @Test
+    public void testEnvelopeFieldOrderMatchesDebezium() {
+        SourceRecord r = mapper().toChangeRecord(new Object[]{1, 100L}, 0, 11955L, 11952L, 11955L);
+        List<String> names = new ArrayList<>();
+        for (Field f : ((Struct) r.value()).schema().fields()) {
+            names.add(f.name());
+        }
+        assertEquals(Arrays.asList("before", "after", "source", "op", "ts_ms", "transaction"), names);
+        assertEquals("sr.db1.orders.Envelope", ((Struct) r.value()).schema().name());
+    }
+
+    /**
+     * StarRocks' CHANGES stream carries no transaction metadata, so the field Debezium's builder
+     * always appends stays present in the schema (consumers can rely on it) and null in the value.
+     */
+    @Test
+    public void testTransactionFieldPresentAndNull() {
+        ChangeRecordMapper m = mapper();
+        for (SourceRecord r : Arrays.asList(
+                m.toChangeRecord(new Object[]{1, 100L}, 0, 11955L, 11952L, 11955L),
+                m.toChangeRecord(new Object[]{2, 200L}, 1, 11960L, 11958L, 11960L),
+                m.toSnapshotRecord(new Object[]{3, 300L}, 7L))) {
+            Struct value = (Struct) r.value();
+            Field transaction = value.schema().field("transaction");
+            assertNotNull("envelope schema must carry a transaction field", transaction);
+            assertTrue("transaction must be optional so it can stay unset", transaction.schema().isOptional());
+            assertNull(value.get("transaction"));
+        }
+    }
+
+    /**
+     * With no key columns the mapper can only emit a null Kafka key: round-robin partitioning, no
+     * per-key ordering, no log compaction. Every capturable model has key columns, so this is
+     * reachable only for a table whose key columns could not be read -- a view or an external
+     * table, which preflight refuses before a task ever sees it.
+     */
+    @Test
+    public void testTableWithoutKeyColumnsHasNullKey() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("k", "int", "int(11)", 0, false),
+                new ColumnMeta("v", "bigint", "bigint(20)", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "orders", "sr.db1.orders", cols);
+
+        SourceRecord r = mapper.toChangeRecord(new Object[]{1, 100L}, 0, 1L, 1L, 1L);
+        assertNull(r.key());
+        assertNull(r.keySchema());
+    }
+
+    @Test
+    public void testDecimalDateTimestampMapping() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("d", "decimal", "decimal(10, 2)", 2, true),
+                new ColumnMeta("dt", "date", "date", 0, true),
+                new ColumnMeta("ts", "datetime", "datetime", 0, true),
+                new ColumnMeta("j", null, null, 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "misc", "sr.db1.misc", cols);
+
+        SourceRecord r = mapper.toSnapshotRecord(
+                new Object[]{new BigDecimal("1.50"), "1970-01-01", "1970-01-01 00:00:00", "{}"}, 1L);
+
+        Struct value = (Struct) r.value();
+        Struct after = (Struct) value.get("after");
+        Schema rowSchema = after.schema();
+
+        Schema decimalSchema = rowSchema.field("d").schema();
+        assertEquals(Decimal.LOGICAL_NAME, decimalSchema.name());
+        assertEquals("2", decimalSchema.parameters().get(Decimal.SCALE_FIELD));
+        assertTrue(decimalSchema.isOptional());
+
+        Schema dateSchema = rowSchema.field("dt").schema();
+        assertEquals(Schema.Type.STRING, dateSchema.type());
+        assertEquals(ColumnType.DATE_LOGICAL_NAME, dateSchema.name());
+        assertTrue(dateSchema.isOptional());
+        assertEquals("1970-01-01", after.get("dt"));
+
+        Schema tsSchema = rowSchema.field("ts").schema();
+        assertEquals(Schema.Type.STRING, tsSchema.type());
+        assertEquals(ColumnType.DATETIME_LOGICAL_NAME, tsSchema.name());
+        assertTrue(tsSchema.isOptional());
+        assertEquals("1970-01-01 00:00:00", after.get("ts"));
+
+        Schema jSchema = rowSchema.field("j").schema();
+        assertEquals(Schema.Type.STRING, jSchema.type());
+        assertTrue(jSchema.isOptional());
+    }
+
+    /**
+     * Temporals arrive already as text (ValueReader canonicalizes them) and go through untouched,
+     * including into a DATE key column, whose key schema is STRING too.
+     */
+    @Test
+    public void testDateTextPassesThroughIncludingKeyColumns() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("d", "date", "date", 0, false, true),
+                new ColumnMeta("ts", "datetime", "datetime", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "t", "sr.db1.t", cols);
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{"2026-08-05", "2026-08-05 12:34:56.123456"}, 1L);
+
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        assertEquals("2026-08-05 12:34:56.123456", after.get("ts"));
+        assertEquals(Schema.Type.STRING, r.keySchema().field("d").schema().type());
+        assertEquals("2026-08-05", ((Struct) r.key()).get("d"));
+    }
+
+    /**
+     * LARGEINT rides the Decimal path at scale 0. INT64 would truncate it and STRING would ship a
+     * number as text; the value below is 2^127-1, which only a BigDecimal survives.
+     */
+    @Test
+    public void testLargeIntKeepsFullPrecision() {
+        BigDecimal max = new BigDecimal("170141183460469231731687303715884105727");
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta(
+                "big", "bigint unsigned", "bigint(20) unsigned", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "big", "sr.db1.big", cols);
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{max}, 1L);
+
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema schema = after.schema().field("big").schema();
+        assertEquals(Decimal.LOGICAL_NAME, schema.name());
+        assertEquals("0", schema.parameters().get(Decimal.SCALE_FIELD));
+        assertEquals(max, after.get("big"));
+    }
+
+    /**
+     * BINARY/VARBINARY must reach Kafka as BYTES, carrying the exact bytes read.
+     *
+     * <p>These used to fall through to the STRING default on both sides at once -- schema and read
+     * -- so nothing ever threw and the corruption was invisible: bytes went through
+     * {@code getString()}, got decoded with the connection charset, and anything that was not valid
+     * text came out as U+FFFD. The round trip below is what makes that regression loud.
+     */
+    @Test
+    public void testBinaryColumnsCarryRawBytesNotText() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("b", "binary", "binary(4)", 0, false),
+                new ColumnMeta("vb", "varbinary", "varbinary(16)", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "blobs", "sr.db1.blobs", cols);
+
+        // 0xFF 0xFE is not valid UTF-8; decoding it as text is exactly the lossy path being guarded.
+        byte[] fixed = new byte[]{(byte) 0xFF, (byte) 0xFE, 0x00, 0x41};
+        byte[] variable = new byte[]{(byte) 0xC3, 0x28};
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{fixed, variable}, 1L);
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema rowSchema = after.schema();
+
+        assertEquals(Schema.Type.BYTES, rowSchema.field("b").schema().type());
+        assertFalse(rowSchema.field("b").schema().isOptional());
+        assertEquals(Schema.Type.BYTES, rowSchema.field("vb").schema().type());
+        assertTrue(rowSchema.field("vb").schema().isOptional());
+
+        assertArrayEquals(fixed, (byte[]) after.get("b"));
+        assertArrayEquals(variable, (byte[]) after.get("vb"));
+    }
+
+    /**
+     * An ARRAY, MAP or STRUCT whose COLUMN_TYPE parses gets its real nested schema and its value
+     * is assembled from the reader's neutral form. JSON stays text with Debezium's logical name --
+     * Connect has no JSON type -- and a complex column whose COLUMN_TYPE this connector cannot
+     * read ("struct<x int>" lacks the backticks FE always prints) falls back to text with a
+     * StarRocks-specific name, never a wrong schema.
+     */
+    @Test
+    public void testParsedComplexColumnsAreNativeAndUnparsedOnesStayText() {
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("j", "json", "json", 0, true),
+                new ColumnMeta("a", "array", "array<int(11)>", 0, true),
+                new ColumnMeta("m", "map", "map<varchar(10),int(11)>", 0, true),
+                new ColumnMeta("st", "struct", "struct<`x` int(11), `d` date>", 0, false),
+                new ColumnMeta("s", "struct", "struct<x int>", 0, false),
+                new ColumnMeta("v", "varchar", "varchar(20)", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx", cols);
+        java.util.Map<String, Object> m = new java.util.LinkedHashMap<>();
+        m.put("mk", 11);
+        java.util.Map<String, Object> st = new java.util.LinkedHashMap<>();
+        st.put("x", 7);
+        st.put("d", "2026-08-05");
+
+        SourceRecord r = mapper.toSnapshotRecord(
+                new Object[]{"{\"k\":1}", Arrays.asList(1, 2), m, st, "{\"x\":7}", "plain"}, 1L);
+        Struct after = (Struct) ((Struct) r.value()).get("after");
+        Schema rowSchema = after.schema();
+
+        assertEquals("io.debezium.data.Json", rowSchema.field("j").schema().name());
+        assertEquals(Schema.Type.ARRAY, rowSchema.field("a").schema().type());
+        assertEquals(Schema.Type.INT32, rowSchema.field("a").schema().valueSchema().type());
+        assertEquals(Arrays.asList(1, 2), after.get("a"));
+        assertEquals(Schema.Type.MAP, rowSchema.field("m").schema().type());
+        assertEquals(m, after.get("m"));
+        assertEquals(Schema.Type.STRUCT, rowSchema.field("st").schema().type());
+        assertEquals("sr.db1.cx.st", rowSchema.field("st").schema().name());
+        assertFalse(rowSchema.field("st").schema().isOptional());
+        Struct stValue = (Struct) after.get("st");
+        assertEquals(7, stValue.get("x"));
+        assertEquals("2026-08-05", stValue.get("d"));
+        assertEquals(ColumnType.DATE_LOGICAL_NAME, stValue.schema().field("d").schema().name());
+
+        // The fallback: still STRING, still named, nullability still from the column.
+        assertEquals("com.starrocks.data.Struct", rowSchema.field("s").schema().name());
+        assertEquals(Schema.Type.STRING, rowSchema.field("s").schema().type());
+        assertEquals("{\"x\":7}", after.get("s"));
+        assertFalse(rowSchema.field("s").schema().isOptional());
+        // A plain string must stay unnamed -- naming everything would make the marker meaningless.
+        assertNull(rowSchema.field("v").schema().name());
+        assertTrue(rowSchema.field("a").schema().isOptional());
+    }
+
+    /** Columns described without the server's view (no srDataType) must still work, unnamed. */
+    @Test
+    public void testColumnsWithoutStarRocksTypeFallBackToPlainString() {
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", null, null, 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx", cols);
+
+        SourceRecord r = mapper.toSnapshotRecord(new Object[]{"x"}, 1L);
+        Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();
+        assertEquals(Schema.Type.STRING, rowSchema.field("t").schema().type());
+        assertNull(rowSchema.field("t").schema().name());
+    }
+
+    @Test
+    public void testTombstoneSharesKeyAndOffset() {
+        ChangeRecordMapper m = mapper();
+        SourceRecord deleteRecord = m.toChangeRecord(new Object[]{2, 200L}, 1, 11960L, 11958L, 11960L);
+        SourceRecord tombstone = m.tombstoneFor(deleteRecord);
+
+        assertNull(tombstone.value());
+        assertNull(tombstone.valueSchema());
+        assertEquals(deleteRecord.key(), tombstone.key());
+        assertEquals(deleteRecord.keySchema(), tombstone.keySchema());
+        assertEquals(deleteRecord.topic(), tombstone.topic());
+        assertEquals(deleteRecord.sourcePartition(), tombstone.sourcePartition());
+        assertEquals(deleteRecord.sourceOffset(), tombstone.sourceOffset());
+    }
+}
