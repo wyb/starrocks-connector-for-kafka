@@ -1,0 +1,405 @@
+/*
+ * Copyright 2021-present StarRocks, Inc. All rights reserved.
+ *
+ * Licensed to the Apache Software Foundation (ASF) under one
+ * or more contributor license agreements.  See the NOTICE file
+ * distributed with this work for additional information
+ * regarding copyright ownership.  The ASF licenses this file
+ * to you under the Apache License, Version 2.0 (the
+ * "License"); you may not use this file except in compliance
+ * with the License.  You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+package com.starrocks.connector.kafka.source;
+
+import com.starrocks.connector.kafka.common.KeyValueListParser;
+
+import org.apache.kafka.common.config.AbstractConfig;
+import org.apache.kafka.common.config.ConfigDef;
+import org.apache.kafka.common.config.ConfigException;
+
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * Validates configuration shared by the CDC connector and tasks.
+ * User-facing descriptions live in CONFIG_DEF; additional checks reject table assignments
+ * and snapshot policies that would lose or duplicate data.
+ */
+public class StarRocksCdcSourceConfig extends AbstractConfig {
+
+    public static final String JDBC_URL = "starrocks.jdbc.url";
+    public static final String DATABASE_NAME = "starrocks.database.name";
+    public static final String USERNAME = "starrocks.username";
+    public static final String PASSWORD = "starrocks.password";
+    public static final String TABLE_NAMES = "starrocks.table.names";
+    public static final String TABLE2TOPIC_MAP = "starrocks.table2topic.map";
+    public static final String TOPIC_PREFIX = "source.topic.prefix";
+    public static final String SNAPSHOT_MODE = "source.snapshot.mode";
+    /** Take a full snapshot before streaming changes. */
+    public static final String SNAPSHOT_MODE_INITIAL = "initial";
+    /** Stream changes without taking an initial snapshot. */
+    public static final String SNAPSHOT_MODE_NO_SNAPSHOT = "no_snapshot";
+    public static final String NO_SNAPSHOT_MISSING_POSITION_POLICY = "source.no.snapshot.missing.position.policy";
+    public static final String MISSING_POSITION_FAIL = "fail";
+    public static final String MISSING_POSITION_LATEST = "latest";
+    public static final String POLL_INTERVAL_MS = "source.poll.interval.ms";
+    public static final String SNAPSHOT_BATCH_SIZE = "source.snapshot.batch.size";
+    public static final String BOOKMARK_TTL_MS = "source.bookmark.ttl.ms";
+    public static final String NONTRACKABLE_POLICY = "source.nontrackable.policy";
+    /** Stop the task and wait for an operator. */
+    public static final String NONTRACKABLE_POLICY_FAIL = "fail";
+    /** Discard the table's position and rebuild it from a fresh snapshot. */
+    public static final String NONTRACKABLE_POLICY_RESNAPSHOT = "resnapshot";
+    public static final String TOMBSTONES_ON_DELETE = "source.tombstones.on.delete";
+    public static final String MAX_RETRIES = "source.max.retries";
+    public static final String POLL_RETRY_TIMEOUT_MS = "source.poll.retry.timeout.ms";
+    public static final String CONNECT_TIMEOUT_MS = "source.connect.timeout.ms";
+    public static final String READ_TIMINGS_ENABLED = "source.read.timings.enabled";
+
+    // Internal task-sharding key used only to pass the assigned tables from the Connector to a Task;
+    // it is not part of CONFIG_DEF and must never be surfaced to users.
+    public static final String TASK_TABLES = "task.tables";
+
+    /** The connector name, which Connect puts into every connector and task config; the bookmark holder
+     *  is derived from it. */
+    public static final String CONNECTOR_NAME = "name";
+
+    public static final ConfigDef CONFIG_DEF = newConfigDef();
+
+    private final Map<String, String> table2Topic;
+
+    public StarRocksCdcSourceConfig(Map<String, String> props) {
+        super(CONFIG_DEF, props);
+        this.table2Topic = parseTable2Topic(getString(TABLE2TOPIC_MAP));
+        rejectMissingName();
+        rejectEmptyTableList();
+        rejectDuplicateTableNames();
+        rejectNoSnapshotWithResnapshot();
+    }
+
+    /**
+     * The connector name scopes its FE bookmark holder. Without it, separate connectors could
+     * share a holder and mix positions.
+     */
+    private void rejectMissingName() {
+        if (connectorName() == null) {
+            throw new ConfigException(CONNECTOR_NAME, null,
+                    "is missing; Connect sets it for every connector and task, and the bookmark holder is derived from it.");
+        }
+    }
+
+    private String connectorName() {
+        String name = originalsStrings().get(CONNECTOR_NAME);
+        return name == null || name.trim().isEmpty() ? null : name.trim();
+    }
+
+    /**
+     * ConfigDef accepts a present but empty table list after separators are trimmed.
+     */
+    private void rejectEmptyTableList() {
+        if (tableNames().isEmpty()) {
+            throw new ConfigException(TABLE_NAMES, getString(TABLE_NAMES),
+                    "names no table; expected a comma-separated list of at least one table name.");
+        }
+    }
+
+    /**
+     * Duplicate assignments read the same idempotent bookmark twice; across tasks, one task
+     * could also release the other's base.
+     */
+    private void rejectDuplicateTableNames() {
+        Set<String> seen = new HashSet<>();
+        for (String name : tableNames()) {
+            if (!seen.add(name)) {
+                throw new ConfigException(TABLE_NAMES, getString(TABLE_NAMES),
+                        "names table '" + name + "' more than once; list each table exactly once.");
+            }
+        }
+    }
+
+    /**
+     * A resnapshot policy without snapshots would advance to a new bookmark and silently skip
+     * changes after an unusable base.
+     */
+    private void rejectNoSnapshotWithResnapshot() {
+        if (SNAPSHOT_MODE_NO_SNAPSHOT.equals(snapshotMode())
+                && NONTRACKABLE_POLICY_RESNAPSHOT.equals(nonTrackablePolicy())) {
+            throw new ConfigException(
+                    NONTRACKABLE_POLICY + "=" + NONTRACKABLE_POLICY_RESNAPSHOT + " cannot be combined with "
+                            + SNAPSHOT_MODE + "=" + SNAPSHOT_MODE_NO_SNAPSHOT + ": "
+                            + "resnapshot rebuilds a table's position from a fresh snapshot, so with snapshots "
+                            + "disabled it would silently drop every change between the unusable base bookmark and "
+                            + "the new one. Use " + SNAPSHOT_MODE + "=" + SNAPSHOT_MODE_INITIAL + ", or "
+                            + NONTRACKABLE_POLICY + "=" + NONTRACKABLE_POLICY_FAIL + ".");
+        }
+    }
+
+    public static ConfigDef newConfigDef() {
+        return new ConfigDef()
+                .define(
+                        JDBC_URL,
+                        ConfigDef.Type.STRING,
+                        ConfigDef.NO_DEFAULT_VALUE,
+                        ConfigDef.Importance.HIGH,
+                        "JDBC URL of the StarRocks FE endpoint(s); the scheme selects the transport, jdbc:mysql:// or "
+                                + "jdbc:arrow-flight-sql://. Comma-separate several FE hosts so bookmark calls can rotate "
+                                + "to the leader."
+                ).define(
+                        DATABASE_NAME,
+                        ConfigDef.Type.STRING,
+                        ConfigDef.NO_DEFAULT_VALUE,
+                        ConfigDef.Importance.HIGH,
+                        "The name of the source StarRocks database."
+                ).define(
+                        USERNAME,
+                        ConfigDef.Type.STRING,
+                        ConfigDef.NO_DEFAULT_VALUE,
+                        ConfigDef.Importance.HIGH,
+                        "The username used to connect to StarRocks."
+                ).define(
+                        PASSWORD,
+                        ConfigDef.Type.PASSWORD,
+                        ConfigDef.NO_DEFAULT_VALUE,
+                        ConfigDef.Importance.HIGH,
+                        "The password used to connect to StarRocks."
+                ).define(
+                        TABLE_NAMES,
+                        ConfigDef.Type.STRING,
+                        ConfigDef.NO_DEFAULT_VALUE,
+                        ConfigDef.Importance.HIGH,
+                        "Comma-separated list of StarRocks table names to capture changes from."
+                ).define(
+                        TABLE2TOPIC_MAP,
+                        ConfigDef.Type.STRING,
+                        "",
+                        ConfigDef.Importance.LOW,
+                        "Optional mapping from table name to Kafka topic name, formatted as table:topic,table:topic."
+                ).define(
+                        TOPIC_PREFIX,
+                        ConfigDef.Type.STRING,
+                        "sr",
+                        ConfigDef.Importance.MEDIUM,
+                        "The prefix used to derive a topic name for tables without an explicit topic mapping."
+                ).define(
+                        SNAPSHOT_MODE,
+                        ConfigDef.Type.STRING,
+                        SNAPSHOT_MODE_INITIAL,
+                        ConfigDef.ValidString.in(SNAPSHOT_MODE_INITIAL, SNAPSHOT_MODE_NO_SNAPSHOT),
+                        ConfigDef.Importance.MEDIUM,
+                        "Controls whether an initial snapshot of the captured tables is taken before streaming changes."
+                ).define(
+                        NO_SNAPSHOT_MISSING_POSITION_POLICY,
+                        ConfigDef.Type.STRING,
+                        MISSING_POSITION_FAIL,
+                        ConfigDef.ValidString.in(MISSING_POSITION_FAIL, MISSING_POSITION_LATEST),
+                        ConfigDef.Importance.MEDIUM,
+                        "With no_snapshot and neither a durable offset nor a held bookmark, fail by default; "
+                                + "latest creates a bookmark at the current version and may skip changes after "
+                                + "an earlier bookmark expired."
+                ).define(
+                        POLL_INTERVAL_MS,
+                        ConfigDef.Type.LONG,
+                        5000L,
+                        // Rejected rather than clamped: 0 turns the poll loop into an unthrottled
+                        // stream of leader-only meta functions, and a negative reaches Thread.sleep,
+                        // whose IllegalArgumentException escapes poll()'s SQLException catch and
+                        // fails the task with a message naming neither the key nor the value.
+                        ConfigDef.Range.atLeast(1L),
+                        ConfigDef.Importance.MEDIUM,
+                        "The interval, in milliseconds, between successive polls for changes."
+                ).define(
+                        SNAPSHOT_BATCH_SIZE,
+                        ConfigDef.Type.INT,
+                        4096,
+                        ConfigDef.Range.atLeast(1),
+                        ConfigDef.Importance.MEDIUM,
+                        "Maximum number of snapshot records returned per table in one poll. A snapshot cursor "
+                                + "remains open between polls until the table has been fully read."
+                ).define(
+                        BOOKMARK_TTL_MS,
+                        ConfigDef.Type.LONG,
+                        604800000L,
+                        ConfigDef.Importance.MEDIUM,
+                        "The lease, in milliseconds, requested for the bookmark references this task holds. Renewed "
+                                + "while the task polls, so it only bounds how long a stopped connector keeps pinning "
+                                + "versions; the cluster's bookmark_reference_max_ttl_ms caps it."
+                ).define(
+                        NONTRACKABLE_POLICY,
+                        ConfigDef.Type.STRING,
+                        NONTRACKABLE_POLICY_FAIL,
+                        ConfigDef.ValidString.in(NONTRACKABLE_POLICY_FAIL, NONTRACKABLE_POLICY_RESNAPSHOT),
+                        ConfigDef.Importance.MEDIUM,
+                        "The action to take when a captured table becomes non-trackable."
+                ).define(
+                        TOMBSTONES_ON_DELETE,
+                        ConfigDef.Type.BOOLEAN,
+                        false,
+                        ConfigDef.Importance.LOW,
+                        "Whether to emit an additional tombstone record (null value) following a delete record."
+                ).define(
+                        MAX_RETRIES,
+                        ConfigDef.Type.INT,
+                        3,
+                        ConfigDef.Importance.LOW,
+                        "Attempts per FE URL for a leader-only bookmark call before giving up."
+                ).define(
+                        POLL_RETRY_TIMEOUT_MS,
+                        ConfigDef.Type.LONG,
+                        600000L,
+                        ConfigDef.Range.atLeast(-1L),
+                        ConfigDef.Importance.LOW,
+                        "How long, in milliseconds, a table's reads may keep failing across polls before the task "
+                                + "fails instead of retrying. -1 retries forever; 0 fails on the first failed poll."
+                ).define(
+                        CONNECT_TIMEOUT_MS,
+                        ConfigDef.Type.INT,
+                        1000,
+                        ConfigDef.Importance.LOW,
+                        "The period of time, in milliseconds, after which a connection attempt to StarRocks times out."
+                ).define(
+                        READ_TIMINGS_ENABLED,
+                        ConfigDef.Type.BOOLEAN,
+                        false,
+                        ConfigDef.Importance.LOW,
+                        "Collect JDBC query, next, row decode, and task record mapping timings for this connector "
+                                + "and log DEBUG summaries. Per-row timing adds overhead."
+                );
+    }
+
+    private static Map<String, String> parseTable2Topic(String raw) {
+        return KeyValueListParser.parse(TABLE2TOPIC_MAP, raw);
+    }
+
+    public List<String> tableNames() {
+        return splitNames(getString(TABLE_NAMES));
+    }
+
+    /**
+     * The tables the connector assigned to this task through {@link #TASK_TABLES}. The connector
+     * never writes an empty, duplicated or unlisted assignment, so any of them is a hand-written
+     * config; a duplicate would ship every row twice while one copy's fence releases the other's base.
+     */
+    public List<String> taskTables() {
+        String raw = originalsStrings().get(TASK_TABLES);
+        List<String> assigned = splitNames(raw);
+        if (assigned.isEmpty()) {
+            throw new ConfigException(TASK_TABLES, raw, "names no table; the connector sets it for every task it creates.");
+        }
+        List<String> captured = tableNames();
+        Set<String> seen = new HashSet<>();
+        for (String table : assigned) {
+            if (!captured.contains(table)) {
+                throw new ConfigException(TASK_TABLES, table, "is not listed in " + TABLE_NAMES + "=" + captured + ".");
+            }
+            if (!seen.add(table)) {
+                throw new ConfigException(TASK_TABLES, table, "is named more than once; one task would capture it twice.");
+            }
+        }
+        return assigned;
+    }
+
+    /** Comma-separated names, trimmed, empty entries dropped; null names nothing. The task reads
+     *  {@link #TASK_TABLES} with it. */
+    public static List<String> splitNames(String raw) {
+        List<String> result = new ArrayList<>();
+        if (raw == null) {
+            return result;
+        }
+        for (String part : raw.split(",")) {
+            String trimmed = part.trim();
+            if (!trimmed.isEmpty()) {
+                result.add(trimmed);
+            }
+        }
+        return result;
+    }
+
+    public String topicFor(String table) {
+        String mapped = table2Topic.get(table);
+        if (mapped != null) {
+            return mapped;
+        }
+        return topicPrefix() + "." + databaseName() + "." + table;
+    }
+
+    /** The bookmark holder of this connector's tasks: {@code kc:} and the connector name. */
+    public String holderId() {
+        return "kc:" + connectorName();
+    }
+
+    public String jdbcUrl() {
+        return getString(JDBC_URL);
+    }
+
+    public String databaseName() {
+        return getString(DATABASE_NAME);
+    }
+
+    public String username() {
+        return getString(USERNAME);
+    }
+
+    public String password() {
+        return getPassword(PASSWORD).value();
+    }
+
+    public String topicPrefix() {
+        return getString(TOPIC_PREFIX);
+    }
+
+    public String snapshotMode() {
+        return getString(SNAPSHOT_MODE);
+    }
+
+    public String noSnapshotMissingPositionPolicy() {
+        return getString(NO_SNAPSHOT_MISSING_POSITION_POLICY);
+    }
+
+    public long pollIntervalMs() {
+        return getLong(POLL_INTERVAL_MS);
+    }
+
+    public int snapshotBatchSize() {
+        return getInt(SNAPSHOT_BATCH_SIZE);
+    }
+
+    public long bookmarkTtlMs() {
+        return getLong(BOOKMARK_TTL_MS);
+    }
+
+    public String nonTrackablePolicy() {
+        return getString(NONTRACKABLE_POLICY);
+    }
+
+    public boolean tombstonesOnDelete() {
+        return getBoolean(TOMBSTONES_ON_DELETE);
+    }
+
+    public int maxRetries() {
+        return getInt(MAX_RETRIES);
+    }
+
+    public long pollRetryTimeoutMs() {
+        return getLong(POLL_RETRY_TIMEOUT_MS);
+    }
+
+    public int connectTimeoutMs() {
+        return getInt(CONNECT_TIMEOUT_MS);
+    }
+
+    public boolean readTimingsEnabled() {
+        return getBoolean(READ_TIMINGS_ENABLED);
+    }
+}

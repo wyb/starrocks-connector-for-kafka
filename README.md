@@ -6,6 +6,7 @@ For the user manual of the released version of the Kafka connector, please visit
 
 
 * [Load data using Kafka connector](https://docs.starrocks.io/docs/loading/Kafka-connector-starrocks/)
+* [Stream StarRocks change data (CDC) into Kafka using the CDC source connector](doc/StarRocks-CDC-Source-Connector-HowTo.md) — the reverse direction of the sink connector above.
 
 ## How to build
 Executing the `mvn package` command will generate the JAR file for the connector along with the JAR files that the connector depends on. The path is located at `target/starrocks-connector-for-kafka-1.0-SNAPSHOT-package/share/java`.
