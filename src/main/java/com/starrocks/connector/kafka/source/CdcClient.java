@@ -25,7 +25,7 @@ import java.util.List;
 
 /**
  * Defines bookmark, metadata, snapshot, and CHANGES operations used by the connector and task.
- * Implementations own their JDBC connections; callers close the client when finished.
+ * Implementations own their read connections; callers close the client when finished.
  */
 public interface CdcClient extends AutoCloseable {
 

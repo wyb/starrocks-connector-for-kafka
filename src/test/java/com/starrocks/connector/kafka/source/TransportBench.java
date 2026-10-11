@@ -45,14 +45,14 @@ import java.util.Map;
 import java.util.concurrent.Callable;
 
 /**
- * Snapshot, CHANGES and bookmark_create latency over both transports: same tables, same bookmark,
- * same JVM, transports alternating round by round. Runs only when both URLs are given, via
- * {@code mvn test -Dtest=TransportBench -Dbench.mysql.url=... -Dbench.arrow.url=...}.
+ * Snapshot and CHANGES reads over selected transports: same tables, same bookmark, same JVM,
+ * transports alternating round by round. Every transport materializes CDC row values.
  *
  * <p>Properties: {@code bench.db}, {@code bench.tables} (csv), {@code bench.user} (root),
- * {@code bench.password}, {@code bench.rounds} (5, first dropped), {@code bench.meta.iterations} (20),
- * {@code bench.mutation.sql} (run once per table with {@code {db}}/{@code {table}} substituted; both
- * transports then read the same CHANGES window), {@code bench.read.timings} (false; next/decode only).
+ * {@code bench.password}, {@code bench.transports} (mysql,arrow-flight by default),
+ * {@code bench.adbc.uri}, {@code bench.rounds} (5, first dropped), {@code bench.meta.iterations} (20),
+ * {@code bench.mutation.sql} (run once per table with {@code {db}}/{@code {table}} substituted; all
+ * transports then read the same CHANGES window), {@code bench.read.timings} (false; JDBC next/decode only).
  * Output also goes to {@code target/transport-bench.txt}.
  */
 public class TransportBench {
@@ -63,8 +63,11 @@ public class TransportBench {
     public void run() throws Exception {
         String mysqlUrl = System.getProperty("bench.mysql.url");
         String arrowUrl = System.getProperty("bench.arrow.url");
-        Assume.assumeTrue("set -Dbench.mysql.url and -Dbench.arrow.url to run the transport bench",
-                mysqlUrl != null && arrowUrl != null);
+        List<String> selected = split(System.getProperty("bench.transports", "mysql,arrow-flight"));
+        Assume.assumeTrue("set -Dbench.mysql.url to run the transport bench", mysqlUrl != null);
+        if (selected.isEmpty()) {
+            throw new IllegalArgumentException("bench.transports must name at least one transport");
+        }
         String db = required("bench.db");
         List<String> tables = split(required("bench.tables"));
         String user = System.getProperty("bench.user", "root");
@@ -76,50 +79,74 @@ public class TransportBench {
         String holder = "bench:" + ManagementFactory.getRuntimeMXBean().getName();
 
         StarRocksCdcSourceConfig mysqlCfg = config(mysqlUrl, db, tables, user, password);
-        List<Transport> transports = Arrays.asList(
-                new Transport("mysql", new StarRocksJdbcClient(mysqlCfg)),
-                new Transport("arrow", new StarRocksJdbcClient(config(arrowUrl, db, tables, user, password))));
+        StarRocksJdbcClient mysql = new StarRocksJdbcClient(mysqlCfg);
+        List<Transport> transports = new ArrayList<>();
         Report report = new Report(phases);
-        report.header("mysql=" + mysqlUrl + "  arrow=" + arrowUrl + "  db=" + db + "  tables=" + tables
+        report.header("mysql=" + mysqlUrl + "  arrow=" + arrowUrl + "  adbc="
+                + System.getProperty("bench.adbc.uri") + "  transports=" + selected + "  db=" + db + "  tables=" + tables
                 + "  rounds=" + rounds + " (first dropped)  jvm=" + System.getProperty("java.version")
                 + "  tz=" + java.util.TimeZone.getDefault().getID() + "  read_timings=" + phases);
         List<Held> held = new ArrayList<>();
         try {
+            for (String name : selected) {
+                switch (name) {
+                    case "mysql":
+                        transports.add(new Transport("mysql", mysql));
+                        break;
+                    case "arrow-flight":
+                        transports.add(new Transport("arrow-flight", new StarRocksJdbcClient(
+                                config(required("bench.arrow.url"), db, tables, user, password))));
+                        break;
+                    case "arrow-adbc":
+                        transports.add(new Transport(name,
+                                CdcClientFactory.create(adbcConfig(mysqlUrl, db, tables, user, password))));
+                        break;
+                    default:
+                        throw new IllegalArgumentException("unknown bench transport: " + name);
+                }
+            }
             for (String table : tables) {
-                benchTable(db, table, transports, holder, rounds, mutation, mysqlCfg, report, held);
+                benchTable(db, table, mysql, transports, holder, rounds, mutation, mysqlCfg, report, held);
             }
             benchCreateLatency(db, tables.get(0), transports, holder, metaIterations, report, held);
         } finally {
             for (Held h : held) {
                 try {
-                    transports.get(0).client.bookmarkRelease(db, h.table, h.bookmarkId, h.holder);
+                    mysql.bookmarkRelease(db, h.table, h.bookmarkId, h.holder);
                 } catch (SQLException e) {
                     System.err.println("could not release bookmark " + h.bookmarkId + " on " + h.table + ": " + e);
                 }
             }
-            for (Transport t : transports) {
-                t.client.close();
+            try {
+                for (Transport t : transports) {
+                    if (t.client != mysql) {
+                        t.close();
+                    }
+                }
+            } finally {
+                mysql.close();
             }
         }
         report.print();
     }
 
-    /** Snapshot at one bookmark, then (with a mutation) one CHANGES window, both read by both transports. */
-    private void benchTable(String db, String table, List<Transport> transports, String holder, int rounds,
+    /** Snapshot at one bookmark, then (with a mutation) one CHANGES window over every selected path. */
+    private void benchTable(String db, String table, StarRocksJdbcClient mysql, List<Transport> transports,
+                            String holder, int rounds,
                             String mutation, StarRocksCdcSourceConfig mysqlCfg, Report report, List<Held> held)
             throws Exception {
-        StarRocksJdbcClient mysql = transports.get(0).client;
         List<ColumnMeta> cols = mysql.fetchColumns(db, table);
         long base = mysql.bookmarkCreate(db, table, holder, BOOKMARK_TTL_MS);
         held.add(new Held(table, base, holder));
         Meter meter = new Meter(report.phases);
+        long snapshotRows = -1;
         for (int round = 0; round < rounds; round++) {
             for (final Transport t : order(transports, round)) {
                 Sample s = meter.measure(new Callable<Long>() {
                     @Override
                     public Long call() throws Exception {
                         final long[] n = {0};
-                        t.client.streamSnapshot(db, table, cols, base, new CdcClient.RowConsumer() {
+                        t.streamSnapshot(db, table, cols, base, new CdcClient.RowConsumer() {
                             @Override
                             public void accept(Object[] row) {
                                 n[0]++;
@@ -128,6 +155,10 @@ public class TransportBench {
                         return n[0];
                     }
                 });
+                if (!(t.client instanceof StarRocksJdbcClient)) {
+                    s.timings = null;
+                }
+                snapshotRows = checkRows(table, "snapshot", t.name, snapshotRows, s.rows);
                 if (round > 0) {
                     report.add(table, "snapshot", t.name, s);
                 }
@@ -148,13 +179,14 @@ public class TransportBench {
             return;
         }
         held.add(new Held(table, head, holder));
+        long changeRows = -1;
         for (int round = 0; round < rounds; round++) {
             for (final Transport t : order(transports, round)) {
                 Sample s = meter.measure(new Callable<Long>() {
                     @Override
                     public Long call() throws Exception {
                         final long[] n = {0};
-                        t.client.streamChanges(db, table, cols, base, head, new CdcClient.ChangeRowConsumer() {
+                        t.streamChanges(db, table, cols, base, head, new CdcClient.ChangeRowConsumer() {
                             @Override
                             public void accept(Object[] row, int changeType, long rowVersion) {
                                 n[0]++;
@@ -163,11 +195,23 @@ public class TransportBench {
                         return n[0];
                     }
                 });
+                if (!(t.client instanceof StarRocksJdbcClient)) {
+                    s.timings = null;
+                }
+                changeRows = checkRows(table, "changes", t.name, changeRows, s.rows);
                 if (round > 0) {
                     report.add(table, "changes", t.name, s);
                 }
             }
         }
+    }
+
+    private static long checkRows(String table, String path, String transport, long expected, long actual) {
+        if (expected >= 0 && actual != expected) {
+            throw new IllegalStateException(table + " " + path + " " + transport + " returned " + actual
+                    + " rows; expected " + expected);
+        }
+        return actual;
     }
 
     /** The idle poll's fixed cost: bookmark_create on an unchanged table. One holder per transport. */
@@ -220,6 +264,20 @@ public class TransportBench {
         return new StarRocksCdcSourceConfig(m);
     }
 
+    private static StarRocksCdcSourceConfig adbcConfig(String url, String db, List<String> tables, String user,
+                                                       String password) {
+        Map<String, String> m = new HashMap<>();
+        m.put(StarRocksCdcSourceConfig.JDBC_URL, url);
+        m.put(StarRocksCdcSourceConfig.DATABASE_NAME, db);
+        m.put(StarRocksCdcSourceConfig.USERNAME, user);
+        m.put(StarRocksCdcSourceConfig.PASSWORD, password);
+        m.put(StarRocksCdcSourceConfig.TABLE_NAMES, String.join(",", tables));
+        m.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "bench");
+        m.put(StarRocksCdcSourceConfig.READ_TRANSPORT, StarRocksCdcSourceConfig.READ_TRANSPORT_ADBC);
+        m.put(StarRocksCdcSourceConfig.ADBC_URI, required("bench.adbc.uri"));
+        return new StarRocksCdcSourceConfig(m);
+    }
+
     private static String required(String key) {
         String v = System.getProperty(key);
         if (v == null || v.trim().isEmpty()) {
@@ -240,11 +298,25 @@ public class TransportBench {
 
     private static final class Transport {
         final String name;
-        final StarRocksJdbcClient client;
+        final CdcClient client;
 
-        Transport(String name, StarRocksJdbcClient client) {
+        Transport(String name, CdcClient client) {
             this.name = name;
             this.client = client;
+        }
+
+        void streamSnapshot(String db, String table, List<ColumnMeta> cols, long bookmark,
+                            CdcClient.RowConsumer consumer) throws Exception {
+            client.streamSnapshot(db, table, cols, bookmark, consumer);
+        }
+
+        void streamChanges(String db, String table, List<ColumnMeta> cols, long base, long head,
+                           CdcClient.ChangeRowConsumer consumer) throws Exception {
+            client.streamChanges(db, table, cols, base, head, consumer);
+        }
+
+        void close() throws Exception {
+            client.close();
         }
     }
 
@@ -392,7 +464,7 @@ public class TransportBench {
                 sb.append(l).append('\n');
             }
             sb.append('\n');
-            sb.append(String.format(Locale.ROOT, "%-20s %-9s %-6s %10s %9s %9s %10s %7s %9s %8s%n",
+            sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %9s %9s %10s %7s %9s %8s%n",
                     "table", "path", "via", "rows", "p50 ms", "min ms", "rows/s", "cpu s", "alloc MB", "rss MB"));
             for (String key : keys) {
                 String[] parts = key.split("\t");
@@ -410,29 +482,35 @@ public class TransportBench {
                     rows = list.get(i).rows;
                 }
                 double p50Ms = median(wall) / 1e6;
-                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-6s %10d %9.0f %9.0f %10.0f %7.2f %9.0f %8.0f%n",
+                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10d %9.0f %9.0f %10.0f %7.2f %9.0f %8.0f%n",
                         parts[0], parts[1], parts[2], rows, p50Ms, min(wall) / 1e6,
                         p50Ms > 0 ? rows / (p50Ms / 1000.0) : 0, median(cpu) / 1e9, median(alloc) / 1048576.0,
                         rss / 1024.0));
             }
             if (phases) {
                 sb.append("\nJDBC read stages (independent p50 ms):\n");
-                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-6s %10s %10s%n",
+                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s%n",
                         "table", "path", "via", "next", "decode"));
                 for (String key : keys) {
                     String[] parts = key.split("\t");
                     List<Sample> list = samples.get(key);
+                    if (list.get(0).timings == null) {
+                        sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s%n",
+                                parts[0], parts[1], parts[2], "-", "-"));
+                        continue;
+                    }
                     long[] next = new long[list.size()];
                     long[] decode = new long[list.size()];
                     for (int i = 0; i < list.size(); i++) {
                         next[i] = list.get(i).timings.nextNanos;
                         decode[i] = list.get(i).timings.decodeNanos;
                     }
-                    sb.append(String.format(Locale.ROOT, "%-20s %-9s %-6s %10.1f %10.1f%n",
+                    sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10.1f %10.1f%n",
                             parts[0], parts[1], parts[2], median(next) / 1e6, median(decode) / 1e6));
                 }
                 sb.append("next includes ResultSet.next() through EOF; decode is ValueReader.readRow(). ")
-                        .append("Per-row timing adds overhead, so compare throughput with phases off.\n");
+                        .append("ADBC has no JDBC stage timings. Per-row timing adds overhead, ")
+                        .append("so compare throughput with phases off.\n");
             }
             if (!latencies.isEmpty()) {
                 sb.append('\n');
@@ -444,7 +522,8 @@ public class TransportBench {
                 sb.append("note: ").append(n).append('\n');
             }
             sb.append("\nrows/s is from the p50 wall time; cpu s is process CPU over the round (all threads);")
-                    .append(" alloc MB sums every live thread; rss MB is the process peak seen after a round.\n");
+                    .append(" alloc MB sums Java allocations across live threads (not Arrow native buffers);")
+                    .append(" rss MB is the process peak seen after a round.\n");
             String text = sb.toString();
             System.out.print(text);
             File out = new File("target", "transport-bench.txt");

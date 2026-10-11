@@ -919,14 +919,14 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <table>
   <tr><th></th><th>MySQL 协议</th><th>Arrow Flight SQL</th></tr>
   <tr><td>URL</td><td><code>jdbc:mysql://</code>（内部重写为 <code>jdbc:mariadb://</code>）</td><td><code>jdbc:arrow-flight-sql://</code>（原样保留）</td></tr>
-  <tr><td>驱动</td><td>mariadb-java-client 3.3.3</td><td>flight-sql-jdbc-driver 18.0.0</td></tr>
+  <tr><td>驱动</td><td>mariadb-java-client 3.3.3</td><td>flight-sql-jdbc-core 18.0.0</td></tr>
   <tr><td>端口</td><td><code>query_port</code>（默认 9030）</td><td><code>arrow_flight_port</code>（默认 -1，需显式开启）</td></tr>
   <tr><td>流式读</td><td><code>setFetchSize(1024)</code></td><td>驱动自带，不设置</td></tr>
   <tr><td>列元数据</td><td colspan="2"><code>information_schema.columns</code>，两条通道相同；驱动的 <code>ResultSetMetaData</code> 一概不用</td></tr>
 </table>
 </div>
 
-<p>两个驱动都<strong>打进了主 shaded jar</strong>。这是刻意的：一个"换传输方式还要手动补一个 jar"的连接器是部署陷阱；而未被 URL 选中的驱动是完全惰性的。代价是 jar 体积（Arrow 驱动本身约 42MB）。</p>
+<p>两个 JDBC 驱动随 package 目录中的其他运行依赖一起部署；<code>-with-dependencies.jar</code> 则包含这些依赖。Arrow Flight JDBC 使用 <code>flight-sql-jdbc-core</code>，避免与 ADBC 所用的 Arrow 类重复。</p>
 
 <figure>
 <div class="figwrap">
@@ -961,7 +961,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <rect class="bxg" x="50" y="166" width="290" height="28" rx="4"/>
   <text class="tm" x="195" y="185" text-anchor="middle">mariadb-java-client 3.3.3</text>
   <rect class="bxg" x="420" y="166" width="290" height="28" rx="4"/>
-  <text class="tm" x="565" y="185" text-anchor="middle">flight-sql-jdbc-driver 18.0.0</text>
+  <text class="tm" x="565" y="185" text-anchor="middle">flight-sql-jdbc-core 18.0.0</text>
 
   <line class="ln" x1="195" y1="194" x2="195" y2="208" marker-end="url(#a7)"/>
   <line class="ln" x1="565" y1="194" x2="565" y2="208" marker-end="url(#a7)"/>

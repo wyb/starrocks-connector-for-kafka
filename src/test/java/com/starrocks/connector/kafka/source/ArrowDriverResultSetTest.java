@@ -21,25 +21,25 @@
 package com.starrocks.connector.kafka.source;
 
 import org.apache.arrow.driver.jdbc.ArrowFlightJdbcVectorSchemaRootResultSet;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.memory.BufferAllocator;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.memory.RootAllocator;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.BitVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.DateDayVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.DecimalVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.IntVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.TimeStampMicroTZVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.VarBinaryVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.VarCharVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.VectorSchemaRoot;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.complex.ListVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.complex.MapVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.complex.StructVector;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.DateUnit;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.TimeUnit;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.pojo.ArrowType;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.pojo.Field;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.pojo.FieldType;
-import org.apache.arrow.driver.jdbc.shaded.org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.arrow.memory.BufferAllocator;
+import org.apache.arrow.memory.RootAllocator;
+import org.apache.arrow.vector.BitVector;
+import org.apache.arrow.vector.DateDayVector;
+import org.apache.arrow.vector.DecimalVector;
+import org.apache.arrow.vector.IntVector;
+import org.apache.arrow.vector.TimeStampMicroTZVector;
+import org.apache.arrow.vector.VarBinaryVector;
+import org.apache.arrow.vector.VarCharVector;
+import org.apache.arrow.vector.VectorSchemaRoot;
+import org.apache.arrow.vector.complex.ListVector;
+import org.apache.arrow.vector.complex.MapVector;
+import org.apache.arrow.vector.complex.StructVector;
+import org.apache.arrow.vector.types.DateUnit;
+import org.apache.arrow.vector.types.TimeUnit;
+import org.apache.arrow.vector.types.pojo.ArrowType;
+import org.apache.arrow.vector.types.pojo.Field;
+import org.apache.arrow.vector.types.pojo.FieldType;
+import org.apache.arrow.vector.types.pojo.Schema;
 import org.junit.Test;
 
 import java.math.BigDecimal;
@@ -287,7 +287,7 @@ public class ArrowDriverResultSetTest {
 
             try (ResultSet rs = ArrowFlightJdbcVectorSchemaRootResultSet.fromVectorSchemaRoot(root)) {
                 assertTrue(rs.next());
-                Object[] row = new ArrowValueReader().readRow(rs, cols);
+                Object[] row = JdbcRowReader.forTransport(true).readRow(rs, cols);
 
                 // Canonical already: the extractor formats temporals, so the row itself is comparable.
                 assertEquals("2026-08-05", row[0]);
@@ -331,7 +331,7 @@ public class ArrowDriverResultSetTest {
                 try {
                     java.sql.Timestamp raw = rs.getTimestamp(2, java.util.Calendar.getInstance(TimeZone.getTimeZone("UTC")));
                     assertEquals("2026-08-05 04:34:56.123456", ValueReader.dateTimeText(raw));
-                    assertEquals("2026-08-05 12:34:56.123456", ValueReader.dateTimeText(ArrowValueReader.fromJvmWallClock(raw)));
+                    assertEquals("2026-08-05 12:34:56.123456", ValueReader.dateTimeText(ArrowJdbcValueReader.fromJvmWallClock(raw)));
                 } finally {
                     TimeZone.setDefault(previous);
                 }

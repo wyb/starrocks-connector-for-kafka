@@ -12,7 +12,7 @@
 #   SR_HOST / SR_PORT / SR_USER / SR_PASSWORD     as in smoke-cluster.sh (leader FE, OPERATE user)
 #   SR_ARROW_PORT        FE arrow_flight_port                        (default: FE config)
 #   KAFKA_BOOTSTRAP / KAFKA_BIN / KAFKA_EXTRA_PROPS / TOPIC_RF        as in smoke-cluster.sh
-#   BENCH_TRANSPORTS     space-separated, run in this order          (default "mysql arrow-flight")
+#   BENCH_TRANSPORTS     mysql, arrow-flight, arrow-adbc in run order (default all three)
 #   BENCH_SHAPES         space-separated, scalar and/or complex      (default "scalar complex")
 #   BENCH_ROWS           rows to generate                            (default 5000000)
 #   BENCH_BUCKETS        table buckets                               (default 8)
@@ -55,7 +55,7 @@ SR_USER="${SR_USER:-root}"
 SR_PASSWORD="${SR_PASSWORD:-}"
 SR_ARROW_PORT="${SR_ARROW_PORT:-}"
 TOPIC_RF="${TOPIC_RF:-1}"
-BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
 BENCH_SHAPES="${BENCH_SHAPES:-scalar complex}"
 BENCH_ROWS="${BENCH_ROWS:-5000000}"
 BENCH_DAILY_UPDATE_ROWS="${BENCH_DAILY_UPDATE_ROWS:-50000}"
@@ -147,7 +147,7 @@ cleanup() {
   else
     rm -rf "$OUT_DIR"
   fi
-  rm -rf "$PLUGIN_DIR"
+  rm -rf "$PLUGIN_ROOT"
 }
 trap cleanup EXIT
 
@@ -187,7 +187,7 @@ command -v javac >/dev/null   || fail "javac not found on PATH"
 [ -x "$KAFKA_BIN/kafka-topics.sh" ]       || fail "$KAFKA_BIN/kafka-topics.sh not executable"
 [ -x "$KAFKA_BIN/connect-standalone.sh" ] || fail "$KAFKA_BIN/connect-standalone.sh not executable"
 [ -x "$KAFKA_BIN/kafka-run-class.sh" ]    || fail "$KAFKA_BIN/kafka-run-class.sh not executable"
-verify_plugin_jar
+verify_plugin_jar "$BENCH_TRANSPORTS"
 sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
 [ "$(sr_config run_mode || true)" = "shared_data" ] || fail "this connector requires run_mode=shared_data"
 [ "$(sr_config enable_bookmark_meta_functions || true)" = "true" ] \
@@ -200,13 +200,11 @@ for tr in $BENCH_TRANSPORTS; do
   transport_count=$((transport_count + 1))
   case "$tr" in
     mysql) ;;
-    arrow-flight)
+    arrow-flight|arrow-adbc)
       afp=$(sr_config arrow_flight_port || true)
       [ -n "$afp" ] && [ "$afp" != "-1" ] || fail "arrow_flight_port is disabled on the FE (set it in fe.conf and be.conf, restart)"
-      [ -n "$SR_ARROW_PORT" ] || SR_ARROW_PORT="$afp"
-      jar tf "$JAR" | grep -Fx 'org/apache/arrow/driver/jdbc/ArrowFlightJdbcDriver.class' >/dev/null \
-        || fail "Arrow Flight JDBC driver missing from $JAR" ;;
-    *) fail "BENCH_TRANSPORTS entries must be mysql or arrow-flight, got '$tr'" ;;
+      [ -n "$SR_ARROW_PORT" ] || SR_ARROW_PORT="$afp" ;;
+    *) fail "BENCH_TRANSPORTS entries must be mysql, arrow-flight or arrow-adbc, got '$tr'" ;;
   esac
 done
 [ "$transport_count" -gt 0 ] || fail "BENCH_TRANSPORTS must name at least one transport"
@@ -307,6 +305,8 @@ rootLogger.level = info
 rootLogger.appenderRef.console.ref = STDOUT
 logger.jdbc.name = com.starrocks.connector.kafka.source.StarRocksJdbcClient
 logger.jdbc.level = debug
+logger.adbc.name = com.starrocks.connector.kafka.source.StarRocksAdbcClient
+logger.adbc.level = debug
 logger.task.name = com.starrocks.connector.kafka.source.StarRocksCdcSourceTask
 logger.task.level = debug
 EOF
@@ -318,6 +318,7 @@ log4j.appender.stdout=org.apache.log4j.ConsoleAppender
 log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
 log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
 log4j.logger.com.starrocks.connector.kafka.source.StarRocksJdbcClient=DEBUG
+log4j.logger.com.starrocks.connector.kafka.source.StarRocksAdbcClient=DEBUG
 log4j.logger.com.starrocks.connector.kafka.source.StarRocksCdcSourceTask=DEBUG
 EOF
     bench_log4j_opts="-Dlog4j.configuration=file:$OUT_DIR/bench-log4j.properties"
@@ -498,9 +499,12 @@ for transport in $BENCH_TRANSPORTS; do
   step "run: $scenario"
   TABLE=$(bench_table_for "$shape" "$transport")
   case "$transport" in
-    mysql)        url="jdbc:mysql://$SR_HOST:$SR_PORT"; opens="" ;;
+    mysql)        url="jdbc:mysql://$SR_HOST:$SR_PORT"; opens=""; read_transport=jdbc; adbc_uri="" ;;
     arrow-flight) url="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
-                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED" ;;
+                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED"; read_transport=jdbc; adbc_uri="" ;;
+    arrow-adbc)  url="jdbc:mysql://$SR_HOST:$SR_PORT"
+                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED"
+                  read_transport=arrow-adbc; adbc_uri="grpc+tcp://$SR_HOST:$SR_ARROW_PORT" ;;
   esac
   connector="sr-cdc-bench-$shape-$transport-$SUFFIX"
   prefix="bench-$shape-$transport"
@@ -519,7 +523,7 @@ value.converter.schemas.enable=false
 value.converter.decimal.format=NUMERIC
 offset.storage.file.filename=$OUT_DIR/offsets-$run_id
 offset.flush.interval.ms=5000
-plugin.path=$PLUGIN_DIR
+plugin.path=$PLUGIN_ROOT
 EOF
   [ -n "${KAFKA_EXTRA_PROPS:-}" ] && cat "$KAFKA_EXTRA_PROPS" >> "$OUT_DIR/worker-$run_id.properties"
   cat > "$OUT_DIR/source-$run_id.properties" <<EOF
@@ -527,6 +531,8 @@ name=$connector
 connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
 tasks.max=1
 starrocks.jdbc.url=$url
+source.read.transport=$read_transport
+starrocks.adbc.uri=$adbc_uri
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
@@ -549,7 +555,11 @@ EOF
   java -cp "$OUT_DIR" BenchJmxSampler "$BENCH_JMX_PORT" "$connector" \
     > "$jmx_file" 2> "$OUT_DIR/jmx-$run_id.log" &
   jmx_pid=$!
-  note "worker pid=$worker_pid, heap=$BENCH_HEAP, url=$url"
+  if [ "$transport" = arrow-adbc ]; then
+    note "worker pid=$worker_pid, heap=$BENCH_HEAP, jdbc=$url, adbc=$adbc_uri"
+  else
+    note "worker pid=$worker_pid, heap=$BENCH_HEAP, url=$url"
+  fi
 
   timing=$(wait_for_records "$topic" "$BENCH_ROWS" "$worker_started")
   read -r to_first snap_stream_secs snap_total_secs snap_finished <<<"$timing"
@@ -646,6 +656,7 @@ if [ "$BENCH_READ_TIMINGS" = 1 ]; then
       "$tr" "$phase" "$query" "$next_ms" "$decode" "$map_ms" "$table_ms"
   done
   note "CHANGES excludes empty reads; snapshot Task sums exclude gaps between batches; table includes read and map"
+  note "next means ResultSet.next() for JDBC and Arrow batch loading for ADBC"
 fi
 
 if [ "${#change_timelines[@]}" -gt 0 ]; then

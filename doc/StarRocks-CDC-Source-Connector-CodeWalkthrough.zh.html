@@ -118,7 +118,7 @@
     <li><a href="#map">先看全景</a></li>
     <li><a href="#entry">入口层</a><span class="toc-sub"><a href="#StarRocksCdcSourceConnector">StarRocksCdcSourceConnector</a><a href="#StarRocksCdcSourceConfig">StarRocksCdcSourceConfig</a></span></li>
     <li><a href="#state">状态机层</a><span class="toc-sub"><a href="#StarRocksCdcSourceTask">StarRocksCdcSourceTask</a><a href="#OffsetState">OffsetState</a><a href="#NonTrackableException">NonTrackableException</a></span></li>
-    <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetaReader">ColumnMetaReader</a><a href="#ValueReader">ValueReader</a><a href="#MysqlValueReader">MysqlValueReader</a><a href="#ArrowValueReader">ArrowValueReader</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
+    <li><a href="#access">数据访问层</a><span class="toc-sub"><a href="#CdcClient">CdcClient</a><a href="#StarRocksJdbcClient">StarRocksJdbcClient</a><a href="#StarRocksAdbcClient">StarRocksAdbcClient</a><a href="#FeConnection">FeConnection</a><a href="#ColumnMetaReader">ColumnMetaReader</a><a href="#JdbcRowReader">JdbcRowReader</a><a href="#ValueReader">ValueReader</a><a href="#MysqlValueReader">MysqlValueReader</a><a href="#ArrowValueReader">ArrowValueReader</a><a href="#ArrowJdbcValueReader">ArrowJdbcValueReader</a><a href="#ArrowAdbcValueReader">ArrowAdbcValueReader</a><a href="#SqlBuilder">SqlBuilder</a><a href="#ColumnMeta">ColumnMeta</a></span></li>
     <li><a href="#mapper">记录映射</a><span class="toc-sub"><a href="#ChangeRecordMapper">ChangeRecordMapper</a><a href="#ColumnTypeParser">ColumnTypeParser</a><a href="#ColumnType">ColumnType</a></span></li>
     <li><a href="#common">common 包</a><span class="toc-sub"><a href="#Version">Version</a><a href="#KeyValueListParser">KeyValueListParser</a></span></li>
     <li><a href="#tests">测试</a><span class="toc-sub"><a href="#FakeCdcClient">FakeCdcClient</a><a href="#TransportBench">TransportBench</a></span></li>
@@ -128,7 +128,7 @@
 
 <h2 id="map"><span class="no">1</span>先看全景</h2>
 
-<p>18 个类分四层，外加 <code>common</code> 包的 2 个（<code>Version</code> 与 sink 共用，<code>KeyValueListParser</code> 只有 source 用）。数据访问层在复杂类型原生化之后多了 <code>ValueReader</code> 及其两个传输子类（<code>MysqlValueReader</code>/<code>ArrowValueReader</code>）——取值与转换都在这里，按 <code>ColumnType</code> 办事；记录映射层是 <code>ChangeRecordMapper</code> 加类型树（<code>ColumnTypeParser</code>/<code>ColumnType</code>）；DATE/DATETIME 的文本格式住在 <code>ValueReader</code> 基类里，Arrow 专用的换算在它的子类里。</p>
+<p>Connector 与 Task 通过 <code>CdcClientFactory</code> 按 <code>source.read.transport</code> 选择实现：默认 <code>StarRocksJdbcClient</code>，或以 JDBC 处理书签和元数据、以 Arrow ADBC 读取快照和 CHANGES 的 <code>StarRocksAdbcClient</code>。JDBC 的 <code>ResultSet</code> 逐列读取在 <code>JdbcRowReader</code>；ADBC 直接从 Arrow 向量取值。<code>ValueReader</code> 及其子类只处理类型转换与嵌套值，<code>ColumnType</code> 同时决定读取类型和 Connect schema。</p>
 
 <figure>
 <div class="figwrap">
@@ -171,7 +171,7 @@
   <text class="ts" x="278" y="232">列清单（information_schema）· 重名与空表检查</text>
   <rect class="bx" x="524" y="196" width="248" height="44" rx="5"/>
   <text class="tm" x="536" y="215">ValueReader</text>
-  <text class="ts" x="536" y="232">Mysql/Arrow 子类 · ResultSet 行 → 规范 Object[]</text>
+  <text class="ts" x="536" y="232">JdbcRowReader / ADBC 向量 → 规范 Object[]</text>
 
   <line class="ax dash" x1="8" y1="256" x2="772" y2="256"/>
 
@@ -188,7 +188,7 @@
   <text class="tm" x="602" y="309">ChangeRecordMapper</text>
 
   <line class="ax dash" x1="8" y1="340" x2="772" y2="340"/>
-  <text class="ts" x="8" y="362" fill="var(--accent)">类型树（ColumnMeta 构造时解析；ValueReader 据此取值并转换；Mapper 据此建 schema、装形状）与两个传输子类</text>
+  <text class="ts" x="8" y="362" fill="var(--accent)">类型树（ColumnMeta 构造时解析；读取器据此转换；Mapper 据此建 schema、装形状）</text>
   <rect class="bxg" x="8" y="370" width="146" height="36" rx="4"/>
   <text class="tm" x="20" y="393">ColumnTypeParser</text>
   <rect class="bxg" x="162" y="370" width="120" height="36" rx="4"/>
@@ -199,7 +199,7 @@
   <text class="tm" x="610" y="393">MysqlValueReader</text>
 </svg>
 </div>
-<figcaption><b>图 1</b>箭头是调用方向。<code>ChangeRecordMapper</code> 单独画在下面，因为只有 Task 用它，且它完全不碰 JDBC。最下一行是复杂类型原生化加进来的四个类：<code>ColumnMeta</code> 构造时调 <code>ColumnTypeParser</code> 得到 <code>ColumnType</code>，每一列都有；<code>StarRocksJdbcClient</code> 按传输选 <code>ValueReader</code> 子类，子类只带各自驱动的怪癖，取值与转换的规则在基类里按 <code>ColumnType</code> 走；<code>ChangeRecordMapper</code> 用同一棵树生成 schema、装形状；DATE/DATETIME 在 reader 里就已经成了 StarRocks 打印的文本。</figcaption>
+<figcaption><b>图 1</b>展示主调用方向；上图保留 JDBC 分支，ADBC 分支由 <code>CdcClientFactory</code> 选择 <code>StarRocksAdbcClient</code>，使用相同的 <code>SqlBuilder</code>、列元数据和 <code>ChangeRecordMapper</code>。JDBC 行由 <code>JdbcRowReader</code> 读取，ADBC 行由 <code>ArrowAdbcValueReader</code> 从向量读取；<code>ArrowValueReader</code> 是两种 Arrow 读取器的公共转换基类。</figcaption>
 </figure>
 
 <h4>一条记录的完整旅程</h4>
@@ -215,13 +215,12 @@ Task.start()           每表 fetchColumns（key 列带标记），建 ChangeRec
 Task.poll()            drainPendingReleases → renewLiveBookmarks → pollTable：bookmarkCreate
                        → 若 head==committed 则跳过 → streamChanges(base, head)
                        → 窗口为空则只把 committed 推到 head
-  ↓  StarRocksJdbcClient.streamChanges
+  ↓  CdcClientFactory 选择的客户端 streamChanges
      SqlBuilder.changesSql   拼 SQL（含强制 ORDER BY）
-     FeConnection.get()      拿连接 + applyStreamingFetchSize
-     ValueReader.readRow     按传输选好的子类（connection.isArrowFlight()）逐列 read：
-                             标量按 ColumnType 选类型化 getter 并规范化（DECIMAL setScale、
-                             DATE/DATETIME 在基类格式化成文本，Arrow 子类先逆转驱动的时区平移）；
-                             嵌套列 getObject 后 MysqlValueReader 解析 BE 文本 / ArrowValueReader 读 vector 对象
+     JDBC 分支：FeConnection.get() → ResultSet → JdbcRowReader
+                 标量用类型化 getter；嵌套列交给 MysqlValueReader / ArrowJdbcValueReader
+     ADBC 分支：Flight SQL → ArrowReader.loadNextBatch() → ArrowAdbcValueReader
+                 直接从向量取值；嵌套转换复用 ArrowValueReader
   ↓
 ChangeRecordMapper.toChangeRecord   Object[] → Debezium envelope SourceRecord
                                     （只做形状：复杂列经 ColumnType.toConnectValue 装成 Struct/List/Map）
@@ -280,7 +279,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
 <p>文件按 Connect 调用它的顺序排：<code>version</code>/<code>taskClass</code>/<code>config</code>，校验期的 <code>exactlyOnceSupport</code>，<code>start</code> 及其检查（<code>preflightCheckTable</code> 与它的 <code>checkModel</code>/<code>checkColumns</code> 在前，<code>probeBookmarkFunctions</code> 在后，与调用顺序一致），<code>taskConfigs</code>，<code>alterOffsets</code> 与它的助手（<code>parseConfig</code>、<code>releaseReferences</code>、<code>namesATable</code>、<code>requirePartitionString</code>、<code>stringAt</code>、<code>describe</code>），<code>stop</code>；测试注入点 <code>createClient</code> 放最后，与 Task 相同。</p>
 
 <h3 id="StarRocksCdcSourceConfig"><span class="fn">StarRocksCdcSourceConfig</span><span class="sz">367 行</span></h3>
-<p class="role">一个 <code>AbstractConfig</code>：15 个用户可见配置项的 <code>ConfigDef</code>，加上若干读取器。</p>
+<p class="role">一个 <code>AbstractConfig</code>：用 <code>ConfigDef</code> 声明用户配置，并提供读取与启动校验。</p>
 
 <p>结构很平——<code>newConfigDef()</code> 是一长串 <code>.define(...)</code>，下面每个配置项一个 getter。值得注意的只有四处：</p>
 
@@ -289,7 +288,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
   <li><strong><code>holderId()</code></strong>：返回 <code>"kc:" + name</code>，name 取自 Connect 放进 props 的连接器名。这是 bookmark 在服务端的持有者标识，同名 connector 重启后仍认领同一批 bookmark。name 缺失或空白在构造时就拒绝（<code>rejectMissingName</code>）：Connect 给每个 connector 和 task 都放这个键，没有它的配置不是 Connect 生成的，而两个没有名字的连接器会共用一个 holder、位置互串。</li>
   <li><strong><code>taskTables()</code></strong>：读内部键 <code>task.tables</code>，同一把 <code>splitNames</code> 切分，空、重复、不在 <code>starrocks.table.names</code> 里的都抛 <code>ConfigException</code>。连接器从不生成这三种，出现即手写配置；重复的表会每行发两遍，且一份的围栏会释放另一份的 base。</li>
   <li><strong><code>source.poll.retry.timeout.ms</code></strong>：<code>ConfigDef.Range.atLeast(-1)</code>——<code>-1</code>（永远重试）和 <code>0</code>（首次失败即停）都有含义，再小就是笔误。</li>
-  <li>构造函数里跑<strong>四道校验</strong>：<code>rejectMissingName()</code>——见上；<code>rejectEmptyTableList()</code>——<code>ConfigDef</code> 只查键在不在，一个全是逗号和空白的值会通过却命名了零张表，一处笔误就成了"什么都不发的 source"；<code>rejectDuplicateTableNames()</code>——见下；以及 <code>rejectNoSnapshotWithResnapshot()</code>。四者都在 <code>start()</code> 才跑，Connect 默认的 <code>validate()</code> 不构造这个类，REST 预校验看不到它们。</li>
+  <li>构造函数里还执行启动校验：<code>rejectMissingName()</code>——见上；<code>rejectEmptyTableList()</code>——<code>ConfigDef</code> 只查键在不在，一个全是逗号和空白的值会通过却命名了零张表，一处笔误就成了"什么都不发的 source"；<code>rejectDuplicateTableNames()</code>——见下；以及 <code>rejectNoSnapshotWithResnapshot()</code>；选择 ADBC 时 <code>rejectMissingAdbcUri()</code> 要求非空 Flight URI。这些校验都在 <code>start()</code> 才跑，Connect 默认的 <code>validate()</code> 不构造这个类，REST 预校验看不到它们。</li>
 </ul>
 
 <div class="note bad">
@@ -303,6 +302,7 @@ task k 拿到 tables[k], tables[k + taskCount], tables[k + 2·taskCount], …</c
   <p><code>source.snapshot.mode=no_snapshot</code> + <code>source.nontrackable.policy=resnapshot</code> 会在构造时抛 <code>ConfigException</code>。resnapshot 的自愈方式是丢弃位点、用新快照重建；关掉快照后它什么都读不到，于是会<strong>静默丢掉</strong>"不可用 base"到"新 bookmark"之间的全部变更，而运维看到的是"表已自愈"。</p>
 </div>
 
+<p><code>source.read.transport</code> 默认为 <code>jdbc</code>，也可选 <code>arrow-adbc</code>。ADBC 读取使用 <code>starrocks.adbc.uri</code>；书签和元数据仍使用 <code>starrocks.jdbc.url</code>。<code>source.connect.timeout.ms</code> 限制等待 ADBC <code>database.connect()</code> 的时间，<code>source.read.timeout.ms</code> 分别限制查询、下一个 Flight 批次及 CHANGES 读取资源清理的等待时间。查询或批次超时后发出中断请求；清理超时后丢弃读取连接。下一轮读取切换到下一个 ADBC 端点。未退出的读取调用和资源关闭任务共用数量上限；达到上限时 task 明确失败，避免无限重试并累积后台线程。</p>
 <p><code>parseTable2Topic</code> 现在只是 <code>KeyValueListParser.parse</code> 的一行转发。</p>
 
 <h2 id="state"><span class="no">3</span>状态机层</h2>
@@ -466,7 +466,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p>两个流式方法收 <code>List&lt;ColumnMeta&gt;</code> 而不是列名——它既指定投影哪些列，也决定取值时用哪个 getter，读取端因此永远不会再去问驱动。</p>
 
 <h3 id="StarRocksJdbcClient"><span class="fn">StarRocksJdbcClient</span><span class="sz">282 行</span></h3>
-<p class="role">接口的唯一实现。拆分后它只剩业务查询，底下三块各管一摊。</p>
+<p class="role">JDBC 读取实现，支持 MySQL 与 Arrow Flight JDBC。ADBC 实现见下一节。</p>
 
 <div class="tablewrap">
 <table>
@@ -482,6 +482,10 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 </table>
 </div>
 <p>主连接上的查询（<code>fetch*</code>、<code>streamChanges</code>）遇到连接故障会丢掉连接，下一次 <code>get()</code> 重建；快照游标拥有独立连接，遇到读取故障会关闭并分类异常。三个 bookmark 方法经 <code>executeOnLeader</code>，由它自己处理重连和 leader 轮转。</p>
+
+<h3 id="StarRocksAdbcClient"><span class="fn">StarRocksAdbcClient</span><span class="sz">Arrow ADBC 读取</span></h3>
+<p><code>CdcClientFactory</code> 在 <code>source.read.transport=arrow-adbc</code> 时创建该实现。书签、表配置和列元数据仍委托 <code>StarRocksJdbcClient</code>；快照和 CHANGES SQL 由 <code>SqlBuilder</code> 构造，经 <code>FlightSqlDriver</code> 执行。快照使用独立连接并跨多个 <code>poll()</code> 保持游标，CHANGES 使用可重建的共享读取连接。每次 <code>ArrowReader.loadNextBatch()</code> 取得 <code>VectorSchemaRoot</code>，<code>ArrowAdbcValueReader</code> 按列和行下标生成规范值。</p>
+<p>Flight 流中断可能由 <code>FlightStream.next()</code> 抛出 <code>FlightRuntimeException</code>；客户端将其包装为 <code>SQLException</code>，使 Task 按现有轮询重试与超时策略处理。CHANGES 失败时丢弃读取连接，快照失败时关闭游标；值或 schema 转换产生的运行时异常仍直接失败。ADBC 建连按 <code>source.connect.timeout.ms</code> 有界等待；关闭客户端时先关闭活动读取，若连接尝试仍未结束，则延后释放 Arrow allocator。</p>
 
 <h3 id="FeConnection"><span class="fn">FeConnection</span><span class="sz">304 行</span></h3>
 <p class="role">连接的一切：URL 扇出、传输判定、复用、leader 轮转、有界重试。</p>
@@ -509,7 +513,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>openConnection</code> 在 MySQL 协议的连接上多跑一句 <code>SESSION_SETUP_SQL</code>：<code>SET binary_encoding_format = 'hex', binary_encoding_level = 'nested'</code>。这两个会话变量决定嵌套 VARBINARY 的文本形态，默认值恰好就是这样，但集群可以全局改：<code>raw</code> 会往 <code>MysqlValueReader</code> 扫的文本里塞不可解码的字节，<code>all</code> 会把顶层 VARBINARY 也 hex 化、让 <code>getBytes()</code> 拿到十六进制文本。钉住之后读取器的假设与集群设置无关；SQL 由 <code>MysqlValueReader.SESSION_BINARY_ENCODING</code> 拼出，单测断言两者一致。SET 失败则关掉刚开的连接再抛，不留半初始化的连接。Arrow Flight 以二进制传二进制，不看这两个变量，也就不设。</p>
 
 <h3 id="ColumnMetaReader"><span class="fn">ColumnMetaReader</span><span class="sz">90 行</span></h3>
-<p class="role">权威列清单。两条通道<strong>同一条路径</strong>：只问服务端。</p>
+<p class="role">权威列清单。三种读取路径都通过 JDBC 查询服务端元数据，不依赖结果集的列元数据。</p>
 
 <pre><code>fetchColumns()  ──  每行 new ColumnMeta(COLUMN_NAME, DATA_TYPE, COLUMN_TYPE, NUMERIC_SCALE, IS_NULLABLE)</code></pre>
 
@@ -521,22 +525,23 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <p>类型不在这里判定：每行直接构造 <code>ColumnMeta</code>，由它把 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>（见 <a href="#ColumnMeta">ColumnMeta</a>）。scale 读标准列 <code>NUMERIC_SCALE</code>；precision 不再读取，Connect 的 <code>Decimal</code> 只有 scale。启动日志一行列出每列的 <code>DATA_TYPE-&gt;ColumnType</code>，是"服务端说了什么、连接器认成了什么"的唯一记录。</p>
 
-<h3 id="ValueReader"><span class="fn">ValueReader</span><span class="sz">244 行</span></h3>
-<p class="role">每次流式读一个实例，把 <code>ResultSet</code> 的一行读成<strong>规范化</strong>的 <code>Object[]</code>。取值方式和转换规则全部由 <code>ColumnType</code> 决定；两条传输的差别被压进两个子类。</p>
-<p><strong>标量走类型化 getter。</strong>这是 JDBC 自己的跨驱动转换契约，也是唯一能把 UTC Calendar 交给驱动的地方，所以两个驱动交出同样的东西：BOOLEAN→<code>getBoolean</code>、整数各归各的 getter、FLOAT→<code>getFloat</code>、DOUBLE→<code>getDouble</code>、DECIMAL/LARGEINT→<code>getBigDecimal</code> 后 <code>setScale(声明 scale)</code>（Arrow 把 DECIMALV2 按 scale 9 交回、MariaDB 按声明值，在这里抹平），DATE→<code>getDate(i, utc)</code>→<code>dateText</code>，DATETIME→<code>timestamp()</code>（子类可覆写）→<code>dateTimeText</code>，BYTES→<code>getBytes</code>（<code>getString</code> 会按字符集解码、非法序列变 U+FFFD），STRING/JSON/OPAQUE→<code>getString</code>。<code>wasNull</code> 在 getter <em>之后</em>统一纠正——基本类型 getter 对 NULL 返回 0/false。</p>
-<p><strong>DATE / DATETIME 的文本在基类。</strong><code>dateText</code>/<code>dateTimeText</code> 输出即 StarRocks 自己打印的样子：<code>2026-08-05</code>、<code>2026-08-05 12:34:56</code>，微秒非零才追加六位 <code>.ffffff</code>（BE <code>timestamp::to_string</code> 的规则）。值来自 UTC Calendar 的读取，所以按 UTC 取位得到的就是存储的墙上数字；<code>Timestamp.getTime()</code> 已含小数部分，秒数用 <code>floorDiv</code> 单独取，微秒从 <code>getNanos()</code> 来，普通 <code>java.util.Date</code> 只有毫秒可用。两条传输只此一处格式化；Arrow 专用的天数/微秒入口和时区逆运算在 <code>ArrowValueReader</code>。测试夹具必须按 UTC 构造（<code>LocalDateTime…toInstant(UTC)</code>），<code>Timestamp.valueOf</code> 会按 JVM 默认时区解释数字——第一版夹具就是这么错了 8 小时。</p>
-<p><strong>嵌套列没有类型化 getter。</strong><code>getObject</code> 拿到驱动手里的东西，交给子类的 <code>nested()</code>；子类把它整理成"原始树"后回到基类的 <code>readNested()</code>：ARRAY/MAP/STRUCT 的递归、struct 按声明序取字段（缺的为 null，多出的字段名报错——那是 schema 漂移，用 <code>ColumnType.fieldNames</code> 这个解析时建好的集合判定，每个键一次哈希查找）、map 键一律 <code>String.valueOf(leaf(键类型, 原始键))</code>（date 键也因此格式化）、形状不符抛 <code>DataException</code> 并点名类型与实际 class。这些只写一遍。子类只需给出 <code>leaf(kind, raw)</code>：把自己那种原始叶子变成规范标量。</p>
-<p><strong>为什么不全走 <code>getObject</code>。</strong>两个驱动的 <code>getObject</code> 对标量给的是各自的默认类——MariaDB 把 LARGEINT 当 <code>String</code>、DATETIME 用 <code>Calendar.getInstance()</code> 按 JVM 时区落值，Avatica 按类型码分发——走它会把驱动私有词汇引进转换器，还会让 MySQL 通道本来精确的 UTC 时间路径退化成 DST 跳变时不可逆的找回。取值用契约、转换用类型树，是这条边界的由来。</p>
+<h3 id="JdbcRowReader"><span class="fn">JdbcRowReader</span><span class="sz">JDBC 行读取</span></h3>
+<p><code>forTransport(connection.isArrowFlight())</code> 选择 <code>MysqlValueReader</code> 或 <code>ArrowJdbcValueReader</code> 作为嵌套值转换器。<code>readRow(ResultSet, cols)</code> 只读取声明过的表列，CHANGES 末尾两个伪列由调用方读取。标量按 <code>ColumnType</code> 使用类型化 getter，DATE/DATETIME 传 UTC Calendar，DECIMAL/LARGEINT 按声明 scale 对齐，<code>wasNull()</code> 修正基本类型 getter 的 NULL 返回值。嵌套列用 <code>getObject()</code> 交给所选转换器。</p>
+
+<h3 id="ValueReader"><span class="fn">ValueReader</span><span class="sz">共享值转换</span></h3>
+<p>抽象基类不接触 <code>ResultSet</code>。<code>readNested()</code> 按 <code>ColumnType</code> 递归处理 ARRAY、MAP、STRUCT：map 键转成 Connect schema 要求的字符串；struct 按声明字段排列，额外字段报错，缺失字段视为 null。子类实现 <code>nested()</code> 和 <code>leaf()</code> 解释驱动交来的原始值。DATE/DATETIME 的统一文本格式化也在此处：微秒非零才追加六位小数。</p>
 
 <h3 id="MysqlValueReader"><span class="fn">MysqlValueReader</span><span class="sz">258 行</span></h3>
 <p class="role">MySQL 协议唯一的特殊之处：嵌套列到手是 BE <code>put_mysql_row_buffer</code> 拼的文本，像 JSON 但不是 JSON。</p>
 <p>内部的 <code>Scanner</code> 先把文本切成<strong>类型无关</strong>的原始树：<code>[…]</code> 是 <code>List</code>，<code>{k:v,…}</code> 是按键记号索引的 <code>LinkedHashMap</code>，引号里的是字符串记号（单双引号皆可——嵌套 JSON 用单引号包，<code>json_column.cpp:60</code>；只转义 <code>"</code> 与 <code>\</code>，内部允许原始控制字符），裸 <code>null</code> 是 null，其余裸记号原样保留。此时 <code>{1:2}</code> 的裸键（<code>map_column.cpp:591</code>）、<code>'{"a": 1}'</code>、<code>"0102ff"</code> 都只是记号，"它是什么类型"由 <code>leaf(kind, 记号)</code> 按声明类型决定：<code>1</code>/<code>0</code> 是布尔（<code>fixed_length_column_base.cpp:339</code> 走 <code>push_number</code>）、<code>inf</code>/<code>nan</code> 是浮点（fmt 的拼法，Java 不认）、hex 或 base64 解成 <code>byte[]</code>（按 <code>SESSION_BINARY_ENCODING</code>，<code>FeConnection</code> 把会话钉在同一个值上）、date/datetime/json/string 原样。这和 Arrow 侧"<code>Integer</code> 是天数还是 int 由类型说了算"是同一个解法。</p>
 <p>出错都是带原文的 <code>DataException</code>：分词错误带偏移量；转换错误（非数字、不认识的布尔值、未声明的 struct 字段）由 <code>nested()</code> 统一补上原文再抛。带引号的 <code>"null"</code> 是字符串，裸的才是 SQL NULL。</p>
 
-<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">145 行</span></h3>
-<p class="role">Arrow Flight JDBC 驱动的怪癖，且只有怪癖。</p>
-<p><strong>顶层两处。</strong>驱动的 <code>getTimestamp(i, calendar)</code> 最后一步是 <code>Timestamp.valueOf(LocalDateTime)</code>，按 JVM 默认时区落值、传什么 Calendar 都一样（UTC+8 的 worker 上 12:34:56 变成 04:34:56Z），<code>timestamp()</code> 覆写后经自己的 <code>fromJvmWallClock</code> 逆转（用同一个 JVM 时区 <code>toLocalDateTime()</code> 把 digits 取回，再按 UTC 锚定；DST 跳变那一小时不可逆，是唯一残留）；Avatica 的 <code>getObject</code> 按 JDBC 类型码分发，ARRAY(2003) 拿到 <code>java.sql.Array</code>、MAP/STRUCT(2000) 拿到 vector 的 <code>Map</code>，<code>nested()</code> 先把 <code>Array</code> 用 <code>getArray()</code> 解成 <code>List</code>。这两条都是第一次真集群冒烟才暴露的：字节码里 accessor 的 <code>getObject()</code> 确实返回 <code>List</code>，但 <code>ResultSet.getObject</code> 根本不走那里。</p>
-<p><strong>嵌套值是 vector 自己的对象。</strong>list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，varchar 是 <code>Text</code>（一个非 String 的 <code>CharSequence</code>），DATE 是 <code>Integer</code> 天数、DATETIME 是 <code>Long</code> 微秒——按 class 和 INT/BIGINT 一模一样，所以 <code>leaf()</code> 只看声明类型，再由 <code>dateOfEpochDays</code>/<code>dateTimeOfEpochMicros</code> 换成基类那种文本。嵌套的 map 是 <code>MapVector.getObject</code> 的原样输出，而 <code>MapVector</code> 直接继承 <code>ListVector</code> 的实现——一个由 <code>{key, value}</code> entry map 组成的 <code>List</code>，<code>asMap()</code> 覆写后两种形态都收（review 时抓到的：第一版只认 Map，<code>array&lt;map&lt;…&gt;&gt;</code> 会抛 <code>DataException</code>，单测还喂的是 Map 把错误一起固化了）。</p>
+<h3 id="ArrowValueReader"><span class="fn">ArrowValueReader</span><span class="sz">Arrow 公共转换</span></h3>
+<p>继承 <code>ValueReader</code>，把 Arrow 的嵌套对象转换为规范值：list 是 <code>List</code>，struct 是字段名到值的 <code>Map</code>，map 可由 <code>{key,value}</code> entry 列表组成；日期按 epoch 天数、时间按 epoch 微秒换算，文本按 UTF-8/Arrow Text 处理。它不含 JDBC getter。</p>
+<h3 id="ArrowJdbcValueReader"><span class="fn">ArrowJdbcValueReader</span><span class="sz">Flight JDBC 专用</span></h3>
+<p>继承 <code>ArrowValueReader</code>。JDBC <code>getObject()</code> 返回的顶层数组可能是 <code>java.sql.Array</code>，它先解包再走公共嵌套转换；<code>fromJvmWallClock()</code> 修正 Flight JDBC 时间戳 getter 按 JVM 时区落值的问题，由 <code>JdbcRowReader</code> 调用。</p>
+<h3 id="ArrowAdbcValueReader"><span class="fn">ArrowAdbcValueReader</span><span class="sz">ADBC 向量读取</span></h3>
+<p>继承 <code>ArrowValueReader</code>，直接用 <code>FieldVector</code> 和行下标读取值。BIGINT、DATE、DATETIME、VARCHAR 与 MAP 使用相应向量访问；其他叶子及 ARRAY/STRUCT 取得 Arrow 对象后交给公共转换。MAP 逐 entry 读取，以免 <code>MapVector.getObject()</code> 为每条 entry 构造临时 map。遇到无法解释的向量类型抛 <code>DataException</code>。</p>
 
 <h3 id="SqlBuilder"><span class="fn">SqlBuilder</span><span class="sz">133 行</span> · <span id="ColumnMeta"></span><span class="fn">ColumnMeta</span><span class="sz">175 行</span></h3>
 <p class="role">纯函数与值对象，没有状态。</p>
@@ -587,7 +592,7 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 
 <h3 id="ColumnTypeParser"><span class="fn">ColumnTypeParser</span><span class="sz">221 行</span> · <span id="ColumnType"></span><span class="fn">ColumnType</span><span class="sz">268 行</span></h3>
-<p class="role">把 <code>information_schema.columns.COLUMN_TYPE</code> 解析成带嵌套的类型树，再由类型树生成 Connect schema。复杂列原生化的第一块；<code>ColumnMeta</code> 在构造时调用它，结果驱动 mapper 的 schema 与两条传输的值读取器。</p>
+<p class="role">把 <code>information_schema.columns.COLUMN_TYPE</code> 解析成带嵌套的类型树，再由类型树生成 Connect schema。复杂列原生化的第一块；<code>ColumnMeta</code> 在构造时调用它，结果驱动 mapper 的 schema 与三条读取路径的值转换。</p>
 <p><code>COLUMN_TYPE</code> 是 FE <code>Type.toSql()</code> 的显示串，不是契约，所以解析器只认 FE 会产出的拼法，其余一律 <code>Optional.empty()</code>，调用方回退到按文本承载。嵌套层的拼法：<code>boolean</code>、<code>int(11)</code>、<code>bigint(20)</code>、<code>largeint(40)</code>、<code>decimal(18, 2)</code>（逗号后有空格）、<code>varchar(10)</code>、<code>varbinary(16)</code>、<code>date</code>、<code>datetime</code>、<code>json</code>；唯独 <code>array&lt;&gt;</code> 里的 decimal 走 <code>toString()</code>，拼成 <code>DECIMAL64(18,2)</code>。struct 字段是 <code>`name` type</code> 以 <code>", "</code> 相连，反引号翻倍转义；字段 COMMENT 未转义直接拼入，深度 ≥15 打成 <code>...</code>——这两种都以"多出来的 token"形式被拒绝，不需要特判。</p>
 <p><code>ColumnType</code> 和 Connect schema 故意分开：map 的键声明是 <code>int</code>，线上却必须是 STRING（JsonConverter 只在键 schema 为 STRING 时渲染成对象，否则是 <code>[[k,v],…]</code>），而读取器仍要按声明类型去解析传输过来的值。嵌套元素、map 值、struct 字段一律 optional（StarRocks 允许其中任一为 NULL），只有列本身取声明的可空性；嵌套 struct 按路径命名（<code>t.c.a</code>、<code>t.c.c.element</code>），Avro converter 要求 record 名唯一。<code>toConnectValue</code> 是反方向：读取器交出的中立值（标量已转好、数组是 <code>List</code>、map 和 struct 都是 <code>Map&lt;String,Object&gt;</code>）按 schema 装配，struct 递归成 <code>Struct</code>。<code>OPAQUE</code> 是给"按文本承载"的列准备的标量种类，带一个可空的 <code>logicalName</code>；<code>isNested()</code> 判断是不是三种容器之一。</p>
 
@@ -618,7 +623,9 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
   <tr><td><code>ColumnTypeParserTest</code></td><td>14</td><td>FE 的每种嵌套拼法、decimal 四种拼法只取 scale、裸 <code>decimal</code> 拒绝、map 键线上 STRING 但树里保留声明类型、struct 字段顺序与反引号解转义、字段名集合与声明一致、三层嵌套、Avro 用的路径命名、COMMENT 与 <code>...</code> 与 hll/variant/time 一律拒绝、畸形输入不抛只返回空</td></tr>
   <tr><td><code>MysqlValueReaderTest</code></td><td>11</td><td>裸数字与 1/0 布尔、inf/nan 浮点、BE 转义与原始控制字符、日期透传、单引号 JSON、hex 与 base64 二进制、声明类型决定 map 键、struct 按声明字段缺省为 null、三层嵌套各层 null、带引号的 "null" 是字符串、畸形输入带偏移量报错</td></tr>
   <tr><td><code>ArrowDriverResultSetTest</code></td><td>2</td><td>真驱动：一行 14 列（含 <code>array&lt;map&gt;</code>、<code>array&lt;array&gt;</code>、<code>array&lt;decimal&gt;</code>）经真实 <code>ResultSet</code> 读出，与同一行 BE 文本经 <code>MysqlValueReader</code> 的结果逐列相等；Avatica 交出的形态（顶层 ARRAY 是 <code>java.sql.Array</code>、MAP/STRUCT 是 Map、嵌套 map 是 entry 列表）与驱动的 JVM 时区平移各自钉死</td></tr>
-  <tr><td><code>ValueReaderTest</code></td><td>17</td><td>逐类型用对 getter、DECIMAL 按声明 scale 而 DATE/DATETIME 在此成文本且微秒保留、两类 null 处理（基本类型与对象）、UTC Calendar 确实传给时间取值器、Arrow 子类逆转驱动的时区平移而 MySQL 子类不动、每个实例自有 Calendar、<code>forTransport</code> 按传输选子类、嵌套列经两个子类读出同一值、Arrow 顶层数组从 <code>java.sql.Array</code> 解包、OPAQUE 列仍走 <code>getString</code>、<code>readRow</code> 只读声明过的列；DATE/DATETIME 文本逐位对齐 StarRocks（小数非零才出现且恒六位、普通 <code>java.util.Date</code> 只贡献毫秒、纪元之前的 floor 拆分）</td></tr>
+  <tr><td><code>ValueReaderTest</code></td><td>JDBC getter 与共享值转换：基本类型 NULL、UTC 日期时间、DECIMAL scale、嵌套值和传输差异；JDBC 行读取通过 <code>JdbcRowReader</code> 验证</td></tr>
+  <tr><td><code>ArrowAdbcValueReaderTest</code></td><td>Arrow 向量中的标量、日期时间、UTF-8、MAP 及嵌套日期转换</td></tr>
+  <tr><td><code>StarRocksAdbcClientTest</code></td><td>不支持的 OPAQUE 列预检；Flight 传输异常进入 SQL 重试路径，值转换错误保持致命</td></tr>
   <tr><td><code>TableConfigTest</code></td><td>5</td><td>模型名按 <code>KeysType</code> 精确解析（含 <code>UNQ_KEYS</code> 别名、空为 NONE、其余为 OTHER 且保留原拼写）；其余四条都在 <code>cdcEnabled()</code>：从 <code>PROPERTIES</code> 的 JSON 按 key 取、值大小写无关、缺 key 即未开启、读不出来抛而不是答 false</td></tr>
   <tr><td><code>OffsetStateTest</code></td><td>6</td><td>往返、Integer/Long 容错、缺字段降级、<code>snapshot_done=false</code> 不被读成已完成、id 解不出非负数（字符串/布尔/null/负值）时整条回 fresh</td></tr>
   <tr><td><code>NonTrackableExceptionTest</code></td><td>4</td><td>五种写法分三组识别（BE 执行期、bookmark 失效、FE 规划期），加一条不过度匹配</td></tr>
@@ -634,19 +641,13 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <p><code>bookmarkCreate</code> 的三段逻辑值得留意：队列非空就出队；队列空但见过该表就<strong>重复上次的值</strong>（这就是 idle dedup 的模拟）；从没编排过就用自增计数器（Connector 的 preflight 探针走这条）。</p>
 
 <h3 id="TransportBench"><span class="fn">TransportBench</span><span class="sz">手动运行的读取基准</span></h3>
-<p class="role">在同一 JVM 中直接测 <code>StarRocksJdbcClient</code> 的 MySQL 与 Arrow Flight 读取路径；需要现成的 StarRocks 表，不负责造数，也不启动 Connect 或 Kafka。</p>
-<p><code>run()</code> 是 JUnit 入口：只有同时传入 <code>bench.mysql.url</code> 和 <code>bench.arrow.url</code> 才运行，否则由 <code>Assume</code> 跳过。它从 <code>bench.db</code>/<code>bench.tables</code> 取目标表，为两条协议各建一个 client；默认各读 5 轮，首轮只预热、不计入报告。</p>
-<ol>
-  <li><code>benchTable()</code> 先用 MySQL client 读取一次列元数据、创建 <code>base</code> bookmark。每轮依次调用两条协议的 <code>streamSnapshot(db, table, cols, base, consumer)</code>，回调只计行数。这个方法是 <code>CdcClient</code> 的默认实现：打开 <code>openSnapshot()</code> 游标，循环 <code>next()</code>，读到结尾后关闭游标；生产 Task 则直接持有游标，每次 <code>poll()</code> 最多取一个快照批次。</li>
-  <li>传入 <code>bench.mutation.sql</code> 且表已开启 CDC 时，用 MySQL 连接<strong>只执行一次</strong> SQL（其中 <code>{db}</code>/<code>{table}</code> 会替换为目标名），再创建 <code>head</code> bookmark。若版本未变化就跳过 CHANGES；否则两条协议在每轮调用 <code>streamChanges(db, table, cols, base, head, consumer)</code>，读取<strong>同一个</strong>窗口，回调同样只计行数。快照和 CHANGES 都在轮次间交替 MySQL/Arrow 的先后顺序。</li>
-  <li>所有表测完后，<code>benchCreateLatency()</code> 在第一张表上给每条协议各建一个 holder，重复调用未变更表的 <code>bookmarkCreate()</code>；默认各测 20 次。<code>finally</code> 释放持有的 bookmark 并关闭两个 client。</li>
-</ol>
-<p><code>Meter.measure()</code> 围住一次 <code>streamSnapshot()</code> 或 <code>streamChanges()</code> 调用，包括查询、JDBC 取值与解码、计数回调及资源关闭；<strong>不包括</strong>测量前的列元数据读取、bookmark 创建和 SQL mutation，也不包括 Task 的记录映射与分批 <code>poll()</code>、Connect 转换、Kafka 写入。<code>bookmark_create (idle)</code> 单独计时。</p>
-<p>每组 <code>(table, path, transport)</code> 报告预热后样本的 <code>p50 ms</code>、<code>min ms</code>、行数，以及用 <code>行数 / p50 墙钟时间</code>计算的 <code>rows/s</code>。<code>cpu s</code> 是一次读取期间<strong>整个 JVM 所有线程</strong>的进程 CPU 时间中位数；<code>alloc MB</code> 是测量前后存活线程累计分配字节的差值中位数；<code>rss MB</code> 是各轮读完后观测到的最大进程 RSS，并非持续采样的峰值。报告也写到 <code>target/transport-bench.txt</code>。因此它适合比较 client 读取成本，端到端吞吐仍看 <code>bench-cluster.sh</code>。</p>
-<p>设 <code>BENCH_READ_TIMINGS=1</code>（直接运行 JUnit 用 <code>-Dbench.read.timings=true</code>）时，报告额外给出 <code>ResultSet.next()</code> 与 <code>ValueReader.readRow()</code> 的独立 p50 耗时；不再逐列采样。线上短时排查可给目标 Connector 设置 <code>source.read.timings.enabled=true</code>，并把 <code>StarRocksJdbcClient</code>、<code>StarRocksCdcSourceTask</code> 的日志级别设为 DEBUG。Client 每次完成读取输出 <code>query_ms</code>、<code>next_ms</code>、<code>decode_ms</code>；Task 每个快照批次或 CHANGES 窗口输出 <code>map_ms</code>、<code>table_ms</code> 及起止 epoch 毫秒时间戳。默认关闭。开启后逐行读取时钟会增加开销，吞吐对比应使用关闭计时的结果。</p>
-<p><code>bench-transport.sh</code> 在 <code>cdc_read_bench</code> 里生成两组等行数的数据。两表列序相同：共有标量列之后依次是 <code>a</code>/<code>m</code>/<code>st</code>/<code>j</code>；<code>perf_complex</code> 分别用 ARRAY、MAP、STRUCT、JSON，<code>perf_scalar</code> 则放内容对应的 VARCHAR 文本。这样对齐列数并近似对齐文本量；JSON 在 <code>ValueReader</code> 中仍走 <code>getString()</code>，不进入嵌套值解析器。脚本随后调用 <code>mvn -q test -Dtest=TransportBench</code>，退出时删除本次创建的数据库；若库已存在则拒绝运行，不会删除已有数据。报告保留在 <code>target/transport-bench.txt</code>。同一表内比较协议；两表间的差值仍包含存储与传输表示等差异，不能直接当作 MySQL 文本解析耗时。</p>
+<p class="role">在同一 JVM 内通过 <code>CdcClient</code> 测 MySQL JDBC、Arrow Flight JDBC 和 Arrow ADBC 读取。它不经过 Task、Connect 记录转换或 Kafka 写入。</p>
+<p><code>bench.transports</code> 选择协议，默认 MySQL 与 Flight JDBC；ADBC 使用 <code>bench.adbc.uri</code>，同时保留 MySQL JDBC 连接处理书签和元数据。每张表先建立一个 <code>base</code> bookmark，各传输轮流读取同一个快照；指定 <code>bench.mutation.sql</code> 时执行一次更新，再用同一个 <code>head</code> bookmark 反复读取相同 CHANGES 窗口。默认五轮，首轮预热，不计入报告；回调只计行数，并检查各传输行数相同，不比较列值。<code>streamSnapshot()</code> 是 <code>CdcClient</code> 的默认游标遍历方法，Task 则跨 <code>poll()</code> 保存快照游标。</p>
+<p><code>Meter.measure()</code> 计入查询、批次或逐行读取、值转换、计数回调和关闭资源；不计入测量前的元数据读取、书签创建与更新 SQL，也不计入 Task 映射或 Kafka 写入。报告给出预热后 p50/min 墙钟时间、rows/s、进程 CPU、Java 线程分配量及读完后的 RSS；<code>bookmark_create (idle)</code> 单独计时。ADBC 原始批次性能不在该报告中，<code>arrow-adbc</code> 会生成逐行规范值。</p>
+<p><code>BENCH_READ_TIMINGS=1</code> 时，JDBC 额外统计 <code>ResultSet.next()</code> 与 <code>JdbcRowReader.readRow()</code>；ADBC 的线上 DEBUG 摘要将 <code>next_ms</code> 用于 Arrow 批次加载、<code>decode_ms</code> 用于逐行向量取值。Task 的 <code>map_ms</code>/<code>table_ms</code> 另行统计。逐行计时影响吞吐比较，应使用关闭计时的运行结果评估性能。</p>
+<p><code>bench-transport.sh</code> 创建 <code>cdc_read_bench</code> 中等行数的 <code>perf_scalar</code> 与 <code>perf_complex</code> 表，运行基准后删除本次创建的库；已有同名库时直接拒绝运行。两表列数相同，前者用 VARCHAR 对齐后者的 ARRAY/MAP/STRUCT/JSON 列。脚本默认比较 MySQL JDBC、Arrow Flight JDBC 和 Arrow ADBC，可用 <code>BENCH_TRANSPORTS</code> 选择子集；结果保留在 <code>target/transport-bench.txt</code>。端到端吞吐看 <code>bench-cluster.sh</code>。</p>
 <pre><code>SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
-  BENCH_ROWS=1000000 BENCH_READ_TIMINGS=1 ./src/test/integration/bench-transport.sh</code></pre>
+  ./src/test/integration/bench-transport.sh</code></pre>
 
 <h2 id="scripts"><span class="no">8</span>集成脚本</h2>
 
@@ -656,10 +657,10 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 <table>
   <tr><th>文件</th><th>内容</th></tr>
   <tr><td><code>common.sh</code></td><td>两套 harness 逐字相同的部分：路径常量、时区与 LARGEINT 固定值、<code>step</code>/<code>fail</code>/<code>note</code>、<code>verify_plugin_jar</code>、<code>stage_plugin_dir</code></td></tr>
-  <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 切换两条通道</td></tr>
+  <tr><td><code>smoke-cluster.sh</code></td><td>对接已有集群，12 个步骤。<code>SR_TRANSPORT</code> 可选 MySQL JDBC、Arrow Flight JDBC 或 Arrow ADBC</td></tr>
   <tr><td><code>smoke.sh</code></td><td>Docker 自建环境，9 个步骤（0–8），只走 MySQL 协议。断言同源，但编号与 <code>smoke-cluster.sh</code> 并不对齐；同样播种六个嵌套元素列并按精确 JSON 断言</td></tr>
   <tr><td><code>bench-transport.sh</code></td><td>建立列数相同的 VARCHAR 对照表与 ARRAY/MAP/STRUCT/JSON 表，运行 <code>TransportBench</code>，退出时删除本次创建的数据库；默认各 100 万行，可用 <code>BENCH_ROWS</code> 调整</td></tr>
-  <tr><td><code>bench-cluster.sh</code></td><td>在固定库 <code>cdc_bench</code> 中按 <code>bench-transport.sh</code> 的列和值生成 scalar VARCHAR 对照表及 ARRAY/MAP/STRUCT/JSON complex 表；库已存在时拒绝运行，只清理本次创建的库。每种类型与传输协议各用一张独立表及 topic，默认运行四组，可用 <code>BENCH_SHAPES</code> 选一种类型。每表默认生成 500 万行快照，随后依次更新互不重叠的 5 万行和 50 万行，分别产生 10 万条日常变更和 100 万条突发变更；两轮各自等待 Kafka offset 达标并单独报告耗时。每组使用相同的 worker 设置并单独启动 connect-standalone，按 topic 末尾 offset 计时快照与 CHANGES。独立 JMX 进程每秒采样 Connect 的 poll/write 进度和待写数、producer 排队与请求延迟、等待线程及错误数；报告每阶段尾部排空时间和峰值积压。CHANGES 时间线列出从 mutation 开始到 SQL 完成、Task 起止、Connect poll/write 达标及 Kafka offset 达标的累计秒数；原始时间戳与 JMX 样本保留在 <code>target/bench-metrics-*</code>。另读整轮 <code>poll-batch-avg/max-time-ms</code>，采样 worker 的 RSS 与 CPU。<code>BENCH_READ_TIMINGS=1</code> 会在脚本输出中汇总 snapshot/CHANGES 的 <code>query/next/decode/map/table</code> 耗时，并提供 Task 起止时间；若未自定义 <code>KAFKA_LOG4J_OPTS</code>，脚本也会启用两个 CDC 类的 DEBUG 日志。只测 client 读取路径的 <code>TransportBench</code> 见上节</td></tr>
+  <tr><td><code>bench-cluster.sh</code></td><td>在固定库 <code>cdc_bench</code> 中按 <code>bench-transport.sh</code> 的列和值生成 scalar VARCHAR 对照表及 ARRAY/MAP/STRUCT/JSON complex 表；库已存在时拒绝运行，只清理本次创建的库。每种类型与传输协议各用一张独立表及 topic，默认运行六组（两种类型 × MySQL JDBC、Arrow Flight JDBC、Arrow ADBC），可用 <code>BENCH_SHAPES</code> 或 <code>BENCH_TRANSPORTS</code> 选择子集。每表默认生成 500 万行快照，随后依次更新互不重叠的 5 万行和 50 万行，分别产生 10 万条日常变更和 100 万条突发变更；两轮各自等待 Kafka offset 达标并单独报告耗时。每组使用相同的 worker 设置并单独启动 connect-standalone，按 topic 末尾 offset 计时快照与 CHANGES。独立 JMX 进程每秒采样 Connect 的 poll/write 进度和待写数、producer 排队与请求延迟、等待线程及错误数；报告每阶段尾部排空时间和峰值积压。CHANGES 时间线列出从 mutation 开始到 SQL 完成、Task 起止、Connect poll/write 达标及 Kafka offset 达标的累计秒数；原始时间戳与 JMX 样本保留在 <code>target/bench-metrics-*</code>。另读整轮 <code>poll-batch-avg/max-time-ms</code>，采样 worker 的 RSS 与 CPU。<code>BENCH_READ_TIMINGS=1</code> 会在脚本输出中汇总 snapshot/CHANGES 的 <code>query/next/decode/map/table</code> 耗时，并提供 Task 起止时间；若未自定义 <code>KAFKA_LOG4J_OPTS</code>，脚本也会启用 JDBC client、ADBC client 与 Task 的 DEBUG 日志。只测 client 读取路径的 <code>TransportBench</code> 见上节</td></tr>
 </table>
 </div>
 
@@ -667,14 +668,14 @@ sourceOffset    = {"bookmark_id": &lt;long&gt;, "snapshot_done": &lt;boolean&gt;
 
 <h4>12 个步骤在验什么</h4>
 <ol>
-  <li><strong>0</strong> 打包完整性（连接器类、<strong>MariaDB 驱动</strong>、Debezium 三个类、版本资源）+ 集群前置（run_mode 必须是 shared_data、meta functions 开关、OPERATE 权限、FE leader）。Arrow Flight 驱动<strong>不在这里查</strong>——它在步骤 1 的 <code>SR_TRANSPORT=arrow-flight</code> 分支里，跑 MySQL 协议时根本不检</li>
-  <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic。表里除标量与 ARRAY/MAP/STRUCT 基本列外，还有六个专挑两条传输分歧点的嵌套元素列：<code>array&lt;date&gt;</code>、<code>array&lt;datetime&gt;</code>（带微秒）、<code>map&lt;int,int&gt;</code>、<code>array&lt;varbinary&gt;</code>、<code>array&lt;boolean&gt;</code>、<code>struct&lt;date, json&gt;</code></li>
+  <li><strong>0</strong> 打包完整性（连接器类、<strong>MariaDB 驱动</strong>、Debezium 三个类、版本资源）+ 集群前置（run_mode 必须是 shared_data、meta functions 开关、OPERATE 权限、FE leader）。Flight 依赖按选中的 <code>SR_TRANSPORT</code> 检查，JDBC 与 ADBC 驱动都从打包目录装入 worker</li>
+  <li><strong>1–2</strong> 建表播种、生成 worker 与 connector 配置、建 topic。表里除标量与 ARRAY/MAP/STRUCT 基本列外，还有六个专挑不同读取路径分歧点的嵌套元素列：<code>array&lt;date&gt;</code>、<code>array&lt;datetime&gt;</code>（带微秒）、<code>map&lt;int,int&gt;</code>、<code>array&lt;varbinary&gt;</code>、<code>array&lt;boolean&gt;</code>、<code>struct&lt;date, json&gt;</code></li>
   <li><strong>3</strong> 启动 worker，等到快照记录到达</li>
   <li><strong>4–5</strong> UPDATE/DELETE，然后断言：3 条 <code>op=r</code>、同一行（<code>id=2</code>）的 <code>op=d(v=20)</code> <strong>行号早于</strong> <code>op=c(v=200)</code>、DELETE 产出 <code>op=d</code>、BOOLEAN 到达时是 JSON 布尔而 TINYINT 是数字、LARGEINT 以不加引号的完整数字到达（依赖 <code>value.converter.decimal.format=NUMERIC</code>，否则 Decimal 是 base64）、envelope 带 <code>transaction</code> 字段</li>
   <li><strong>6</strong> 杀 worker 重启，新行以 <code>op=c</code> 出现且快照不重放</li>
-  <li><strong>7</strong> DATE 与 DATETIME 在两条传输上都断言精确字符串。arrow-flight 上驱动的 JVM 时区平移由连接器按传输逆转（第一次真集群冒烟时顶层 <code>ts</code> 是 04:34 而嵌套 <code>adt</code> 是 12:34，同一条记录里自相矛盾，这就是修它的起点）</li>
+  <li><strong>7</strong> DATE 与 DATETIME 在所选传输上都断言精确字符串。arrow-flight 上驱动的 JVM 时区平移由连接器按传输逆转（第一次真集群冒烟时顶层 <code>ts</code> 是 04:34 而嵌套 <code>adt</code> 是 12:34，同一条记录里自相矛盾，这就是修它的起点）</li>
   <li><strong>8–9</strong> bookmark 确实被释放，且没有释放失败</li>
-  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>$TMPDIR</code> 或 <code>/tmp</code> 下的 <code>sr-cdc-smoke-parity</code>），另一条传输对同一个 jar 跑完后 <code>diff</code>，不同即失败——这就是"两条传输逐字节相同"的实证</li>
+  <li><strong>10</strong> VARBINARY 以 base64 <code>AQL/</code> 到达（<code>op=r</code> 与 <code>op=d</code> 各查一次）；ARRAY/MAP/STRUCT 及六个嵌套列按<strong>精确 JSON</strong>断言（<code>[10,20,30]</code>、<code>{"1":2}</code>、<code>[true,false]</code>、<code>["AQL/"]</code>、<code>{"d":"2026-08-05","j":"{\"a\": 1}"}</code>……），不再是 <code>grep seven</code>；JSON 仍是字符串。随后是<strong>传输一致性</strong>：把 <code>id=1</code> 快照记录的 <code>after</code> 对象按插件 jar 的校验和留在 <code>$SMOKE_PARITY_DIR</code>（默认 <code>$TMPDIR</code> 或 <code>/tmp</code> 下的 <code>sr-cdc-smoke-parity</code>），对照传输（MySQL 与 Arrow Flight JDBC，或 MySQL 与 Arrow ADBC）对同一个 jar 跑完后 <code>diff</code>，不同即失败</li>
   <li><strong>11</strong> preflight 拒绝含 HLL 列的表并指明列名——同时证明 StarRocks 类型名在当前通道上确实传到了守卫</li>
 </ol>
 

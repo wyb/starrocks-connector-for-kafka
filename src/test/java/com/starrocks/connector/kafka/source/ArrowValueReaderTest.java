@@ -41,7 +41,7 @@ import static org.junit.Assert.fail;
 
 /**
  * Feeds the reader the object shapes the Arrow Flight JDBC driver produces (verified against
- * flight-sql-jdbc-driver 18.0.0) and checks the neutral value, then the assembled Connect value.
+ * flight-sql-jdbc-core 18.0.0) and checks the neutral value, then the assembled Connect value.
  */
 public class ArrowValueReaderTest {
 
@@ -193,6 +193,12 @@ public class ArrowValueReaderTest {
             assertEquals(true, e.getMessage().contains("array<int>"));
             assertEquals(true, e.getMessage().contains("LinkedHashMap"));
         }
+        try {
+            new ArrowValueReader().nested(type("array<json>"), Arrays.asList(map("k", 1)));
+            fail("a map must not be rendered as JSON text with Map.toString()");
+        } catch (DataException e) {
+            assertEquals(true, e.getMessage().contains("json"));
+        }
     }
 
     /** The epoch-based entry points agree with the Date-based text of the base reader. */
@@ -215,7 +221,7 @@ public class ArrowValueReaderTest {
             Timestamp shifted = Timestamp.valueOf(digits);            // what the Arrow driver does
             assertEquals("2026-08-05 04:34:56.123456", ValueReader.dateTimeText(shifted));
             assertEquals("2026-08-05 12:34:56.123456",
-                    ValueReader.dateTimeText(ArrowValueReader.fromJvmWallClock(shifted)));
+                    ValueReader.dateTimeText(ArrowJdbcValueReader.fromJvmWallClock(shifted)));
         } finally {
             TimeZone.setDefault(previous);
         }

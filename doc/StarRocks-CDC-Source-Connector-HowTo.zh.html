@@ -185,7 +185,7 @@
 
 <h2 id="what-it-does"><span class="no">1</span>What It Does</h2>
 <p>StarRocks CDC source connector 是一个 Kafka Connect <strong>source</strong>（源）连接器——方向与本仓库中已有的 StarRocks sink connector 相反。它会把变更数据捕获（CDC）事件从 StarRocks 的<strong>存算分离（云原生）</strong>表持续流出到 Kafka topic，每个被捕获的表对应一个 topic。</p>
-<p>它在内部通过 FE 的 MySQL 协议（JDBC）驱动 StarRocks 已有的 bookmark 与 CHANGES 基础设施：用 <code>bookmark_create</code>/<code>bookmark_renew</code>/<code>bookmark_release</code> 元函数钉住一个位置（position），通过 <code>[_BOOKMARK_&lt;id&gt;_]</code> 查询提示（query hint）获取某个时间点的初始快照，再通过 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 查询提示流式获取增量变更。每条记录都以 Debezium envelope（<code>before</code>/<code>after</code>/<code>source</code>/<code>op</code>/<code>ts_ms</code>/<code>transaction</code>，由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
+<p>它通过 JDBC 执行 StarRocks 的 bookmark 和元数据操作，再通过配置的 JDBC 或 Arrow ADBC 通道读取 <code>[_BOOKMARK_&lt;id&gt;_]</code> 初始快照与 <code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code> 增量窗口。每条记录都以 Debezium envelope（<code>before</code>/<code>after</code>/<code>source</code>/<code>op</code>/<code>ts_ms</code>/<code>transaction</code>，由 Debezium 官方的 <code>io.debezium.data.Envelope</code> 构建）形式发出，其 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>。投递语义为<strong>至少一次（at-least-once）</strong>。</p>
 
 <h2 id="prerequisites"><span class="no">2</span>前置条件</h2>
 <ul>
@@ -214,6 +214,8 @@
 <table>
   <tr><th>键</th><th>类型</th><th>默认值</th><th>说明</th></tr>
   <tr><td><code>starrocks.jdbc.url</code></td><td>String</td><td><em>(必填)</em></td><td>StarRocks FE 端点的 JDBC URL。多个 FE host 用逗号分隔（例如 <code>jdbc:mysql://fe1:9030,fe2:9030</code>），以便客户端在执行 bookmark 调用时可以轮转到 leader。URL scheme 决定了所使用的传输方式：<code>jdbc:mysql://</code> 对应 MySQL 协议，<code>jdbc:arrow-flight-sql://</code> 对应 Arrow Flight SQL——参见<a href="#choosing-a-transport">选择传输方式</a>。</td></tr>
+  <tr><td><code>source.read.transport</code></td><td>String</td><td><code>jdbc</code></td><td><code>jdbc</code> 使用上述 URL 读取快照和 CHANGES；<code>arrow-adbc</code> 使用 Arrow ADBC 读取。书签和元数据仍走 JDBC。</td></tr>
+  <tr><td><code>starrocks.adbc.uri</code></td><td>String</td><td><code>""</code></td><td>选择 <code>arrow-adbc</code> 时必填；可用逗号列出多个 Flight 端点，例如 <code>grpc+tcp://fe1:9408,grpc+tcp://fe2:9408</code>。</td></tr>
   <tr><td><code>starrocks.database.name</code></td><td>String</td><td><em>(必填)</em></td><td>源 StarRocks 数据库的名称。</td></tr>
   <tr><td><code>starrocks.username</code></td><td>String</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的用户名。需要 <code>OPERATE</code> 权限。</td></tr>
   <tr><td><code>starrocks.password</code></td><td>Password</td><td><em>(必填)</em></td><td>用于连接 StarRocks 的密码。以 Kafka Connect 的 <code>Password</code> 类型存储，因此会在日志和连接器状态 API 中被掩码处理。</td></tr>
@@ -223,14 +225,15 @@
   <tr><td><code>source.snapshot.mode</code></td><td>String</td><td><code>initial</code></td><td>是否在开始流式传输变更之前先进行一次初始快照。取值为 <code>initial</code>、<code>no_snapshot</code> 之一。<strong><code>no_snapshot</code> 不能与 <code>source.nontrackable.policy=resnapshot</code> 组合使用</strong>——这一组合会在启动时被 <code>ConfigException</code> 直接拒绝，因为 <code>resnapshot</code> 依赖一次全新快照来重建表的位置，而在快照被禁用的情况下它只会静默丢失变更。</td></tr>
   <tr><td><code>source.no.snapshot.missing.position.policy</code></td><td>String</td><td><code>fail</code></td><td><code>no_snapshot</code> 下某张表既没有持久 offset、也没有该连接器持有的 bookmark 时的行为：<code>fail</code> 要求显式初始化；<code>latest</code> 在当前版本创建新 bookmark。旧引用过期后也会触发 <code>latest</code>，可能跳过其间的变更。</td></tr>
   <tr><td><code>source.poll.interval.ms</code></td><td>Long</td><td><code>5000</code></td><td>在一次未产生任何记录的轮询之后，到下一次轮询之间的休眠毫秒数。</td></tr>
-  <tr><td><code>source.snapshot.batch.size</code></td><td>Int</td><td><code>4096</code></td><td>每张表每次 <code>poll()</code> 最多返回的快照记录数。快照游标跨批次保持打开，每张正在快照的表使用一条独立的 JDBC 读取连接；此配置不限制 CHANGES 窗口。</td></tr>
+  <tr><td><code>source.snapshot.batch.size</code></td><td>Int</td><td><code>4096</code></td><td>每张表每次 <code>poll()</code> 最多返回的快照记录数。快照游标跨批次保持打开，每张正在快照的表使用一条独立的读取连接；此配置不限制 CHANGES 窗口。</td></tr>
   <tr><td><code>source.bookmark.ttl.ms</code></td><td>Long</td><td><code>604800000</code>（7 天）</td><td>支撑每张表位置的 bookmark 的存活时间（time-to-live），单位为毫秒。task 轮询期间会按服务端实际授予的租约自动续租；TTL 是连接器停止轮询后的兜底——参见<a href="#limitations">限制</a>。取非正值只是不设<em>引用级</em>上限：集群上限 <code>bookmark_reference_max_ttl_ms</code> 照样让 bookmark 过期，因此续租仍会持续；即便服务端回报「永不过期」，也会每五分钟重新探测一次，因为该上限是随时可改的 mutable 配置。</td></tr>
   <tr><td><code>source.nontrackable.policy</code></td><td>String</td><td><code>fail</code></td><td>当某张表的 CHANGES 窗口变为不可追踪时应采取的动作。取值为 <code>fail</code>、<code>resnapshot</code> 之一。<strong><code>resnapshot</code> 要求 <code>source.snapshot.mode=initial</code></strong>（即默认值）：与 <code>source.snapshot.mode=no_snapshot</code> 组合时会在启动时被 <code>ConfigException</code> 拒绝，因为此时没有任何快照可用于重建该表的位置。</td></tr>
   <tr><td><code>source.tombstones.on.delete</code></td><td>Boolean</td><td><code>false</code></td><td>为 <code>true</code> 时，会在每条删除记录之后立即发出一条额外的 tombstone 记录（value 为 null，key 相同）。</td></tr>
   <tr><td><code>source.max.retries</code></td><td>Int</td><td><code>3</code></td><td>一次 bookmark 调用在放弃前的尝试次数（对应 sink 连接器的 <code>sink.maxretries</code>）。</td></tr>
   <tr><td><code>source.poll.retry.timeout.ms</code></td><td>Long</td><td><code>600000</code></td><td>一张表的读取跨 poll 持续失败多久之后，task 不再重试而是失败。每次失败的 poll 都会先等一个 <code>source.poll.interval.ms</code> 再重试。<code>-1</code> 永远重试；<code>0</code> 首次失败即停。</td></tr>
-  <tr><td><code>source.connect.timeout.ms</code></td><td>Int</td><td><code>1000</code></td><td>连接 StarRocks 的尝试在超时前等待的毫秒数。sink 连接器的同类配置写作 <code>connect.timeoutms</code>，两者是不同的键。</td></tr>
-  <tr><td><code>source.read.timings.enabled</code></td><td>Boolean</td><td><code>false</code></td><td>为当前 Connector 统计 JDBC 查询、逐行 <code>next()</code>/解码及 Task 记录映射耗时。将 <code>StarRocksJdbcClient</code> 和 <code>StarRocksCdcSourceTask</code> 的日志设为 DEBUG 后会输出读取和每表 Task 汇总。计时有额外开销，建议仅在排查时开启。</td></tr>
+  <tr><td><code>source.connect.timeout.ms</code></td><td>Int</td><td><code>1000</code></td><td>正整数，单位毫秒；控制书签和元数据的 JDBC 建连，以及 JDBC 或 Arrow ADBC 读取连接的建连等待时间。sink 连接器使用另一个键 <code>connect.timeoutms</code>。</td></tr>
+  <tr><td><code>source.read.timeout.ms</code></td><td>Int</td><td><code>120000</code></td><td>正整数，单位毫秒；分别限制 Arrow ADBC 查询、读取下一个 Flight 批次及清理 CHANGES 读取资源的等待时间。超时后丢弃读取连接，下一轮切换到下一个 Flight 端点重试。</td></tr>
+  <tr><td><code>source.read.timings.enabled</code></td><td>Boolean</td><td><code>false</code></td><td>统计查询、读取/解码及 Task 记录映射耗时。将 <code>StarRocksJdbcClient</code> 或 <code>StarRocksAdbcClient</code>，以及 <code>StarRocksCdcSourceTask</code> 的日志设为 DEBUG 后输出汇总。计时有额外开销，建议仅在排查时开启。</td></tr>
 </table>
 </div>
 
@@ -264,10 +267,11 @@ source.tombstones.on.delete=false
 source.max.retries=3
 source.poll.retry.timeout.ms=600000
 source.connect.timeout.ms=1000
+source.read.timeout.ms=120000
 source.read.timings.enabled=false</code></pre>
 
 <h3 id="choosing-a-transport">选择传输方式</h3>
-<p>URL scheme 就是唯一的开关——并不存在单独的传输方式配置项，因为一个 JDBC URL 本身就已经指明了它要使用的驱动（driver）。两种驱动都内置在插件 jar 包中；未被指定使用的那一个则始终保持不活跃（inert）。</p>
+<p>默认的 <code>source.read.transport=jdbc</code> 由 URL scheme 选择 MySQL 或 Arrow Flight JDBC；下表比较这两种 JDBC 路径。设置 <code>source.read.transport=arrow-adbc</code> 后，快照和 CHANGES 读取使用 ADBC；<code>starrocks.jdbc.url</code> 仍负责书签与元数据操作。</p>
 
 <div class="tablewrap">
 <table>
@@ -279,7 +283,7 @@ source.read.timings.enabled=false</code></pre>
 </table>
 </div>
 
-<p>优先使用 MySQL 协议。它不需要任何额外配置，并且对增量窗口而言，数据量通常足够小，FE 一般不会成为瓶颈。当 FE 明显成为瓶颈时，再考虑使用 Arrow Flight——这种情况最常出现在大型初始快照期间，而这部分工作负载本来也只是一次性的。</p>
+<p>根据表的列类型和端到端测试结果选择读取路径。Arrow ADBC 可以省去 JDBC 逐行取值，但转换为 Kafka Connect 记录及写入 Kafka 的时间仍可能主导总耗时。</p>
 
 <p>要使用 Arrow Flight SQL：</p>
 
@@ -288,13 +292,19 @@ source.read.timings.enabled=false</code></pre>
   <li><strong>把 URL 指向该端口</strong>，而不是 9030，并保留 <code>?useEncryption=false</code>，除非你已经配置了 TLS——Arrow 驱动默认会协商使用 TLS，如果不带这个参数，在连接明文（plaintext）服务端时会失败。</li>
   <li><strong>为 Connect worker 打开 <code>java.nio</code></strong>（Java 9+），否则 Arrow 无法分配它的堆外（off-heap）缓冲区：
     <pre><code>export KAFKA_OPTS="$KAFKA_OPTS --add-opens=java.base/java.nio=ALL-UNNAMED"</code></pre>
-    StarRocks 自己的 Arrow Flight 文档把这个参数写成 <code>--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</code>。当 Arrow 位于 JVM 的 <em>module path</em> 上时，指定模块名是正确的；但在我们这里，驱动被 shade 进 plugin jar、由 Connect 的 plugin classloader 从 classpath 加载，因此并不存在一个名为 <code>org.apache.arrow.memory.core</code> 的具名模块可供 open。实际生效的只有 <code>ALL-UNNAMED</code> 那一半，而模块名那一半只会让每次 JVM 启动都打印一行 <code>WARNING: Unknown module</code>——无害，但没有必要带着。
+    StarRocks 自己的 Arrow Flight 文档把这个参数写成 <code>--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</code>。当 Arrow 位于 JVM 的 <em>module path</em> 上时，指定模块名是正确的；但在我们这里，Arrow 由 Connect 的 plugin classloader 从 classpath 加载，因此并不存在一个名为 <code>org.apache.arrow.memory.core</code> 的具名模块可供 open。实际生效的只有 <code>ALL-UNNAMED</code> 那一半，而模块名那一半只会让每次 JVM 启动都打印一行 <code>WARNING: Unknown module</code>——无害，但没有必要带着。
   </li>
 </ol>
 
 <p>除此之外，其余部分完全相同：相同的 CHANGES 窗口、相同的 bookmark、相同的 envelope。在这种传输方式下，连接器会跳过仅适用于 MySQL 的流式 fetch-size 调用，因为 Arrow 原生就以 RecordBatch 的形式进行流式传输。</p>
 
-<p>在信任一次 Flight 部署之前，先针对你的集群以 <code>SR_TRANSPORT=arrow-flight</code> 运行集成冒烟测试（integration smoke test）来验证它——该测试会在新的传输方式上运行同一组断言，包括“删除先于插入”的顺序不变式——那是底层驱动发生变化时最容易出现回归的一项。注意它<strong>不会</strong>在该通道上断言时间类型的取值（脚本只检查列是否存在并打印实际值），原因见限制第 11 条。</p>
+<p>使用 Arrow ADBC 读取时，保留用于书签和元数据的 MySQL JDBC URL，并添加：</p>
+<pre><code>starrocks.jdbc.url=jdbc:mysql://fe1:9030,fe2:9030
+source.read.transport=arrow-adbc
+starrocks.adbc.uri=grpc+tcp://fe1:9408</code></pre>
+<p>同样需要启用 <code>arrow_flight_port</code> 和上述 worker JVM 参数。可在 <code>starrocks.adbc.uri</code> 中列出多个 Flight 端点；ADBC 连接或读取失败时切换到下一端点，JDBC 书签操作则独立按 <code>starrocks.jdbc.url</code> 轮转。ADBC 要求连接器能解析列类型；对于只能按服务端原样文本传递的列，启动预检会拒绝该表，请使用 JDBC 读取。</p>
+
+<p>在集群上使用 <code>SR_TRANSPORT=arrow-flight</code> 或 <code>SR_TRANSPORT=arrow-adbc</code> 运行集成冒烟测试，核对所选读取路径的 delete→insert 顺序、复杂类型和时间值。</p>
 
 <p>每条记录的 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>，因此需要配置支持 schema 的 <code>key.converter</code>/<code>value.converter</code>（例如启用了 <code>schemas.enable=true</code> 的 <code>JsonConverter</code>，或依赖 schema registry 的 Avro/Protobuf converter）。</p>
 

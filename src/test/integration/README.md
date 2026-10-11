@@ -41,16 +41,20 @@ assertions over the Arrow Flight SQL transport instead of the MySQL protocol. It
 `arrow_flight_port` first and fails with the remedy if the cluster has it disabled, and it injects
 the `--add-opens` flag Arrow needs into the worker JVM. Running both settings is the only way to
 know a transport change has not moved the delete-before-insert ordering or the temporal reads.
+With `SR_TRANSPORT=arrow-adbc`, the cluster smoke test places an unavailable Flight URI before
+the real FE and checks that the worker switches endpoints before the snapshot. Override the
+unavailable URI with `SR_ADBC_FAILOVER_URI` if port 1 on localhost is in use. Both smoke scripts
+also check the exact Kafka record count after mutations, restart, and bookmark reclamation.
 
 ## Transport benchmark
 
-Two entry points compare the MySQL protocol with Arrow Flight SQL on the same cluster. Neither
+Two entry points compare MySQL, Arrow Flight JDBC, and Arrow ADBC on the same cluster. Neither
 is part of `mvn test`.
 
 `TransportBench` (a JUnit class under `src/test/java`, selected only by name) drives
-`StarRocksJdbcClient` directly: for every table it pins one bookmark, reads the snapshot at it
-over both transports, alternating which goes first, and if `bench.mutation.sql` is given runs
-that once and reads the resulting CHANGES window over both. It also times `bookmark_create` on
+the selected `CdcClient` implementations directly: for every table it pins one bookmark, reads the snapshot at it
+over the selected transports, alternating which goes first, and if `bench.mutation.sql` is given runs
+that once and reads the resulting CHANGES window over each. It also times `bookmark_create` on
 an unchanged table, the idle poll's fixed cost, per transport. It reports p50 and min wall time,
 rows/s, process CPU, allocation and RSS, and writes the same table to `target/transport-bench.txt`.
 
@@ -61,6 +65,7 @@ are followed by `a`, `m`, `st`, and `j`. In `perf_complex` these are an eight-el
 a three-entry MAP, a STRUCT, and JSON; in `perf_scalar` they are VARCHAR columns containing
 corresponding text. This aligns the column count and approximates the text payload. JSON uses
 `getString()` in `ValueReader`, so its type contrast does not exercise the nested-value parser.
+The script compares all three transports by default; set `BENCH_TRANSPORTS` to select a subset.
 If `cdc_read_bench` already exists, the script exits without changing it:
 
 ```bash
@@ -70,7 +75,7 @@ SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
 
 Knobs: `SR_PASSWORD` (empty), `BENCH_BUCKETS` (8), `BENCH_ROUNDS` (5; first discarded),
 `BENCH_READ_TIMINGS` (0). With `BENCH_READ_TIMINGS=1`, the report also shows p50 time spent in
-`ResultSet.next()` and `ValueReader.readRow()` for each read. These per-row clock calls add
+`ResultSet.next()` and `ValueReader.readRow()` for JDBC reads. These per-row clock calls add
 overhead, so use `BENCH_READ_TIMINGS=0` for throughput comparisons:
 
 ```bash
@@ -80,18 +85,20 @@ SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
 
 For temporary diagnostics in a Connect worker, set
 `source.read.timings.enabled=true` on the source connector and enable DEBUG logging for
-`com.starrocks.connector.kafka.source.StarRocksJdbcClient` and
+`com.starrocks.connector.kafka.source.StarRocksJdbcClient` or
+`com.starrocks.connector.kafka.source.StarRocksAdbcClient`, plus
 `com.starrocks.connector.kafka.source.StarRocksCdcSourceTask`. The client logs `query_ms`,
 `next_ms`, and `decode_ms`; the task logs `map_ms` and per-table `table_ms` for each emitted
 snapshot batch or CHANGES window. The connector setting is off by default. Turn it off after
 collecting the data because timing every row affects throughput.
-The report remains in `target/transport-bench.txt` after cleanup. Compare MySQL and Arrow
+The report remains in `target/transport-bench.txt` after cleanup. Compare transports
 within each table; the difference between tables also includes storage and wire-format costs,
 so it does not isolate the text parser's cost. `TransportBench` can still be invoked directly
 with `-Dbench.*` against existing tables when data must remain available.
 
 `bench-cluster.sh` measures StarRocks → Connect → Kafka for scalar and complex tables over each
-transport. It creates `cdc_bench` for the run and refuses to run if that database already exists;
+transport (MySQL JDBC, Arrow Flight JDBC, and Arrow ADBC by default). It creates `cdc_bench`
+for the run and refuses to run if that database already exists;
 the database is removed during cleanup after a successful create. It uses the same schema and
 values as `bench-transport.sh`, with a separate table for
 each shape/transport pair so one UPDATE cannot affect another run. The scalar table has VARCHAR
@@ -116,12 +123,12 @@ The script requires a fresh topic for each run and never deletes a topic it did 
 SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
 KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
 BENCH_ROWS=5000000 BENCH_SHAPES='scalar complex' \
-BENCH_TRANSPORTS='mysql arrow-flight' ./bench-cluster.sh
+./bench-cluster.sh
 ```
 
 Build a fresh plugin jar with `mvn -DskipTests package` before the benchmark. The snapshot
 returns at most `BENCH_SNAPSHOT_BATCH_SIZE` records per poll (default 4096). For a comparison,
-repeat the benchmark with `BENCH_TRANSPORTS='arrow-flight mysql'` to reveal order/cache effects.
+repeat the benchmark with `BENCH_TRANSPORTS='arrow-adbc arrow-flight mysql'` to reveal order/cache effects.
 Use `BENCH_SHAPES=scalar` or `BENCH_SHAPES=complex` to run just one shape.
 Use `BENCH_DAILY_UPDATE_ROWS` and `BENCH_BURST_UPDATE_ROWS` to adjust the two update sizes;
 their sum must fit in `BENCH_ROWS`. To run one custom CHANGES phase instead, set
@@ -156,7 +163,7 @@ The rest of this page covers the Docker variant.
 
 - A Kafka image with the Connect scripts on board (default `apache/kafka:3.7.0`,
   override with `KAFKA_IMAGE`).
-- The shaded plugin jar built first:
+- The packaged plugin directory built first:
 
   ```bash
   cd ../../.. && mvn -DskipTests package
@@ -174,7 +181,7 @@ The script tears the containers down on exit, including on failure.
 
 | Step | Assertion |
 | --- | --- |
-| 0 | The primary shaded jar contains both the connector class and `org/mariadb/jdbc/Driver.class`, and is staged as the *only* jar in `target/smoke-plugin/` |
+| 0 | The package contains the connector jar and separate JDBC, Debezium, and Arrow dependencies, all staged in one `target/smoke-plugins/starrocks-cdc/` directory |
 | 2-3 | A PRIMARY KEY table with `enable_change_data_capture=true` produces topic `sr.smoke.orders` |
 | 5 | Initial snapshot emits exactly 3 `op="r"` records |
 | 5 | `UPDATE` emits `op="d"` (before image `v=20`) **before** `op="c"` (after image `v=200`) |
@@ -217,14 +224,10 @@ de-duplication.
 
 The Connect worker properties are generated by `smoke.sh` at run time; Connect
 itself runs as `connect-standalone` inside the Kafka container with
-`../../../target/smoke-plugin` mounted at `/plugins`.
+`../../../target/smoke-plugins` mounted at `/plugins`.
 
-That directory is created by `smoke.sh` at step 0 and holds a copy of the primary
-shaded jar and nothing else — Connect treats every entry under `plugin.path` as a
-separate plugin location, and `target/` after a `mvn package` holds several
-copies of the connector (the primary jar, the `-with-dependencies` jar,
-`original-*.jar` with **no** bundled JDBC driver, plus `classes/` and the assembly
-directories). Mounting `target/` wholesale made it arbitrary which one the worker
-loaded, so a run could fail with `IllegalStateException: mariadb-java-client
-driver not found on classpath` while the jar under test was perfectly fine. The
-directory is removed again by the cleanup trap.
+The staged `starrocks-cdc/` subdirectory holds the connector jar and its separate
+runtime dependencies. Connect scans that subdirectory as one plugin and gives its
+jars one classloader. `target/` itself also contains alternate project jars and
+assembly directories, so it cannot be used as `plugin.path`. The staged root is
+removed by the cleanup trap.

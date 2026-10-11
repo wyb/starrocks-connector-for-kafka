@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Benchmark scalar and complex values over both JDBC transports on an existing
-# StarRocks cluster. Owns cdc_read_bench for this run and removes it on exit.
+# Benchmark scalar and complex values over JDBC and optional Java ADBC paths on an existing
+# StarRocks cluster. BENCH_TRANSPORTS selects mysql, arrow-flight, or arrow-adbc.
+# Owns cdc_read_bench and removes it on exit.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -13,6 +14,7 @@ BENCH_ROWS="${BENCH_ROWS:-1000000}"
 BENCH_BUCKETS="${BENCH_BUCKETS:-8}"
 BENCH_ROUNDS="${BENCH_ROUNDS:-5}"
 BENCH_READ_TIMINGS="${BENCH_READ_TIMINGS:-0}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
 BENCH_DB="cdc_read_bench"
 
 [ -n "$SR_HOST" ] || { echo 'SR_HOST is required' >&2; exit 1; }
@@ -25,6 +27,20 @@ for setting in BENCH_ROWS BENCH_BUCKETS BENCH_ROUNDS; do
 done
 [ "$BENCH_ROUNDS" -gt 1 ] || { echo 'BENCH_ROUNDS must be at least 2 (first round is discarded)' >&2; exit 1; }
 [[ "$BENCH_READ_TIMINGS" = 0 || "$BENCH_READ_TIMINGS" = 1 ]] || { echo 'BENCH_READ_TIMINGS must be 0 or 1' >&2; exit 1; }
+selected_transports=' '
+transport_count=0
+transport_csv=''
+for transport in $BENCH_TRANSPORTS; do
+  case "$transport" in
+    mysql|arrow-flight|arrow-adbc) ;;
+    *) echo "BENCH_TRANSPORTS has unknown transport '$transport'" >&2; exit 1 ;;
+  esac
+  case "$selected_transports" in *" $transport "*) echo "BENCH_TRANSPORTS repeats '$transport'" >&2; exit 1 ;; esac
+  selected_transports="$selected_transports$transport "
+  transport_count=$((transport_count + 1))
+  transport_csv="${transport_csv:+$transport_csv,}$transport"
+done
+[ "$transport_count" -gt 0 ] || { echo 'BENCH_TRANSPORTS must name at least one transport' >&2; exit 1; }
 
 mysql_args=(-h "$SR_HOST" -P "$SR_PORT" -u "$SR_USER")
 [ -n "$SR_PASSWORD" ] && mysql_args+=(-p"$SR_PASSWORD")
@@ -99,12 +115,14 @@ for shape in scalar complex; do
 done
 
 echo
-echo 'Running TransportBench for perf_scalar and perf_complex'
+echo "Running TransportBench for perf_scalar and perf_complex; transports: $BENCH_TRANSPORTS"
 (
   cd "$REPO_ROOT"
   mvn -q test -Dtest=TransportBench \
     "-Dbench.mysql.url=jdbc:mysql://$SR_HOST:$SR_PORT" \
     "-Dbench.arrow.url=jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false" \
+    "-Dbench.adbc.uri=grpc+tcp://$SR_HOST:$SR_ARROW_PORT" \
+    "-Dbench.transports=$transport_csv" \
     "-Dbench.db=$BENCH_DB" "-Dbench.tables=perf_scalar,perf_complex" \
     "-Dbench.user=$SR_USER" "-Dbench.password=$SR_PASSWORD" "-Dbench.rounds=$BENCH_ROUNDS" \
     "-Dbench.read.timings=$([ "$BENCH_READ_TIMINGS" = 1 ] && echo true || echo false)" \

@@ -167,7 +167,7 @@ public class StarRocksJdbcClient implements CdcClient {
                     timings.queryNanos += System.nanoTime() - queryStart;
                 }
                 return new JdbcSnapshotCursor(snapshotConnection, stmt, rs,
-                        ValueReader.forTransport(snapshotConnection.isArrowFlight()), cols,
+                        JdbcRowReader.forTransport(snapshotConnection.isArrowFlight()), cols,
                         timings, logTimings, db, table, bookmarkId);
             } catch (SQLException e) {
                 try {
@@ -191,7 +191,7 @@ public class StarRocksJdbcClient implements CdcClient {
         private final FeConnection connection;
         private final Statement stmt;
         private final ResultSet rs;
-        private final ValueReader reader;
+        private final JdbcRowReader reader;
         private final List<ColumnMeta> cols;
         private final JdbcReadTimings timings;
         private final boolean logTimings;
@@ -202,7 +202,7 @@ public class StarRocksJdbcClient implements CdcClient {
         private final AtomicBoolean closed = new AtomicBoolean();
 
         private JdbcSnapshotCursor(FeConnection connection, Statement stmt, ResultSet rs,
-                                   ValueReader reader, List<ColumnMeta> cols, JdbcReadTimings timings,
+                                   JdbcRowReader reader, List<ColumnMeta> cols, JdbcReadTimings timings,
                                    boolean logTimings, String db, String table, long bookmarkId) {
             this.connection = connection;
             this.stmt = stmt;
@@ -302,7 +302,7 @@ public class StarRocksJdbcClient implements CdcClient {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement()) {
                 connection.applyStreamingFetchSize(stmt);
-                ValueReader reader = ValueReader.forTransport(connection.isArrowFlight());
+                JdbcRowReader reader = JdbcRowReader.forTransport(connection.isArrowFlight());
                 long queryStart = timings == null ? 0 : System.nanoTime();
                 try (ResultSet rs = stmt.executeQuery(sql)) {
                     if (timings != null) {

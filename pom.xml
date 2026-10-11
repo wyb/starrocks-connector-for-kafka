@@ -25,6 +25,30 @@
         </resources>
         <plugins>
             <plugin>
+                <artifactId>maven-clean-plugin</artifactId>
+                <version>3.2.0</version>
+                <executions>
+                    <execution>
+                        <id>clear-directory-assemblies</id>
+                        <phase>prepare-package</phase>
+                        <goals>
+                            <goal>clean</goal>
+                        </goals>
+                        <configuration>
+                            <excludeDefaultDirectories>true</excludeDefaultDirectories>
+                            <filesets>
+                                <fileset>
+                                    <directory>${project.build.directory}/${project.build.finalName}-package</directory>
+                                </fileset>
+                                <fileset>
+                                    <directory>${project.build.directory}/${project.build.finalName}-development</directory>
+                                </fileset>
+                            </filesets>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+            <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-shade-plugin</artifactId>
                 <version>3.2.4</version>
@@ -38,17 +62,18 @@
                             <artifactSet>
                                 <includes>
                                     <include>com.starrocks:starrocks-stream-load-sdk</include>
-                                    <include>org.mariadb.jdbc:mariadb-java-client</include>
-                                    <!-- Envelope's class-init also pulls TransactionMonitor and
-                                         SchemaNameAdjuster; common.sh's verify_plugin_jar is what
-                                         catches a missing one. -->
-                                    <include>io.debezium:debezium-core</include>
-                                    <!-- ~42MB uber-jar, bundled deliberately: needing a second
-                                         manual jar drop to switch transports is a deployment trap,
-                                         and the driver is inert unless a URL selects it. -->
-                                    <include>org.apache.arrow:flight-sql-jdbc-driver</include>
                                 </includes>
                             </artifactSet>
+                            <filters>
+                                <filter>
+                                    <artifact>*:*</artifact>
+                                    <excludes>
+                                        <exclude>META-INF/*.SF</exclude>
+                                        <exclude>META-INF/*.DSA</exclude>
+                                        <exclude>META-INF/*.RSA</exclude>
+                                    </excludes>
+                                </filter>
+                            </filters>
                             <transformers>
                                 <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer"/>
                             </transformers>
@@ -181,8 +206,15 @@
              same Arrow wire format as the FE/BE Flight SQL service it connects to. -->
         <dependency>
             <groupId>org.apache.arrow</groupId>
-            <artifactId>flight-sql-jdbc-driver</artifactId>
+            <artifactId>flight-sql-jdbc-core</artifactId>
             <version>18.0.0</version>
+        </dependency>
+
+        <!-- Columnar Flight SQL reads; ADBC 0.21 uses Arrow Java 18.0.0. -->
+        <dependency>
+            <groupId>org.apache.arrow.adbc</groupId>
+            <artifactId>adbc-driver-flight-sql</artifactId>
+            <version>0.21.0</version>
         </dependency>
 
         <dependency>

@@ -109,7 +109,7 @@ public class ValueReaderTest {
 
     private static Object extract(ColumnMeta col, Object value, RecordingResultSet handler) throws Exception {
         handler.next = value;
-        return new MysqlValueReader().read(proxyFor(handler), 1, col.type);
+        return JdbcRowReader.forTransport(false).read(proxyFor(handler), 1, col.type);
     }
 
     @Test
@@ -140,7 +140,7 @@ public class ValueReaderTest {
      */
     @Test
     public void testDecimalsAndTemporalsAreCanonicalizedHere() throws Exception {
-        ValueReader reader = new MysqlValueReader();
+        JdbcRowReader reader = JdbcRowReader.forTransport(false);
         RecordingResultSet h = new RecordingResultSet();
         h.next = new BigDecimal("1.5");
         assertEquals(new BigDecimal("1.50"), reader.read(proxyFor(h), 1, col("decimal", "decimal(18, 2)", 2).type));
@@ -219,7 +219,7 @@ public class ValueReaderTest {
                     return "getDate".equals(method.getName()) ? new Date(0L) : new Timestamp(0L);
                 });
 
-        ValueReader reader = new MysqlValueReader();
+        JdbcRowReader reader = JdbcRowReader.forTransport(false);
         reader.read(rs, 1, col("date").type);
         reader.read(rs, 1, col("datetime").type);
         assertEquals(2, seen.size());
@@ -243,8 +243,8 @@ public class ValueReaderTest {
                     new Class<?>[] {ResultSet.class},
                     (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
             ColumnType ts = col("datetime").type;
-            assertEquals("2026-08-05 12:34:56.123456", new ArrowValueReader().read(rs, 1, ts));
-            assertEquals("2026-08-05 04:34:56.123456", new MysqlValueReader().read(rs, 1, ts));
+            assertEquals("2026-08-05 12:34:56.123456", JdbcRowReader.forTransport(true).read(rs, 1, ts));
+            assertEquals("2026-08-05 04:34:56.123456", JdbcRowReader.forTransport(false).read(rs, 1, ts));
         } finally {
             TimeZone.setDefault(previous);
         }
@@ -253,17 +253,10 @@ public class ValueReaderTest {
     /** Each reader is per-read and owns its Calendar: Calendar is not thread-safe. */
     @Test
     public void testEachReaderOwnsAUtcCalendar() {
-        ValueReader a = ValueReader.forTransport(false);
-        ValueReader b = ValueReader.forTransport(false);
+        JdbcRowReader a = JdbcRowReader.forTransport(false);
+        JdbcRowReader b = JdbcRowReader.forTransport(false);
         assertNotSame(a.utcCalendar(), b.utcCalendar());
         assertEquals(TimeZone.getTimeZone("UTC"), a.utcCalendar().getTimeZone());
-    }
-
-    /** The transport picks the reader; nothing downstream has to sniff the driver. */
-    @Test
-    public void testTransportPicksTheReader() {
-        assertTrue(ValueReader.forTransport(true) instanceof ArrowValueReader);
-        assertTrue(ValueReader.forTransport(false) instanceof MysqlValueReader);
     }
 
     /**
@@ -276,12 +269,12 @@ public class ValueReaderTest {
 
         RecordingResultSet mysql = new RecordingResultSet();
         mysql.next = "[\"2026-08-05\",null]";
-        Object fromText = new MysqlValueReader().read(proxyFor(mysql), 1, nested.type);
+        Object fromText = JdbcRowReader.forTransport(false).read(proxyFor(mysql), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), mysql.calls);
 
         RecordingResultSet arrow = new RecordingResultSet();
         arrow.next = Arrays.asList(20670, null);
-        Object fromArrow = new ArrowValueReader().read(proxyFor(arrow), 1, nested.type);
+        Object fromArrow = JdbcRowReader.forTransport(true).read(proxyFor(arrow), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), arrow.calls);
 
         assertEquals(Arrays.asList("2026-08-05", null), fromText);
@@ -301,7 +294,7 @@ public class ValueReaderTest {
                                 ? new Object[] {20670, null} : null);
         RecordingResultSet h = new RecordingResultSet();
         h.next = array;
-        assertEquals(Arrays.asList("2026-08-05", null), new ArrowValueReader().read(proxyFor(h), 1, nested.type));
+        assertEquals(Arrays.asList("2026-08-05", null), JdbcRowReader.forTransport(true).read(proxyFor(h), 1, nested.type));
         assertEquals(Arrays.asList("getObject"), h.calls);
     }
 
@@ -311,7 +304,7 @@ public class ValueReaderTest {
         ColumnMeta unparsed = new ColumnMeta("s", "struct", "struct<x int>", 0, true);
         RecordingResultSet h = new RecordingResultSet();
         h.next = "{\"x\":1}";
-        assertEquals("{\"x\":1}", new MysqlValueReader().read(proxyFor(h), 1, unparsed.type));
+        assertEquals("{\"x\":1}", JdbcRowReader.forTransport(false).read(proxyFor(h), 1, unparsed.type));
         assertEquals(Arrays.asList("getString"), h.calls);
     }
 
@@ -320,7 +313,7 @@ public class ValueReaderTest {
     public void testReadRowReadsOnlyTheDeclaredColumns() throws Exception {
         RecordingResultSet h = new RecordingResultSet();
         h.next = 42;
-        Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col("int"), col("int")));
+        Object[] row = JdbcRowReader.forTransport(false).readRow(proxyFor(h), Arrays.asList(col("int"), col("int")));
         assertArrayEquals(new Object[] {42, 42}, row);
         assertEquals(Arrays.asList("getInt", "getInt"), h.calls);
     }

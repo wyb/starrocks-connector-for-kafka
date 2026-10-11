@@ -22,20 +22,22 @@
 #   KAFKA_EXTRA_PROPS  file of extra worker props (SASL/SSL)    (optional)
 #   TOPIC_RF           replication factor for the test topic    (default 1)
 #   KEEP_ON_FAILURE    set to 1 to keep the test db for triage  (default unset)
-#   SR_TRANSPORT       mysql | arrow-flight                     (default mysql)
-#   SR_ARROW_PORT      FE arrow_flight_port, arrow-flight only  (default 9408)
+#   SR_TRANSPORT       mysql | arrow-flight | arrow-adbc        (default mysql)
+#   SR_ARROW_PORT      FE arrow_flight_port for Flight reads    (default 9408)
+#   SR_ADBC_FAILOVER_URI  unavailable first Flight endpoint for ADBC failover test
+#                        (default grpc+tcp://127.0.0.1:1)
 #
 # The two ports are not alternatives: SR_PORT is what this script's own mysql client always
-# uses, on both transports; SR_ARROW_PORT only ever goes in the connector's JDBC URL.
+# uses on every transport; SR_ARROW_PORT selects the Flight read endpoint.
 #
-# Both SR_TRANSPORT settings run the same steps -- that is the point. The ordering invariant
+# Every SR_TRANSPORT setting runs the same steps. The ordering invariant
 # and the temporal reads are what regress when the driver underneath changes.
 #
 set -euo pipefail
 
 cd "$(dirname "$0")"
 
-# REPO_ROOT / JAR / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
+# REPO_ROOT / JAR / PLUGIN_ROOT / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
 # note, verify_plugin_jar and stage_plugin_dir.
 # shellcheck source=common.sh
 . ./common.sh
@@ -46,6 +48,7 @@ SR_PASSWORD="${SR_PASSWORD:-}"
 TOPIC_RF="${TOPIC_RF:-1}"
 SR_TRANSPORT="${SR_TRANSPORT:-mysql}"
 SR_ARROW_PORT="${SR_ARROW_PORT:-9408}"
+SR_ADBC_FAILOVER_URI="${SR_ADBC_FAILOVER_URI:-grpc+tcp://127.0.0.1:1}"
 
 # Unique per run so a rerun (or a parallel run) can never touch another's data.
 SUFFIX="$(date +%Y%m%d%H%M%S)_$$"
@@ -76,6 +79,29 @@ sketch_pid=""
 cleanup() {
   local rc=$?
   printf '\n=== cleanup ===\n'
+  if [ "$rc" -ne 0 ]; then
+    if [ -n "$worker_pid" ] && kill -0 "$worker_pid" 2>/dev/null; then
+      note "worker $worker_pid is still running"
+    else
+      note "worker is not running"
+    fi
+    if [ -f "$OUT_DIR/connect.log" ]; then
+      note "last 60 worker log lines:"
+      tail -60 "$OUT_DIR/connect.log"
+    fi
+    if [ -s "$OUT_DIR/consumer-last.stderr" ]; then
+      note "last Kafka consumer stderr:"
+      tail -20 "$OUT_DIR/consumer-last.stderr"
+    fi
+    local failure_dir="$REPO_ROOT/target/smoke-failures/$SUFFIX"
+    if mkdir -p "$failure_dir"; then
+      for log in connect.log consumer-last.stderr; do
+        [ ! -f "$OUT_DIR/$log" ] || cp "$OUT_DIR/$log" "$failure_dir/$log" \
+          || note "could not save $log in $failure_dir"
+      done
+      note "failure logs saved in $failure_dir"
+    fi
+  fi
   # Both, and by name: step 11 runs a second short-lived worker, and a Connect process
   # surviving this script would hold the REST port against the next run.
   for p in "$worker_pid" "$sketch_pid"; do
@@ -100,7 +126,7 @@ cleanup() {
       --delete --topic "$TOPIC" >/dev/null 2>&1 \
       || note "could not delete topic $TOPIC (delete.topic.enable=false?) — delete it manually"
   fi
-  rm -rf "$OUT_DIR" "$PLUGIN_DIR"
+  rm -rf "$OUT_DIR" "$PLUGIN_ROOT"
 }
 trap cleanup EXIT
 
@@ -116,7 +142,7 @@ command -v java  >/dev/null   || fail "java not found on PATH"
 [ -x "$KAFKA_BIN/connect-standalone.sh" ]     || fail "$KAFKA_BIN/connect-standalone.sh not executable"
 [ -x "$KAFKA_BIN/kafka-console-consumer.sh" ] || fail "$KAFKA_BIN/kafka-console-consumer.sh not executable"
 
-verify_plugin_jar
+verify_plugin_jar "$SR_TRANSPORT"
 
 sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
 note "StarRocks reachable"
@@ -198,29 +224,42 @@ case "$SR_TRANSPORT" in
   mysql)
     CONNECTOR_JDBC_URL="jdbc:mysql://$SR_HOST:$SR_PORT"
     WORKER_JAVA_OPTS=""
+    READ_TRANSPORT=jdbc
+    ADBC_URI=""
     ;;
   arrow-flight)
     # Plaintext by default: the Arrow driver negotiates TLS unless told otherwise, and the FE's
     # Flight service is plaintext in a default deployment.
     CONNECTOR_JDBC_URL="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
+    READ_TRANSPORT=jdbc
+    ADBC_URI=""
     afp=$(sr_config arrow_flight_port || true)
     [ -n "$afp" ] && [ "$afp" != "-1" ] \
       || fail "SR_TRANSPORT=arrow-flight but the FE reports arrow_flight_port='${afp:--1}'.
     Set a non-negative arrow_flight_port in fe.conf AND be.conf and restart -- it is not a
     mutable config, so ADMIN SET FRONTEND CONFIG will not do."
     note "FE arrow_flight_port=$afp"
-    # Arrow's off-heap buffers need java.nio opened on Java 9+. ALL-UNNAMED only: the driver is
-    # shaded into the plugin jar and loaded from the classpath, so there is no named module to open
-    # to. Scoped to the worker so the kafka-topics/console-consumer calls do not inherit it.
+    # Arrow's off-heap buffers need java.nio opened on Java 9+. The plugin loads Arrow from the
+    # classpath, so ALL-UNNAMED is the relevant target. Scope this to the worker.
     WORKER_JAVA_OPTS="--add-opens=java.base/java.nio=ALL-UNNAMED"
-    jar tf "$JAR" | grep -q 'org/apache/arrow/driver/jdbc/ArrowFlightJdbcDriver.class' \
-      || fail "Arrow Flight JDBC driver missing from $JAR — the primary maven-shade execution must include org.apache.arrow:flight-sql-jdbc-driver"
+    ;;
+  arrow-adbc)
+    CONNECTOR_JDBC_URL="jdbc:mysql://$SR_HOST:$SR_PORT"
+    READ_TRANSPORT=arrow-adbc
+    ADBC_URI="$SR_ADBC_FAILOVER_URI,grpc+tcp://$SR_HOST:$SR_ARROW_PORT"
+    afp=$(sr_config arrow_flight_port || true)
+    [ -n "$afp" ] && [ "$afp" != "-1" ] || fail "arrow_flight_port is disabled on the FE"
+    WORKER_JAVA_OPTS="--add-opens=java.base/java.nio=ALL-UNNAMED"
     ;;
   *)
-    fail "SR_TRANSPORT must be mysql or arrow-flight, got '$SR_TRANSPORT'"
+    fail "SR_TRANSPORT must be mysql, arrow-flight or arrow-adbc, got '$SR_TRANSPORT'"
     ;;
 esac
-note "transport=$SR_TRANSPORT, connector URL=$CONNECTOR_JDBC_URL"
+if [ "$SR_TRANSPORT" = arrow-adbc ]; then
+  note "transport=$SR_TRANSPORT, metadata JDBC URL=$CONNECTOR_JDBC_URL, read ADBC URI=$ADBC_URI"
+else
+  note "transport=$SR_TRANSPORT, connector URL=$CONNECTOR_JDBC_URL"
+fi
 
 step "2. stage plugin and configs"
 stage_plugin_dir
@@ -234,7 +273,7 @@ value.converter.schemas.enable=false
 value.converter.decimal.format=NUMERIC
 offset.storage.file.filename=$OUT_DIR/offsets
 offset.flush.interval.ms=5000
-plugin.path=$PLUGIN_DIR
+plugin.path=$PLUGIN_ROOT
 EOF
 if [ -n "${KAFKA_EXTRA_PROPS:-}" ]; then
   [ -f "$KAFKA_EXTRA_PROPS" ] || fail "KAFKA_EXTRA_PROPS file not found: $KAFKA_EXTRA_PROPS"
@@ -247,6 +286,8 @@ name=$CONNECTOR_NAME
 connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
 tasks.max=1
 starrocks.jdbc.url=$CONNECTOR_JDBC_URL
+source.read.transport=$READ_TRANSPORT
+starrocks.adbc.uri=$ADBC_URI
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
@@ -281,8 +322,28 @@ stop_worker() {
 }
 
 consume() {
+  # The test topic has one partition. Assign it directly so each short-lived
+  # consumer starts at the same offset without waiting for group assignment.
   "$KAFKA_BIN/kafka-console-consumer.sh" --bootstrap-server "$KAFKA_BOOTSTRAP" \
-    --topic "$TOPIC" --from-beginning --timeout-ms "${1:-15000}" 2>/dev/null || true
+    --topic "$TOPIC" --partition 0 --offset earliest --timeout-ms "${1:-15000}" \
+    2>"$OUT_DIR/consumer-last.stderr" || true
+}
+
+await_exact_records() {
+  local expected="$1" output="$2" label="$3"
+  local deadline=$((SECONDS + 90)) count=0
+  while :; do
+    consume 5000 > "$output"
+    count=$(wc -l < "$output" | tr -d ' ')
+    [ "$count" -ge "$expected" ] && break
+    [ "$SECONDS" -lt "$deadline" ] || fail "$label: expected $expected Kafka records, got $count"
+    sleep 2
+  done
+  [ "$count" -eq "$expected" ] || fail "$label: expected exactly $expected Kafka records, got $count"
+  sleep 6
+  consume 5000 > "$output"
+  count=$(wc -l < "$output" | tr -d ' ')
+  [ "$count" -eq "$expected" ] || fail "$label: expected $expected Kafka records after the quiet period, got $count"
 }
 
 step "3. start worker and wait for the snapshot"
@@ -296,6 +357,11 @@ done
 [ "${snapshot_count:-0}" -ge 3 ] \
   || { tail -60 "$OUT_DIR/connect.log"; fail "snapshot records never arrived (saw ${snapshot_count:-0}, expected >= 3) — see $OUT_DIR/connect.log"; }
 note "snapshot records present ($snapshot_count)"
+if [ "$SR_TRANSPORT" = arrow-adbc ]; then
+  grep -Fq "Rotating ADBC read endpoint from $SR_ADBC_FAILOVER_URI to grpc+tcp://$SR_HOST:$SR_ARROW_PORT" \
+    "$OUT_DIR/connect.log" || fail "ADBC snapshot arrived without proving failover from $SR_ADBC_FAILOVER_URI"
+  note "ADBC read failed over from the unavailable endpoint"
+fi
 
 # ----------------------------------------------------------------- asserts --
 step "4. apply UPDATE and DELETE"
@@ -304,8 +370,8 @@ sr_sql "DELETE FROM $DB.$TABLE WHERE id=3;"
 sleep 15
 
 step "5. consume and assert"
-consume 15000 > "$CONSUMED"
-note "consumed $(wc -l < "$CONSUMED") records"
+await_exact_records 6 "$CONSUMED" "UPDATE and DELETE"
+note "consumed 6 records"
 
 reads=$(grep -c '"op":"r"' "$CONSUMED" || true)
 [ "$reads" -eq 3 ] || fail "expected 3 snapshot (op=r) records, got $reads"
@@ -356,7 +422,7 @@ start_worker
 [ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart"
 sleep 25
 
-consume 15000 > "$CONSUMED.2"
+await_exact_records 7 "$CONSUMED.2" "restart"
 reads_after=$(grep -c '"op":"r"' "$CONSUMED.2" || true)
 [ "$reads_after" -eq 3 ] || fail "snapshot replayed after restart: op=r count went 3 -> $reads_after"
 grep '"op":"c"' "$CONSUMED.2" | grep -q '"v":40' || fail "post-restart INSERT (v=40) never surfaced"
@@ -421,6 +487,9 @@ if grep -qE "Failed to release .*bookmark" "$OUT_DIR/connect.log"; then
 fi
 note "no bookmark release failures"
 
+await_exact_records 10 "$CONSUMED.3" "bookmark checks"
+note "all 10 expected Kafka records present without duplicates"
+
 step "10. column types that only a live cluster can settle"
 # $CONSUMED already holds the snapshot, the UPDATE pair and the DELETE from step 5, so
 # these columns are checked on the same records every other assertion inspects.
@@ -464,27 +533,29 @@ note "ARRAY/MAP/STRUCT arrived as JSON arrays/objects with typed elements; JSON 
 note "one record, for the record:"
 printf '%s\n' "$first_r"
 
-# Transport parity. The same table read over the other transport must produce the same
-# 'after' object, byte for byte -- the whole reason the nested readers exist. One run can
-# only see one transport, so each run leaves its 'after' behind, keyed by the plugin jar it
-# was built from, and the second run diffs against the first.
+# Transport parity. Each run leaves its 'after' object keyed by the plugin jar, then
+# compares it with every other transport already run against that jar.
 PARITY_DIR="${SMOKE_PARITY_DIR:-${TMPDIR:-/tmp}/sr-cdc-smoke-parity}"
 mkdir -p "$PARITY_DIR"
 jar_key=$(cksum < "$JAR" | cut -d' ' -f1)
 mine="$PARITY_DIR/after-$SR_TRANSPORT-$jar_key.json"
-other_transport=$([ "$SR_TRANSPORT" = mysql ] && echo arrow-flight || echo mysql)
-theirs="$PARITY_DIR/after-$other_transport-$jar_key.json"
 printf '%s' "$first_r" | sed -n 's/.*"after":\(.*\),"source":.*/\1/p' > "$mine"
 [ -s "$mine" ] || fail "could not extract the after object from: $first_r"
-if [ -s "$theirs" ]; then
+compared=0
+for other_transport in mysql arrow-flight arrow-adbc; do
+  [ "$other_transport" != "$SR_TRANSPORT" ] || continue
+  theirs="$PARITY_DIR/after-$other_transport-$jar_key.json"
+  [ -s "$theirs" ] || continue
   if diff -u "$theirs" "$mine" > "$OUT_DIR/parity.diff"; then
     note "transport parity: 'after' from $other_transport and $SR_TRANSPORT are identical"
+    compared=1
   else
     cat "$OUT_DIR/parity.diff"
     fail "transport parity: the $other_transport run and this $SR_TRANSPORT run produced different 'after' objects for the same table (see diff above; files: $theirs, $mine)"
   fi
-else
-  note "transport parity: recorded $mine; run again with SR_TRANSPORT=$other_transport against the same jar to compare"
+done
+if [ "$compared" -eq 0 ]; then
+  note "transport parity: recorded $mine; run another SR_TRANSPORT against the same jar to compare"
 fi
 
 step "11. preflight refuses a table whose column cannot be exported"
@@ -514,8 +585,13 @@ KAFKA_OPTS="${KAFKA_OPTS:-} $WORKER_JAVA_OPTS" \
   "$KAFKA_BIN/connect-standalone.sh" "$OUT_DIR/worker-sketch.properties" "$OUT_DIR/source-sketch.properties" \
   > "$OUT_DIR/connect-sketch.log" 2>&1 &
 sketch_pid=$!
+if [ "$SR_TRANSPORT" = arrow-adbc ]; then
+  refusal="Arrow ADBC cannot preserve the server-rendered text for column $DB.$SKETCH_TABLE.h (hll)"
+else
+  refusal="cannot be exported by a SELECT"
+fi
 for _ in $(seq 1 30); do
-  grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" && break
+  grep -Fq "$refusal" "$OUT_DIR/connect-sketch.log" && break
   kill -0 "$sketch_pid" 2>/dev/null || break
   sleep 1
 done
@@ -527,7 +603,7 @@ kill -9 "$sketch_pid" 2>/dev/null || true
 # fire". Reporting the second when the first happened sends the reader looking for a bug
 # in code that was never reached -- which is precisely what this step did on its first run,
 # when it blamed the guard for a REST port that was still bound.
-if ! grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log"; then
+if ! grep -Fq "$refusal" "$OUT_DIR/connect-sketch.log"; then
   if grep -qE "Address already in use|Failed to bind" "$OUT_DIR/connect-sketch.log"; then
     fail "the probe worker could not start: something else holds Connect's REST port. This says
     nothing about the guard under test. Free the port, or set a different one via
@@ -536,9 +612,11 @@ if ! grep -q "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log"; the
   tail -40 "$OUT_DIR/connect-sketch.log"
   fail "preflight did not refuse the HLL column -- either the guard is gone, or the StarRocks type name is not reaching it on the $SR_TRANSPORT transport"
 fi
-# Tied to the refusal line: a bare "'h'" matches any stack frame or quoted character in the log.
-grep "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" | grep -q "'h'" \
-  || fail "the refusal did not name the offending column, so an operator cannot act on it"
+# The ADBC refusal above includes the fully qualified column; JDBC names it separately.
+if [ "$SR_TRANSPORT" != arrow-adbc ]; then
+  grep -F "cannot be exported by a SELECT" "$OUT_DIR/connect-sketch.log" | grep -Fq "'h'" \
+    || fail "the refusal did not name the offending column, so an operator cannot act on it"
+fi
 note "preflight refused $DB.$SKETCH_TABLE, naming column 'h'"
 
 printf '\n=== PASS ===\n'

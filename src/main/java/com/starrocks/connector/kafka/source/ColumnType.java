@@ -42,7 +42,7 @@ import java.util.StringJoiner;
  */
 final class ColumnType {
 
-    /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text, as ValueReader prints it. */
+    /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text. */
     static final String DATE_LOGICAL_NAME = "com.starrocks.data.Date";
     static final String DATETIME_LOGICAL_NAME = "com.starrocks.data.DateTime";
     /** Logical names of an OPAQUE complex column: the text BE renders, which is not JSON. */
