@@ -75,8 +75,8 @@ SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
 
 Knobs: `SR_PASSWORD` (empty), `BENCH_BUCKETS` (8), `BENCH_ROUNDS` (5; first discarded),
 `BENCH_READ_TIMINGS` (0). With `BENCH_READ_TIMINGS=1`, the report also shows p50 time spent in
-`ResultSet.next()` and `ValueReader.readRow()` for JDBC reads. These per-row clock calls add
-overhead, so use `BENCH_READ_TIMINGS=0` for throughput comparisons:
+JDBC `ResultSet.next()`, ADBC `loadNextBatch()`, and each transport's row value reader. These
+clock calls add overhead, so use `BENCH_READ_TIMINGS=0` for throughput comparisons:
 
 ```bash
 SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \

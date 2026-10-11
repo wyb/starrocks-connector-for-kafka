@@ -152,7 +152,7 @@ public class StarRocksJdbcClient implements CdcClient {
             throws SQLException, NonTrackableException {
         String sql = SqlBuilder.snapshotSql(db, table, columnNames(cols), bookmarkId);
         boolean logTimings = readTimingsEnabled && LOG.isDebugEnabled();
-        JdbcReadTimings timings = JdbcReadTimings.forRead(logTimings);
+        CdcReadTimings timings = CdcReadTimings.forRead(logTimings);
         // A streaming ResultSet can occupy its JDBC connection until EOF. Bookmark renewals and
         // releases still need the task's regular connection between snapshot batches.
         FeConnection snapshotConnection = new FeConnection(config);
@@ -193,7 +193,7 @@ public class StarRocksJdbcClient implements CdcClient {
         private final ResultSet rs;
         private final JdbcRowReader reader;
         private final List<ColumnMeta> cols;
-        private final JdbcReadTimings timings;
+        private final CdcReadTimings timings;
         private final boolean logTimings;
         private final String db;
         private final String table;
@@ -202,7 +202,7 @@ public class StarRocksJdbcClient implements CdcClient {
         private final AtomicBoolean closed = new AtomicBoolean();
 
         private JdbcSnapshotCursor(FeConnection connection, Statement stmt, ResultSet rs,
-                                   JdbcRowReader reader, List<ColumnMeta> cols, JdbcReadTimings timings,
+                                   JdbcRowReader reader, List<ColumnMeta> cols, CdcReadTimings timings,
                                    boolean logTimings, String db, String table, long bookmarkId) {
             this.connection = connection;
             this.stmt = stmt;
@@ -225,7 +225,7 @@ public class StarRocksJdbcClient implements CdcClient {
                 long start = timings == null ? 0 : System.nanoTime();
                 boolean hasRow = rs.next();
                 if (timings != null) {
-                    timings.nextNanos += System.nanoTime() - start;
+                    timings.advanceNanos += System.nanoTime() - start;
                 }
                 if (!hasRow) {
                     closeAfterRead();
@@ -272,7 +272,7 @@ public class StarRocksJdbcClient implements CdcClient {
                 if (logTimings) {
                     LOG.debug("CDC read snapshot table={}.{} bookmark={} rows={} query_ms={} next_ms={} decode_ms={}",
                             db, table, bookmarkId, rows, timings.queryNanos / 1e6,
-                            timings.nextNanos / 1e6, timings.decodeNanos / 1e6);
+                            timings.advanceNanos / 1e6, timings.decodeNanos / 1e6);
                 }
             }
         }
@@ -297,7 +297,7 @@ public class StarRocksJdbcClient implements CdcClient {
                               ChangeRowConsumer consumer) throws SQLException, NonTrackableException {
         String sql = SqlBuilder.changesSql(db, table, columnNames(cols), base, head);
         boolean logTimings = readTimingsEnabled && LOG.isDebugEnabled();
-        JdbcReadTimings timings = JdbcReadTimings.forRead(logTimings);
+        CdcReadTimings timings = CdcReadTimings.forRead(logTimings);
         try {
             Connection c = connection.get();
             try (Statement stmt = c.createStatement()) {
@@ -317,7 +317,7 @@ public class StarRocksJdbcClient implements CdcClient {
                         long start = timings == null ? 0 : System.nanoTime();
                         boolean hasRow = rs.next();
                         if (timings != null) {
-                            timings.nextNanos += System.nanoTime() - start;
+                            timings.advanceNanos += System.nanoTime() - start;
                         }
                         if (!hasRow) {
                             break;
@@ -335,7 +335,7 @@ public class StarRocksJdbcClient implements CdcClient {
                     if (logTimings) {
                         LOG.debug("CDC read changes table={}.{} base={} head={} rows={} query_ms={} next_ms={} decode_ms={}",
                                 db, table, base, head, rows, timings.queryNanos / 1e6,
-                                timings.nextNanos / 1e6, timings.decodeNanos / 1e6);
+                                timings.advanceNanos / 1e6, timings.decodeNanos / 1e6);
                     }
                 }
             }
@@ -352,30 +352,6 @@ public class StarRocksJdbcClient implements CdcClient {
     @Override
     public void close() {
         connection.close();
-    }
-
-    /** Per-read counters for optional JDBC diagnostics; TransportBench scopes its own instance. */
-    static final class JdbcReadTimings {
-        private static final ThreadLocal<JdbcReadTimings> BENCHMARK = new ThreadLocal<>();
-
-        long queryNanos;
-        long nextNanos;
-        long decodeNanos;
-
-        static JdbcReadTimings beginBenchmark() {
-            JdbcReadTimings timings = new JdbcReadTimings();
-            BENCHMARK.set(timings);
-            return timings;
-        }
-
-        static void endBenchmark() {
-            BENCHMARK.remove();
-        }
-
-        static JdbcReadTimings forRead(boolean onlineEnabled) {
-            JdbcReadTimings timings = BENCHMARK.get();
-            return timings != null ? timings : onlineEnabled ? new JdbcReadTimings() : null;
-        }
     }
 
     static List<String> columnNames(List<ColumnMeta> cols) {

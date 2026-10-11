@@ -398,6 +398,7 @@ final class StarRocksAdbcClient implements CdcClient {
     public SnapshotCursor openSnapshot(String db, String table, List<ColumnMeta> cols, long bookmark)
             throws SQLException, NonTrackableException {
         String sql = SqlBuilder.snapshotSql(db, table, StarRocksJdbcClient.columnNames(cols), bookmark);
+        CdcReadTimings timings = CdcReadTimings.forRead(readTimings);
         enterOperation();
         boolean connected = false;
         try {
@@ -412,7 +413,7 @@ final class StarRocksAdbcClient implements CdcClient {
                 stmt = readConnection.createStatement();
                 stmt.setSqlQuery(sql);
                 AdbcStatement queryStatement = stmt;
-                long start = readTimings ? System.nanoTime() : 0;
+                long start = timings == null ? 0 : System.nanoTime();
                 queryCall = new TimedCall<>(queryStatement::executeQuery, config.readTimeoutMs(),
                         "ADBC snapshot query", StarRocksAdbcClient::closeQuietly,
                         () -> {
@@ -420,8 +421,10 @@ final class StarRocksAdbcClient implements CdcClient {
                             closeQuietly(readConnection);
                         });
                 result = queryCall.execute();
-                snapshot = new Snapshot(readConnection, stmt, result, cols, db, table, bookmark,
-                        readTimings ? System.nanoTime() - start : 0);
+                if (timings != null) {
+                    timings.queryNanos += System.nanoTime() - start;
+                }
+                snapshot = new Snapshot(readConnection, stmt, result, cols, db, table, bookmark, timings);
                 synchronized (snapshots) {
                     if (closed.get()) {
                         throw new SQLException("ADBC reader is closed");
@@ -467,7 +470,7 @@ final class StarRocksAdbcClient implements CdcClient {
         private final String db;
         private final String table;
         private final long bookmark;
-        private final long queryNanos;
+        private final CdcReadTimings timings;
         private final AtomicBoolean done = new AtomicBoolean();
         private final AtomicBoolean resourcesClosed = new AtomicBoolean();
         private int activeReads;
@@ -476,12 +479,10 @@ final class StarRocksAdbcClient implements CdcClient {
         private int batchCount;
         private List<FieldVector> vectors;
         private long rows;
-        private long nextNanos;
-        private long decodeNanos;
         private volatile TimedCall<Boolean> activeBatch;
 
         private Snapshot(AdbcConnection readConnection, AdbcStatement stmt, AdbcStatement.QueryResult result,
-                         List<ColumnMeta> cols, String db, String table, long bookmark, long queryNanos) {
+                         List<ColumnMeta> cols, String db, String table, long bookmark, CdcReadTimings timings) {
             this.readConnection = readConnection;
             this.stmt = stmt;
             this.result = result;
@@ -490,7 +491,7 @@ final class StarRocksAdbcClient implements CdcClient {
             this.db = db;
             this.table = table;
             this.bookmark = bookmark;
-            this.queryNanos = queryNanos;
+            this.timings = timings;
             synchronized (lifecycle) {
                 activeOperations++;
             }
@@ -533,7 +534,7 @@ final class StarRocksAdbcClient implements CdcClient {
             }
             try {
                 while (rowIndex == batchCount) {
-                    long start = readTimings ? System.nanoTime() : 0;
+                    long start = timings == null ? 0 : System.nanoTime();
                     TimedCall<Boolean> batchCall = new TimedCall<>(reader::loadNextBatch,
                             config.readTimeoutMs(), "ADBC snapshot batch", value -> { }, this::closeResources);
                     boolean loaded;
@@ -553,15 +554,15 @@ final class StarRocksAdbcClient implements CdcClient {
                             }
                         }
                     }
-                    if (readTimings) {
-                        nextNanos += System.nanoTime() - start;
+                    if (timings != null) {
+                        timings.advanceNanos += System.nanoTime() - start;
                     }
                     if (!loaded) {
                         close();
                         if (readTimings && LOG.isDebugEnabled()) {
                             LOG.debug("CDC read snapshot table={}.{} bookmark={} rows={} query_ms={} next_ms={} decode_ms={}",
-                                    db, table, bookmark, rows, queryNanos / 1e6, nextNanos / 1e6,
-                                    decodeNanos / 1e6);
+                                    db, table, bookmark, rows, timings.queryNanos / 1e6,
+                                    timings.advanceNanos / 1e6, timings.decodeNanos / 1e6);
                         }
                         return null;
                     }
@@ -571,10 +572,10 @@ final class StarRocksAdbcClient implements CdcClient {
                     batchCount = root.getRowCount();
                     vectors = root.getFieldVectors();
                 }
-                long start = readTimings ? System.nanoTime() : 0;
+                long start = timings == null ? 0 : System.nanoTime();
                 Object[] row = valueReader.readRow(vectors, rowIndex++, cols);
-                if (readTimings) {
-                    decodeNanos += System.nanoTime() - start;
+                if (timings != null) {
+                    timings.decodeNanos += System.nanoTime() - start;
                 }
                 rows++;
                 return row;
@@ -770,6 +771,7 @@ final class StarRocksAdbcClient implements CdcClient {
     private void readChanges(String sql, List<ColumnMeta> cols, CdcClient.ChangeRowConsumer consumer,
                              String db, String table, long base, long head)
             throws SQLException {
+        CdcReadTimings timings = CdcReadTimings.forRead(readTimings);
         AdbcConnection active = acquireReadConnection();
         ReadScope scope = new ReadScope();
         Runnable cleanup = () -> closeReadScopeAsync(scope, active);
@@ -778,27 +780,27 @@ final class StarRocksAdbcClient implements CdcClient {
         try {
             scope.statement = active.createStatement();
             scope.statement.setSqlQuery(sql);
-            long queryStart = readTimings ? System.nanoTime() : 0;
+            long queryStart = timings == null ? 0 : System.nanoTime();
             TimedCall<AdbcStatement.QueryResult> queryCall = new TimedCall<>(scope.statement::executeQuery,
                     config.readTimeoutMs(), "ADBC changes query", StarRocksAdbcClient::closeQuietly,
                     cleanup);
             pending = queryCall;
             scope.result = queryCall.execute();
             pending = null;
-            long queryNanos = readTimings ? System.nanoTime() - queryStart : 0;
+            if (timings != null) {
+                timings.queryNanos += System.nanoTime() - queryStart;
+            }
             ArrowReader reader = scope.result.getReader();
             long rows = 0;
-            long nextNanos = 0;
-            long decodeNanos = 0;
             while (true) {
-                long start = readTimings ? System.nanoTime() : 0;
+                long start = timings == null ? 0 : System.nanoTime();
                 TimedCall<Boolean> batchCall = new TimedCall<>(reader::loadNextBatch,
                         config.readTimeoutMs(), "ADBC changes batch", value -> { }, cleanup);
                 pending = batchCall;
                 boolean loaded = batchCall.execute();
                 pending = null;
-                if (readTimings) {
-                    nextNanos += System.nanoTime() - start;
+                if (timings != null) {
+                    timings.advanceNanos += System.nanoTime() - start;
                 }
                 if (!loaded) {
                     break;
@@ -811,10 +813,10 @@ final class StarRocksAdbcClient implements CdcClient {
                     if ((rowIndex & 255) == 0 && closed.get()) {
                         throw new SQLException("ADBC reader is closed");
                     }
-                    start = readTimings ? System.nanoTime() : 0;
+                    start = timings == null ? 0 : System.nanoTime();
                     Object[] row = valueReader.readRow(vectors, rowIndex, cols);
-                    if (readTimings) {
-                        decodeNanos += System.nanoTime() - start;
+                    if (timings != null) {
+                        timings.decodeNanos += System.nanoTime() - start;
                     }
                     int changeType = ((Number) vectors.get(cols.size()).getObject(rowIndex)).intValue();
                     long rowVersion = ((Number) vectors.get(cols.size() + 1).getObject(rowIndex)).longValue();
@@ -824,8 +826,8 @@ final class StarRocksAdbcClient implements CdcClient {
             }
             if (readTimings) {
                 LOG.debug("CDC read changes table={}.{} base={} head={} rows={} query_ms={} next_ms={} decode_ms={}",
-                        db, table, base, head, rows, queryNanos / 1e6, nextNanos / 1e6,
-                        decodeNanos / 1e6);
+                        db, table, base, head, rows, timings.queryNanos / 1e6,
+                        timings.advanceNanos / 1e6, timings.decodeNanos / 1e6);
             }
             complete = true;
         } catch (Exception e) {

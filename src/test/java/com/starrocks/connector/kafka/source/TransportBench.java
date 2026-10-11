@@ -52,7 +52,7 @@ import java.util.concurrent.Callable;
  * {@code bench.password}, {@code bench.transports} (mysql,arrow-flight by default),
  * {@code bench.adbc.uri}, {@code bench.rounds} (5, first dropped), {@code bench.meta.iterations} (20),
  * {@code bench.mutation.sql} (run once per table with {@code {db}}/{@code {table}} substituted; all
- * transports then read the same CHANGES window), {@code bench.read.timings} (false; JDBC next/decode only).
+ * transports then read the same CHANGES window), {@code bench.read.timings} (false; read stages).
  * Output also goes to {@code target/transport-bench.txt}.
  */
 public class TransportBench {
@@ -155,9 +155,6 @@ public class TransportBench {
                         return n[0];
                     }
                 });
-                if (!(t.client instanceof StarRocksJdbcClient)) {
-                    s.timings = null;
-                }
                 snapshotRows = checkRows(table, "snapshot", t.name, snapshotRows, s.rows);
                 if (round > 0) {
                     report.add(table, "snapshot", t.name, s);
@@ -195,9 +192,6 @@ public class TransportBench {
                         return n[0];
                     }
                 });
-                if (!(t.client instanceof StarRocksJdbcClient)) {
-                    s.timings = null;
-                }
                 changeRows = checkRows(table, "changes", t.name, changeRows, s.rows);
                 if (round > 0) {
                     report.add(table, "changes", t.name, s);
@@ -338,7 +332,7 @@ public class TransportBench {
         long cpuNanos;
         long allocBytes;
         long rssKb;
-        StarRocksJdbcClient.JdbcReadTimings timings;
+        CdcReadTimings timings;
     }
 
     /** Wall, process CPU, allocation on every live thread, and RSS around one read. */
@@ -356,15 +350,14 @@ public class TransportBench {
         Sample measure(Callable<Long> body) throws Exception {
             long alloc0 = allocated();
             long cpu0 = os.getProcessCpuTime();
-            StarRocksJdbcClient.JdbcReadTimings timings = phases
-                    ? StarRocksJdbcClient.JdbcReadTimings.beginBenchmark() : null;
+            CdcReadTimings timings = phases ? CdcReadTimings.beginBenchmark() : null;
             long t0 = System.nanoTime();
             long rows;
             try {
                 rows = body.call();
             } finally {
                 if (phases) {
-                    StarRocksJdbcClient.JdbcReadTimings.endBenchmark();
+                    CdcReadTimings.endBenchmark();
                 }
             }
             Sample s = new Sample();
@@ -488,28 +481,31 @@ public class TransportBench {
                         rss / 1024.0));
             }
             if (phases) {
-                sb.append("\nJDBC read stages (independent p50 ms):\n");
-                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s%n",
-                        "table", "path", "via", "next", "decode"));
+                sb.append("\nRead stages (independent p50 ms):\n");
+                sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s %10s%n",
+                        "table", "path", "via", "next", "batch", "decode"));
                 for (String key : keys) {
                     String[] parts = key.split("\t");
                     List<Sample> list = samples.get(key);
                     if (list.get(0).timings == null) {
-                        sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s%n",
-                                parts[0], parts[1], parts[2], "-", "-"));
+                        sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s %10s%n",
+                                parts[0], parts[1], parts[2], "-", "-", "-"));
                         continue;
                     }
-                    long[] next = new long[list.size()];
+                    long[] advance = new long[list.size()];
                     long[] decode = new long[list.size()];
                     for (int i = 0; i < list.size(); i++) {
-                        next[i] = list.get(i).timings.nextNanos;
+                        advance[i] = list.get(i).timings.advanceNanos;
                         decode[i] = list.get(i).timings.decodeNanos;
                     }
-                    sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10.1f %10.1f%n",
-                            parts[0], parts[1], parts[2], median(next) / 1e6, median(decode) / 1e6));
+                    String advanceMs = String.format(Locale.ROOT, "%.1f", median(advance) / 1e6);
+                    boolean adbc = "arrow-adbc".equals(parts[2]);
+                    sb.append(String.format(Locale.ROOT, "%-20s %-9s %-14s %10s %10s %10.1f%n",
+                            parts[0], parts[1], parts[2], adbc ? "-" : advanceMs,
+                            adbc ? advanceMs : "-", median(decode) / 1e6));
                 }
-                sb.append("next includes ResultSet.next() through EOF; decode is ValueReader.readRow(). ")
-                        .append("ADBC has no JDBC stage timings. Per-row timing adds overhead, ")
+                sb.append("next is JDBC ResultSet.next() through EOF; batch is ADBC loadNextBatch() through EOF. ")
+                        .append("decode is per-row value reading. Per-row timing adds overhead, ")
                         .append("so compare throughput with phases off.\n");
             }
             if (!latencies.isEmpty()) {

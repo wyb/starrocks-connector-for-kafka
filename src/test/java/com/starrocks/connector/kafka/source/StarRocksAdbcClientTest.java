@@ -777,6 +777,115 @@ public class StarRocksAdbcClientTest {
     }
 
     @Test
+    public void benchmarkTimingsIncludeAdbcBatchAndRowDecode() throws Exception {
+        Map<String, String> props = new HashMap<>();
+        props.put(StarRocksCdcSourceConfig.JDBC_URL, "jdbc:mysql://localhost:9030");
+        props.put(StarRocksCdcSourceConfig.DATABASE_NAME, "db");
+        props.put(StarRocksCdcSourceConfig.USERNAME, "root");
+        props.put(StarRocksCdcSourceConfig.PASSWORD, "");
+        props.put(StarRocksCdcSourceConfig.TABLE_NAMES, "t");
+        props.put(StarRocksCdcSourceConfig.CONNECTOR_NAME, "test");
+        props.put(StarRocksCdcSourceConfig.ADBC_URI, "grpc+tcp://localhost:9408");
+        FieldVector vector = (FieldVector) Proxy.newProxyInstance(getClass().getClassLoader(),
+                new Class<?>[] {FieldVector.class}, (proxy, method, args) -> {
+                    if ("isNull".equals(method.getName())) {
+                        return false;
+                    }
+                    return "getObject".equals(method.getName()) ? 1 : null;
+                });
+        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("id", "int", "int", 0, false));
+        AtomicInteger queries = new AtomicInteger();
+        StarRocksAdbcClient client = new StarRocksAdbcClient(new StarRocksCdcSourceConfig(props),
+                (allocator, options) -> new AdbcDatabase() {
+                    @Override
+                    public AdbcConnection connect() {
+                        AdbcStatement statement = (AdbcStatement) Proxy.newProxyInstance(
+                                getClass().getClassLoader(), new Class<?>[] {AdbcStatement.class},
+                                (proxy, method, args) -> {
+                                    if (!"executeQuery".equals(method.getName())) {
+                                        return null;
+                                    }
+                                    boolean changes = queries.getAndIncrement() > 0;
+                                    return new AdbcStatement.QueryResult(1,
+                                            oneRowReader(allocator, vector, changes));
+                                });
+                        return (AdbcConnection) Proxy.newProxyInstance(getClass().getClassLoader(),
+                                new Class<?>[] {AdbcConnection.class}, (proxy, method, args) ->
+                                        "createStatement".equals(method.getName()) ? statement : null);
+                    }
+
+                    @Override
+                    public void close() {
+                    }
+                });
+        try {
+            AtomicInteger rows = new AtomicInteger();
+            CdcReadTimings snapshot = CdcReadTimings.beginBenchmark();
+            try {
+                client.streamSnapshot("db", "t", cols, 1, row -> rows.incrementAndGet());
+            } finally {
+                CdcReadTimings.endBenchmark();
+            }
+            assertTrue(rows.get() == 1);
+            assertTrue(snapshot.advanceNanos > 0 && snapshot.decodeNanos > 0);
+
+            rows.set(0);
+            CdcReadTimings changes = CdcReadTimings.beginBenchmark();
+            try {
+                client.streamChanges("db", "t", cols, 1, 2, (row, type, version) -> rows.incrementAndGet());
+            } finally {
+                CdcReadTimings.endBenchmark();
+            }
+            assertTrue(rows.get() == 1);
+            assertTrue(changes.advanceNanos > 0 && changes.decodeNanos > 0);
+        } finally {
+            client.close();
+        }
+    }
+
+    private static ArrowReader oneRowReader(BufferAllocator allocator, FieldVector vector, boolean changes) {
+        List<Field> fields = new ArrayList<>();
+        fields.add(new Field("id", FieldType.nullable(new ArrowType.Int(32, true)), null));
+        if (changes) {
+            fields.add(new Field("change_type", FieldType.nullable(new ArrowType.Int(32, true)), null));
+            fields.add(new Field("row_version", FieldType.nullable(new ArrowType.Int(64, true)), null));
+        }
+        List<FieldVector> vectors = new ArrayList<>(Collections.nCopies(fields.size(), vector));
+        VectorSchemaRoot root = new VectorSchemaRoot(fields, vectors, 1);
+        return new ArrowReader(allocator) {
+            private boolean loaded;
+
+            @Override
+            public boolean loadNextBatch() {
+                if (loaded) {
+                    return false;
+                }
+                loaded = true;
+                return true;
+            }
+
+            @Override
+            public VectorSchemaRoot getVectorSchemaRoot() {
+                return root;
+            }
+
+            @Override
+            public long bytesRead() {
+                return 0;
+            }
+
+            @Override
+            protected void closeReadSource() {
+            }
+
+            @Override
+            protected Schema readSchema() {
+                return new Schema(fields);
+            }
+        };
+    }
+
+    @Test
     public void stopWaitsForSnapshotResourcesBeforeClosingDatabase() throws Exception {
         Map<String, String> props = new HashMap<>();
         props.put(StarRocksCdcSourceConfig.JDBC_URL, "jdbc:mysql://localhost:9030");
