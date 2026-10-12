@@ -25,7 +25,7 @@ import java.util.List;
 
 /**
  * Defines bookmark, metadata, snapshot, and CHANGES operations used by the connector and task.
- * Implementations own their JDBC connections; callers close the client when finished.
+ * Implementations own their read connections; callers close the client when finished.
  */
 public interface CdcClient extends AutoCloseable {
 
@@ -83,18 +83,21 @@ public interface CdcClient extends AutoCloseable {
     @Override
     void close();
 
+    /** Row containers are owned by the consumer; the client must not reuse or mutate them. */
     interface RowConsumer {
         void accept(Object[] row);
     }
 
     interface SnapshotCursor extends AutoCloseable {
-        /** Returns null only after the complete snapshot has been read. */
+        /** Returns a caller-owned row, or null only after the complete snapshot has been read.
+         * Returned containers must remain valid after advancing or closing the cursor. */
         Object[] next() throws SQLException, NonTrackableException;
 
         @Override
         void close();
     }
 
+    /** Row containers are owned by the consumer; the client must not reuse or mutate them. */
     interface ChangeRowConsumer {
         void accept(Object[] row, int changeType, long rowVersion);
     }

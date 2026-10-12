@@ -3,7 +3,7 @@
 # End-to-end smoke test for the StarRocks CDC source connector.
 #
 # Verifies, against live StarRocks + Kafka containers:
-#   1. the shaded plugin jar carries both the connector and its JDBC driver
+#   1. the packaged plugin directory carries the connector and its JDBC driver
 #   2. an initial snapshot produces one op="r" record per existing row
 #   3. UPDATE produces an adjacent op="d" + op="c" pair on the same key
 #   4. DELETE produces an op="d"
@@ -19,7 +19,7 @@ set -euo pipefail
 # its own directory regardless of where it was invoked from.
 cd "$(dirname "$0")"
 
-# REPO_ROOT / JAR / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
+# REPO_ROOT / JAR / PLUGIN_ROOT / PLUGIN_DIR / OUT_DIR / CONSUMED, the TZ_* fixtures, step / fail /
 # note, verify_plugin_jar and stage_plugin_dir.
 # shellcheck source=common.sh
 . ./common.sh
@@ -31,6 +31,28 @@ TOPIC=sr.smoke.orders
 sr_sql() { docker compose exec -T starrocks mysql -h127.0.0.1 -P9030 -uroot -e "$1"; }
 kafka()  { docker compose exec -T kafka "$@"; }
 
+consume() {
+  kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
+    --topic "$TOPIC" --partition 0 --offset earliest --timeout-ms "${1:-3000}" 2>/dev/null || true
+}
+
+await_exact_records() {
+  local expected="$1" output="$2" label="$3"
+  local deadline=$((SECONDS + 90)) count=0
+  while :; do
+    consume 5000 > "$output"
+    count=$(wc -l < "$output" | tr -d ' ')
+    [ "$count" -ge "$expected" ] && break
+    [ "$SECONDS" -lt "$deadline" ] || fail "$label: expected $expected Kafka records, got $count"
+    sleep 2
+  done
+  [ "$count" -eq "$expected" ] || fail "$label: expected exactly $expected Kafka records, got $count"
+  sleep 6
+  consume 5000 > "$output"
+  count=$(wc -l < "$output" | tr -d ' ')
+  [ "$count" -eq "$expected" ] || fail "$label: expected $expected Kafka records after the quiet period, got $count"
+}
+
 cleanup() {
   printf '\n=== cleanup ===\n'
   # down -v destroys the container holding /tmp/connect.log, and most assertions below fail
@@ -39,7 +61,7 @@ cleanup() {
     echo "worker log kept at $KEPT_LOG"
   fi
   docker compose down -v >/dev/null 2>&1 || true
-  rm -rf "$OUT_DIR" "$PLUGIN_DIR"
+  rm -rf "$OUT_DIR" "$PLUGIN_ROOT"
 }
 KEPT_LOG="${KEPT_LOG:-${TMPDIR:-/tmp}/smoke-connect.log}"
 trap cleanup EXIT
@@ -141,8 +163,7 @@ snapshot_count=0
 for _ in $(seq 1 20); do
   # || true: kafka-console-consumer exits non-zero on its own --timeout-ms path, and under
   # pipefail this bare assignment would kill the script before the diagnostic below runs.
-  snapshot_count=$(kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-    --topic "$TOPIC" --from-beginning --timeout-ms 5000 2>/dev/null | wc -l | tr -d ' ' || true)
+  snapshot_count=$(consume 5000 | wc -l | tr -d ' ' || true)
   [ "${snapshot_count:-0}" -ge 3 ] && break
   sleep 3
 done
@@ -156,9 +177,8 @@ sr_sql "DELETE FROM $DB.$TABLE WHERE id=3;"
 sleep 15
 
 step "5. consume and assert"
-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-  --topic "$TOPIC" --from-beginning --timeout-ms 15000 > "$CONSUMED" 2>/dev/null || true
-echo "consumed $(wc -l < "$CONSUMED") records"
+await_exact_records 6 "$CONSUMED" "UPDATE and DELETE"
+echo "consumed 6 records"
 
 reads=$(grep -c '"op":"r"' "$CONSUMED" || true)
 [ "$reads" -eq 3 ] || fail "expected 3 snapshot (op=r) records, got $reads"
@@ -239,8 +259,7 @@ start_worker
 [ "$worker_pid" != "$old_pid" ] || fail "worker PID unchanged after restart — the old process was never replaced"
 sleep 25
 
-kafka /opt/kafka/bin/kafka-console-consumer.sh --bootstrap-server localhost:9092 \
-  --topic "$TOPIC" --from-beginning --timeout-ms 15000 > "$CONSUMED.2" 2>/dev/null || true
+await_exact_records 7 "$CONSUMED.2" "restart"
 
 reads_after=$(grep -c '"op":"r"' "$CONSUMED.2" || true)
 [ "$reads_after" -eq 3 ] || fail "snapshot replayed after restart: op=r count went from 3 to $reads_after"
@@ -283,5 +302,8 @@ if docker compose exec -T kafka grep -qE "Failed to release .*bookmark" /tmp/con
   fail "worker reported bookmark release failures — bookmarks stay pinned until TTL"
 fi
 echo "no bookmark release failures"
+
+await_exact_records 10 "$CONSUMED.3" "bookmark checks"
+echo "all 10 expected Kafka records present without duplicates"
 
 printf '\n=== PASS ===\n'

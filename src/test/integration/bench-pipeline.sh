@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Benchmark scalar and complex values over both JDBC transports on an existing
-# StarRocks cluster. Owns cdc_read_bench for this run and removes it on exit.
+# Benchmark read, SourceRecord mapping and JSON serialization over JDBC and Java ADBC on an existing
+# StarRocks cluster. BENCH_TRANSPORTS selects mysql, arrow-flight, or arrow-adbc.
+# Owns cdc_bench and removes it on exit.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -9,22 +10,51 @@ SR_PORT="${SR_PORT:-9030}"
 SR_ARROW_PORT="${SR_ARROW_PORT:-9408}"
 SR_USER="${SR_USER:-root}"
 SR_PASSWORD="${SR_PASSWORD:-}"
-BENCH_ROWS="${BENCH_ROWS:-1000000}"
+BENCH_ROWS="${BENCH_ROWS:-2000000}"
+BENCH_DAILY_UPDATE_ROWS="${BENCH_DAILY_UPDATE_ROWS:-50000}"
+BENCH_BURST_UPDATE_ROWS="${BENCH_BURST_UPDATE_ROWS:-500000}"
 BENCH_BUCKETS="${BENCH_BUCKETS:-8}"
-BENCH_ROUNDS="${BENCH_ROUNDS:-5}"
+BENCH_ROUNDS="${BENCH_ROUNDS:-3}"
 BENCH_READ_TIMINGS="${BENCH_READ_TIMINGS:-0}"
-BENCH_DB="cdc_read_bench"
+BENCH_PIPELINE="${BENCH_PIPELINE:-read}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
+BENCH_DB="cdc_bench"
+
+case "$BENCH_PIPELINE" in
+  read) pipeline_scope='read + decode' ;;
+  map) pipeline_scope='read + decode + SourceRecord map' ;;
+  serialize) pipeline_scope='read + decode + SourceRecord map + key/value JSON serialization' ;;
+  *) echo 'BENCH_PIPELINE must be read, map, or serialize' >&2; exit 1 ;;
+esac
 
 [ -n "$SR_HOST" ] || { echo 'SR_HOST is required' >&2; exit 1; }
 command -v mysql >/dev/null || { echo 'mysql client not found on PATH' >&2; exit 1; }
 command -v mvn >/dev/null || { echo 'mvn not found on PATH' >&2; exit 1; }
-for setting in BENCH_ROWS BENCH_BUCKETS BENCH_ROUNDS; do
+for setting in BENCH_ROWS BENCH_DAILY_UPDATE_ROWS BENCH_BURST_UPDATE_ROWS BENCH_BUCKETS BENCH_ROUNDS; do
   value="${!setting}"
   case "$value" in ''|*[!0-9]*) echo "$setting must be a positive integer" >&2; exit 1 ;; esac
   [ "$value" -gt 0 ] || { echo "$setting must be a positive integer" >&2; exit 1; }
 done
+[ "$(( BENCH_DAILY_UPDATE_ROWS + BENCH_BURST_UPDATE_ROWS ))" -le "$BENCH_ROWS" ] || {
+  echo 'daily + burst update rows exceed BENCH_ROWS' >&2
+  exit 1
+}
 [ "$BENCH_ROUNDS" -gt 1 ] || { echo 'BENCH_ROUNDS must be at least 2 (first round is discarded)' >&2; exit 1; }
 [[ "$BENCH_READ_TIMINGS" = 0 || "$BENCH_READ_TIMINGS" = 1 ]] || { echo 'BENCH_READ_TIMINGS must be 0 or 1' >&2; exit 1; }
+selected_transports=' '
+transport_count=0
+transport_csv=''
+for transport in $BENCH_TRANSPORTS; do
+  case "$transport" in
+    mysql|arrow-flight|arrow-adbc) ;;
+    *) echo "BENCH_TRANSPORTS has unknown transport '$transport'" >&2; exit 1 ;;
+  esac
+  case "$selected_transports" in *" $transport "*) echo "BENCH_TRANSPORTS repeats '$transport'" >&2; exit 1 ;; esac
+  selected_transports="$selected_transports$transport "
+  transport_count=$((transport_count + 1))
+  transport_csv="${transport_csv:+$transport_csv,}$transport"
+done
+[ "$transport_count" -gt 0 ] || { echo 'BENCH_TRANSPORTS must name at least one transport' >&2; exit 1; }
 
 mysql_args=(-h "$SR_HOST" -P "$SR_PORT" -u "$SR_USER")
 [ -n "$SR_PASSWORD" ] && mysql_args+=(-p"$SR_PASSWORD")
@@ -84,6 +114,7 @@ for shape in scalar complex; do
                    json_string(parse_json($json_text))"
   fi
 
+  echo "Preparing $BENCH_DB.$table: $BENCH_ROWS rows"
   sr_sql "CREATE TABLE $BENCH_DB.$table (
             id BIGINT NOT NULL, v BIGINT, d DECIMAL(18,2), s VARCHAR(64), dt DATETIME$extra_columns)
           PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS $BENCH_BUCKETS
@@ -99,14 +130,20 @@ for shape in scalar complex; do
 done
 
 echo
-echo 'Running TransportBench for perf_scalar and perf_complex'
+echo "Pipeline: $BENCH_PIPELINE; scope: $pipeline_scope; no Kafka sends"
+echo "Running PipelineBench for perf_scalar and perf_complex; transports: $BENCH_TRANSPORTS"
+echo "Workload per table: $BENCH_ROWS snapshot rows; $(( BENCH_DAILY_UPDATE_ROWS * 2 )) daily and $(( BENCH_BURST_UPDATE_ROWS * 2 )) burst change records"
 (
   cd "$REPO_ROOT"
-  mvn -q test -Dtest=TransportBench \
+  mvn -q test -Dtest=PipelineBench \
     "-Dbench.mysql.url=jdbc:mysql://$SR_HOST:$SR_PORT" \
     "-Dbench.arrow.url=jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false" \
+    "-Dbench.adbc.uri=grpc+tcp://$SR_HOST:$SR_ARROW_PORT" \
+    "-Dbench.transports=$transport_csv" \
+    "-Dbench.pipeline=$BENCH_PIPELINE" \
     "-Dbench.db=$BENCH_DB" "-Dbench.tables=perf_scalar,perf_complex" \
     "-Dbench.user=$SR_USER" "-Dbench.password=$SR_PASSWORD" "-Dbench.rounds=$BENCH_ROUNDS" \
     "-Dbench.read.timings=$([ "$BENCH_READ_TIMINGS" = 1 ] && echo true || echo false)" \
-    '-Dbench.mutation.sql=UPDATE {db}.{table} SET v = v + 1'
+    "-Dbench.daily.update.rows=$BENCH_DAILY_UPDATE_ROWS" \
+    "-Dbench.burst.update.rows=$BENCH_BURST_UPDATE_ROWS"
 )

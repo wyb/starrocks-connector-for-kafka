@@ -40,6 +40,10 @@ import java.util.Set;
 public class StarRocksCdcSourceConfig extends AbstractConfig {
 
     public static final String JDBC_URL = "starrocks.jdbc.url";
+    public static final String READ_TRANSPORT = "source.read.transport";
+    public static final String READ_TRANSPORT_JDBC = "jdbc";
+    public static final String READ_TRANSPORT_ADBC = "arrow-adbc";
+    public static final String ADBC_URI = "starrocks.adbc.uri";
     public static final String DATABASE_NAME = "starrocks.database.name";
     public static final String USERNAME = "starrocks.username";
     public static final String PASSWORD = "starrocks.password";
@@ -66,6 +70,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
     public static final String MAX_RETRIES = "source.max.retries";
     public static final String POLL_RETRY_TIMEOUT_MS = "source.poll.retry.timeout.ms";
     public static final String CONNECT_TIMEOUT_MS = "source.connect.timeout.ms";
+    public static final String READ_TIMEOUT_MS = "source.read.timeout.ms";
     public static final String READ_TIMINGS_ENABLED = "source.read.timings.enabled";
 
     // Internal task-sharding key used only to pass the assigned tables from the Connector to a Task;
@@ -87,6 +92,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         rejectEmptyTableList();
         rejectDuplicateTableNames();
         rejectNoSnapshotWithResnapshot();
+        rejectMissingAdbcUri();
     }
 
     /**
@@ -146,6 +152,12 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         }
     }
 
+    private void rejectMissingAdbcUri() {
+        if (READ_TRANSPORT_ADBC.equals(readTransport())) {
+            adbcUris();
+        }
+    }
+
     public static ConfigDef newConfigDef() {
         return new ConfigDef()
                 .define(
@@ -156,6 +168,21 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         "JDBC URL of the StarRocks FE endpoint(s); the scheme selects the transport, jdbc:mysql:// or "
                                 + "jdbc:arrow-flight-sql://. Comma-separate several FE hosts so bookmark calls can rotate "
                                 + "to the leader."
+                ).define(
+                        READ_TRANSPORT,
+                        ConfigDef.Type.STRING,
+                        READ_TRANSPORT_JDBC,
+                        ConfigDef.ValidString.in(READ_TRANSPORT_JDBC, READ_TRANSPORT_ADBC),
+                        ConfigDef.Importance.MEDIUM,
+                        "Read snapshots and CHANGES over JDBC or Arrow ADBC. Bookmarks and metadata always use "
+                                + JDBC_URL + "."
+                ).define(
+                        ADBC_URI,
+                        ConfigDef.Type.STRING,
+                        "",
+                        ConfigDef.Importance.MEDIUM,
+                        "Comma-separated Flight SQL ADBC URIs, for example "
+                                + "grpc+tcp://fe1:9408,grpc+tcp://fe2:9408; required for arrow-adbc reads."
                 ).define(
                         DATABASE_NAME,
                         ConfigDef.Type.STRING,
@@ -266,8 +293,18 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         CONNECT_TIMEOUT_MS,
                         ConfigDef.Type.INT,
                         1000,
+                        ConfigDef.Range.atLeast(1),
                         ConfigDef.Importance.LOW,
-                        "The period of time, in milliseconds, after which a connection attempt to StarRocks times out."
+                        "Connection timeout in milliseconds for bookmark and metadata JDBC calls and for "
+                                + "JDBC or Arrow ADBC read connections."
+                ).define(
+                        READ_TIMEOUT_MS,
+                        ConfigDef.Type.INT,
+                        120000,
+                        ConfigDef.Range.atLeast(1),
+                        ConfigDef.Importance.LOW,
+                        "Maximum wait in milliseconds for an Arrow ADBC query, the next Flight batch, "
+                                + "or CHANGES reader cleanup. Each wait has its own timeout."
                 ).define(
                         READ_TIMINGS_ENABLED,
                         ConfigDef.Type.BOOLEAN,
@@ -343,6 +380,32 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
         return getString(JDBC_URL);
     }
 
+    public String readTransport() {
+        return getString(READ_TRANSPORT);
+    }
+
+    public String adbcUri() {
+        return getString(ADBC_URI);
+    }
+
+    public List<String> adbcUris() {
+        String value = adbcUri();
+        if (value.trim().isEmpty()) {
+            throw new ConfigException(ADBC_URI, value,
+                    "is required when " + READ_TRANSPORT + "=" + READ_TRANSPORT_ADBC);
+        }
+        List<String> uris = new ArrayList<>();
+        Set<String> seen = new HashSet<>();
+        for (String part : value.split(",", -1)) {
+            String uri = part.trim();
+            if (uri.isEmpty() || !seen.add(uri)) {
+                throw new ConfigException(ADBC_URI, value, "contains an empty or repeated Flight endpoint");
+            }
+            uris.add(uri);
+        }
+        return uris;
+    }
+
     public String databaseName() {
         return getString(DATABASE_NAME);
     }
@@ -397,6 +460,10 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
 
     public int connectTimeoutMs() {
         return getInt(CONNECT_TIMEOUT_MS);
+    }
+
+    public int readTimeoutMs() {
+        return getInt(READ_TIMEOUT_MS);
     }
 
     public boolean readTimingsEnabled() {

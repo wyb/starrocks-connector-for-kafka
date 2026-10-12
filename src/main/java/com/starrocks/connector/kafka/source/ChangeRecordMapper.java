@@ -21,6 +21,7 @@
 package com.starrocks.connector.kafka.source;
 
 import io.debezium.data.Envelope;
+import org.apache.kafka.connect.data.Field;
 import org.apache.kafka.connect.data.Schema;
 import org.apache.kafka.connect.data.SchemaBuilder;
 import org.apache.kafka.connect.data.Struct;
@@ -28,13 +29,15 @@ import org.apache.kafka.connect.source.SourceRecord;
 
 import java.time.Instant;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.Map;
 
 /**
  * Maps raw CDC rows to Debezium SourceRecords without JDBC access.
  * Debezium's Envelope preserves the outer field order expected by Avro schema registries. The
- * row and source schemas are built once per table.
+ * row and source schemas and field bindings are built once per table. Input row containers
+ * transfer to the returned record and must not be modified or reused by the caller.
  */
 public final class ChangeRecordMapper {
 
@@ -63,12 +66,22 @@ public final class ChangeRecordMapper {
     private final Schema bookmarkSchema;
     private final Schema sourceSchema;
     private final Envelope envelope;
+    private final Map<String, String> sourcePartition;
+    private final FieldBinding[] rowBindings;
+    private final FieldBinding[] keyBindings;
+    private final Field bookmarkBaseField;
+    private final Field bookmarkHeadField;
+    private final Field sourceDbField;
+    private final Field sourceTableField;
+    private final Field sourceRowVersionField;
+    private final Field sourceBookmarkField;
 
     public ChangeRecordMapper(String db, String table, String topic, List<ColumnMeta> cols) {
         this.db = db;
         this.table = table;
         this.topic = topic;
-        this.cols = cols;
+        this.cols = Collections.unmodifiableList(new ArrayList<>(cols));
+        this.sourcePartition = Collections.unmodifiableMap(OffsetState.sourcePartition(db, table));
 
         this.keyIndexes = new ArrayList<>();
         for (int i = 0; i < cols.size(); i++) {
@@ -91,6 +104,22 @@ public final class ChangeRecordMapper {
                 .field(FIELD_ROW_VERSION, Schema.INT64_SCHEMA)
                 .field(FIELD_BOOKMARK, bookmarkSchema)
                 .build();
+        this.bookmarkBaseField = bookmarkSchema.field(FIELD_BASE);
+        this.bookmarkHeadField = bookmarkSchema.field(FIELD_HEAD);
+        this.sourceDbField = sourceSchema.field(FIELD_DB);
+        this.sourceTableField = sourceSchema.field(FIELD_TABLE);
+        this.sourceRowVersionField = sourceSchema.field(FIELD_ROW_VERSION);
+        this.sourceBookmarkField = sourceSchema.field(FIELD_BOOKMARK);
+        this.rowBindings = new FieldBinding[cols.size()];
+        for (int i = 0; i < cols.size(); i++) {
+            rowBindings[i] = new FieldBinding(i, rowSchema.field(cols.get(i).name), cols.get(i).type);
+        }
+        this.keyBindings = new FieldBinding[keyIndexes.size()];
+        for (int i = 0; i < keyIndexes.size(); i++) {
+            int columnIndex = keyIndexes.get(i);
+            ColumnMeta col = cols.get(columnIndex);
+            keyBindings[i] = new FieldBinding(columnIndex, keySchema.field(col.name), col.type);
+        }
         this.envelope = Envelope.defineSchema()
                 .withName(Envelope.schemaName(topic))
                 .withRecord(rowSchema)
@@ -112,7 +141,6 @@ public final class ChangeRecordMapper {
                 ? envelope.delete(rowStruct, source, ts)
                 : envelope.create(rowStruct, source, ts);
 
-        Map<String, String> sourcePartition = OffsetState.sourcePartition(db, table);
         Map<String, Object> sourceOffset = OffsetState.sourceOffset(headBookmark, true);
         Struct key = toKeyStruct(row);
 
@@ -132,7 +160,6 @@ public final class ChangeRecordMapper {
         Struct source = buildSource(SNAPSHOT_ROW_VERSION, bookmarkId, bookmarkId);
         Struct value = envelope.read(after, source, Instant.ofEpochMilli(System.currentTimeMillis()));
 
-        Map<String, String> sourcePartition = OffsetState.sourcePartition(db, table);
         Map<String, Object> sourceOffset = OffsetState.sourceOffset(bookmarkId, false);
         Struct key = toKeyStruct(row);
 
@@ -147,19 +174,19 @@ public final class ChangeRecordMapper {
 
     private Struct buildSource(long rowVersion, long baseBookmark, long headBookmark) {
         Struct bookmark = new Struct(bookmarkSchema)
-                .put(FIELD_BASE, baseBookmark)
-                .put(FIELD_HEAD, headBookmark);
+                .put(bookmarkBaseField, baseBookmark)
+                .put(bookmarkHeadField, headBookmark);
         return new Struct(sourceSchema)
-                .put(FIELD_DB, db)
-                .put(FIELD_TABLE, table)
-                .put(FIELD_ROW_VERSION, rowVersion)
-                .put(FIELD_BOOKMARK, bookmark);
+                .put(sourceDbField, db)
+                .put(sourceTableField, table)
+                .put(sourceRowVersionField, rowVersion)
+                .put(sourceBookmarkField, bookmark);
     }
 
     private Struct toRowStruct(Object[] row) {
         Struct struct = new Struct(rowSchema);
-        for (int i = 0; i < cols.size(); i++) {
-            putValue(struct, cols.get(i), row[i]);
+        for (FieldBinding binding : rowBindings) {
+            binding.put(struct, row);
         }
         return struct;
     }
@@ -169,25 +196,30 @@ public final class ChangeRecordMapper {
             return null;
         }
         Struct key = new Struct(keySchema);
-        for (int idx : keyIndexes) {
-            putValue(key, cols.get(idx), row[idx]);
+        for (FieldBinding binding : keyBindings) {
+            binding.put(key, row);
         }
         return key;
     }
 
-    /**
-     * The row is already canonical ({@link ValueReader}): decimals at the declared scale, temporals
-     * as text. Only a nested column still needs assembling into Connect's own containers.
-     */
-    private static void putValue(Struct struct, ColumnMeta col, Object value) {
-        if (value == null) {
-            return;
+    /** Fields and nested converters belong to the exact row/key schema they were bound against. */
+    private static final class FieldBinding {
+        private final int columnIndex;
+        private final Field field;
+        private final ColumnType.ConnectValueConverter converter;
+
+        FieldBinding(int columnIndex, Field field, ColumnType type) {
+            this.columnIndex = columnIndex;
+            this.field = field;
+            this.converter = type.bindConnectValue(field.schema());
         }
-        if (col.type.isNested()) {
-            struct.put(col.name, col.type.toConnectValue(struct.schema().field(col.name).schema(), value));
-            return;
+
+        void put(Struct target, Object[] row) {
+            Object value = row[columnIndex];
+            if (value != null) {
+                target.put(field, converter.convert(value));
+            }
         }
-        struct.put(col.name, value);
     }
 
     private Schema buildRowSchema() {

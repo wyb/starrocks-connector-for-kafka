@@ -6,15 +6,15 @@
 #
 #   SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
 #   KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
-#   BENCH_ROWS=5000000 ./bench-cluster.sh
+#   BENCH_ROWS=2000000 ./bench-cluster.sh
 #
 # Every knob:
 #   SR_HOST / SR_PORT / SR_USER / SR_PASSWORD     as in smoke-cluster.sh (leader FE, OPERATE user)
 #   SR_ARROW_PORT        FE arrow_flight_port                        (default: FE config)
 #   KAFKA_BOOTSTRAP / KAFKA_BIN / KAFKA_EXTRA_PROPS / TOPIC_RF        as in smoke-cluster.sh
-#   BENCH_TRANSPORTS     space-separated, run in this order          (default "mysql arrow-flight")
+#   BENCH_TRANSPORTS     mysql, arrow-flight, arrow-adbc in run order (default all three)
 #   BENCH_SHAPES         space-separated, scalar and/or complex      (default "scalar complex")
-#   BENCH_ROWS           rows to generate                            (default 5000000)
+#   BENCH_ROWS           rows to generate                            (default 2000000)
 #   BENCH_BUCKETS        table buckets                               (default 8)
 #   BENCH_PARTITIONS     topic partitions                            (default 1)
 #   BENCH_HEAP           worker -Xmx                              (default 4g)
@@ -55,9 +55,9 @@ SR_USER="${SR_USER:-root}"
 SR_PASSWORD="${SR_PASSWORD:-}"
 SR_ARROW_PORT="${SR_ARROW_PORT:-}"
 TOPIC_RF="${TOPIC_RF:-1}"
-BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
 BENCH_SHAPES="${BENCH_SHAPES:-scalar complex}"
-BENCH_ROWS="${BENCH_ROWS:-5000000}"
+BENCH_ROWS="${BENCH_ROWS:-2000000}"
 BENCH_DAILY_UPDATE_ROWS="${BENCH_DAILY_UPDATE_ROWS:-50000}"
 BENCH_BURST_UPDATE_ROWS="${BENCH_BURST_UPDATE_ROWS:-500000}"
 BENCH_BUCKETS="${BENCH_BUCKETS:-8}"
@@ -147,7 +147,7 @@ cleanup() {
   else
     rm -rf "$OUT_DIR"
   fi
-  rm -rf "$PLUGIN_DIR"
+  rm -rf "$PLUGIN_ROOT"
 }
 trap cleanup EXIT
 
@@ -187,7 +187,7 @@ command -v javac >/dev/null   || fail "javac not found on PATH"
 [ -x "$KAFKA_BIN/kafka-topics.sh" ]       || fail "$KAFKA_BIN/kafka-topics.sh not executable"
 [ -x "$KAFKA_BIN/connect-standalone.sh" ] || fail "$KAFKA_BIN/connect-standalone.sh not executable"
 [ -x "$KAFKA_BIN/kafka-run-class.sh" ]    || fail "$KAFKA_BIN/kafka-run-class.sh not executable"
-verify_plugin_jar
+verify_plugin_jar "$BENCH_TRANSPORTS"
 sr_val "SELECT 1;" >/dev/null || fail "cannot reach StarRocks at $SR_HOST:$SR_PORT as $SR_USER"
 [ "$(sr_config run_mode || true)" = "shared_data" ] || fail "this connector requires run_mode=shared_data"
 [ "$(sr_config enable_bookmark_meta_functions || true)" = "true" ] \
@@ -200,13 +200,11 @@ for tr in $BENCH_TRANSPORTS; do
   transport_count=$((transport_count + 1))
   case "$tr" in
     mysql) ;;
-    arrow-flight)
+    arrow-flight|arrow-adbc)
       afp=$(sr_config arrow_flight_port || true)
       [ -n "$afp" ] && [ "$afp" != "-1" ] || fail "arrow_flight_port is disabled on the FE (set it in fe.conf and be.conf, restart)"
-      [ -n "$SR_ARROW_PORT" ] || SR_ARROW_PORT="$afp"
-      jar tf "$JAR" | grep -Fx 'org/apache/arrow/driver/jdbc/ArrowFlightJdbcDriver.class' >/dev/null \
-        || fail "Arrow Flight JDBC driver missing from $JAR" ;;
-    *) fail "BENCH_TRANSPORTS entries must be mysql or arrow-flight, got '$tr'" ;;
+      [ -n "$SR_ARROW_PORT" ] || SR_ARROW_PORT="$afp" ;;
+    *) fail "BENCH_TRANSPORTS entries must be mysql, arrow-flight or arrow-adbc, got '$tr'" ;;
   esac
 done
 [ "$transport_count" -gt 0 ] || fail "BENCH_TRANSPORTS must name at least one transport"
@@ -267,6 +265,7 @@ if [ "$OWN_DB" = 1 ]; then
     fi
     for transport in $BENCH_TRANSPORTS; do
       TABLE=$(bench_table_for "$shape" "$transport")
+      note "generating $BENCH_ROWS rows into $DB.$TABLE"
       sr_sql "CREATE TABLE $DB.$TABLE (
                 id BIGINT NOT NULL, v BIGINT, d DECIMAL(18,2), s VARCHAR(64), dt DATETIME$extra_columns)
               PRIMARY KEY(id) DISTRIBUTED BY HASH(id) BUCKETS $BENCH_BUCKETS
@@ -307,6 +306,8 @@ rootLogger.level = info
 rootLogger.appenderRef.console.ref = STDOUT
 logger.jdbc.name = com.starrocks.connector.kafka.source.StarRocksJdbcClient
 logger.jdbc.level = debug
+logger.adbc.name = com.starrocks.connector.kafka.source.StarRocksAdbcClient
+logger.adbc.level = debug
 logger.task.name = com.starrocks.connector.kafka.source.StarRocksCdcSourceTask
 logger.task.level = debug
 EOF
@@ -318,6 +319,7 @@ log4j.appender.stdout=org.apache.log4j.ConsoleAppender
 log4j.appender.stdout.layout=org.apache.log4j.PatternLayout
 log4j.appender.stdout.layout.ConversionPattern=[%d{ISO8601}] %-5p %c - %m%n
 log4j.logger.com.starrocks.connector.kafka.source.StarRocksJdbcClient=DEBUG
+log4j.logger.com.starrocks.connector.kafka.source.StarRocksAdbcClient=DEBUG
 log4j.logger.com.starrocks.connector.kafka.source.StarRocksCdcSourceTask=DEBUG
 EOF
     bench_log4j_opts="-Dlog4j.configuration=file:$OUT_DIR/bench-log4j.properties"
@@ -338,21 +340,32 @@ end_offset_sum() {  # $1 topic -> sum of end offsets over its partitions
   printf '%s\n' "$out" | awk -F: 'NF>=3 {s+=$NF} END {print s+0}'
 }
 
-# Waits for exactly $2 records; prints first/start, target/first, target/start, and target time.
+# Waits for exactly $2 total records; $4 is the phase and $5 its starting record count.
+# stdout contains first/start, target/first, target/start, and target time; progress goes to stderr.
 wait_for_records() {
-  local topic="$1" target="$2" start="$3" first="" n
+  local topic="$1" target="$2" start="$3" phase="$4" baseline="$5" first="" n current last_log
+  last_log=${start%%.*}
+  printf '  [progress] %s %s: waiting for %s records\n' "$scenario" "$phase" "$(( target - baseline ))" >&2
   while :; do
     n=$(end_offset_sum "$topic")
-    if [ -z "$first" ] && [ "$n" -gt 0 ]; then first=$(now); fi
+    current=$(now)
+    if [ "$(( ${current%%.*} - last_log ))" -ge 10 ]; then
+      # stderr keeps timing=$(wait_for_records ...) a numeric-only result.
+      awk -v scenario="$scenario" -v phase="$phase" -v n="$(( n - baseline ))" \
+        -v target="$(( target - baseline ))" -v s="$start" -v e="$current" \
+        'BEGIN {if (n < 0) n = 0; printf "  [progress] %s %s: %d/%d records (%.1f%%), elapsed %.1f s\n", scenario, phase, n, target, 100 * n / target, e - s}' >&2
+      last_log=${current%%.*}
+    fi
+    if [ -z "$first" ] && [ "$n" -gt 0 ]; then first=$current; fi
     if [ "$n" -gt "$target" ]; then
       fail "topic $topic has $n records, more than the expected $target; benchmark result is invalid"
     fi
     if [ "$n" -eq "$target" ]; then
-      awk -v s="$start" -v f="$first" -v e="$(now)" \
+      awk -v s="$start" -v f="$first" -v e="$current" \
         'BEGIN {printf "%.1f %.1f %.1f %.6f\n", f - s, e - f, e - s, e}'
       return 0
     fi
-    if awk -v s="$start" -v e="$(now)" -v t="$BENCH_TIMEOUT_SEC" 'BEGIN {exit !(e - s > t)}'; then
+    if awk -v s="$start" -v e="$current" -v t="$BENCH_TIMEOUT_SEC" 'BEGIN {exit !(e - s > t)}'; then
       fail "timed out after ${BENCH_TIMEOUT_SEC}s waiting for $target records in $topic (have $n) — see $METRICS_DIR/connect-$run_id.log"
     fi
     kill -0 "$worker_pid" 2>/dev/null || { tail -40 "$OUT_DIR/connect-$run_id.log" >&2; fail "worker died — see $METRICS_DIR/connect-$run_id.log"; }
@@ -362,6 +375,7 @@ wait_for_records() {
 
 assert_count_stable() {
   local topic="$1" expected="$2" actual
+  note "[progress] $scenario: checking count stays at $expected for ${BENCH_SETTLE_SEC}s"
   sleep "$BENCH_SETTLE_SEC"
   actual=$(end_offset_sum "$topic")
   [ "$actual" -eq "$expected" ] \
@@ -479,6 +493,35 @@ read_stage_summary() {  # worker log, phase, table; sum per-snapshot-batch Task 
                cell(map_ms, task), cell(table_ms, task)}' "$1"
 }
 
+adbc_batch_summary() {  # worker log, phase, table; ADBC client DEBUG lines only
+  awk -v phase="$2" -v table="$3" '
+    function metric(key, line, pattern) {
+      pattern = key "=[0-9.eE+-]+"
+      if (match(line, pattern)) return substr(line, RSTART + length(key) + 1,
+                                               RLENGTH - length(key) - 1) + 0
+      return 0
+    }
+    index($0, "CDC read " phase " table=" table " ") && index($0, "batch_first_ms=") {
+      if (phase == "changes" && metric("rows", $0) == 0) next
+      count += metric("batches", $0)
+      first += metric("batch_first_ms", $0)
+      later += metric("batch_later_ms", $0)
+      if (metric("batch_later_max_ms", $0) > later_max) later_max = metric("batch_later_max_ms", $0)
+      eof += metric("batch_eof_ms", $0)
+      batch_rows += metric("batch_rows_avg", $0) * metric("batches", $0)
+      row_min = metric("batch_rows_min", $0)
+      row_max = metric("batch_rows_max", $0)
+      if (!seen || row_min < min_rows) min_rows = row_min
+      if (!seen || row_max > max_rows) max_rows = row_max
+      seen++
+    }
+    END {
+      if (seen) printf "%d %.1f %.1f %.1f %.1f %.0f %.0f %.0f\n", count, first, later,
+                       later_max, eof, count ? batch_rows / count : 0, min_rows, max_rows
+      else print "- - - - - - - -"
+    }' "$1"
+}
+
 since_mutation() {  # event epoch seconds, mutation start epoch seconds
   awk -v event="$1" -v start="$2" 'BEGIN {
     if (event == "-") print "-"; else printf "%.1f\n", event - start
@@ -490,6 +533,7 @@ results=()
 change_results=()
 jmx_results=()
 read_results=()
+adbc_batch_results=()
 change_timelines=()
 for shape in $run_shapes; do
 for transport in $BENCH_TRANSPORTS; do
@@ -498,9 +542,12 @@ for transport in $BENCH_TRANSPORTS; do
   step "run: $scenario"
   TABLE=$(bench_table_for "$shape" "$transport")
   case "$transport" in
-    mysql)        url="jdbc:mysql://$SR_HOST:$SR_PORT"; opens="" ;;
+    mysql)        url="jdbc:mysql://$SR_HOST:$SR_PORT"; opens=""; read_transport=jdbc; adbc_uri="" ;;
     arrow-flight) url="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
-                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED" ;;
+                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED"; read_transport=jdbc; adbc_uri="" ;;
+    arrow-adbc)  url="jdbc:mysql://$SR_HOST:$SR_PORT"
+                  opens="--add-opens=java.base/java.nio=ALL-UNNAMED"
+                  read_transport=arrow-adbc; adbc_uri="grpc+tcp://$SR_HOST:$SR_ARROW_PORT" ;;
   esac
   connector="sr-cdc-bench-$shape-$transport-$SUFFIX"
   prefix="bench-$shape-$transport"
@@ -519,7 +566,7 @@ value.converter.schemas.enable=false
 value.converter.decimal.format=NUMERIC
 offset.storage.file.filename=$OUT_DIR/offsets-$run_id
 offset.flush.interval.ms=5000
-plugin.path=$PLUGIN_DIR
+plugin.path=$PLUGIN_ROOT
 EOF
   [ -n "${KAFKA_EXTRA_PROPS:-}" ] && cat "$KAFKA_EXTRA_PROPS" >> "$OUT_DIR/worker-$run_id.properties"
   cat > "$OUT_DIR/source-$run_id.properties" <<EOF
@@ -527,6 +574,8 @@ name=$connector
 connector.class=com.starrocks.connector.kafka.source.StarRocksCdcSourceConnector
 tasks.max=1
 starrocks.jdbc.url=$url
+source.read.transport=$read_transport
+starrocks.adbc.uri=$adbc_uri
 starrocks.database.name=$DB
 starrocks.username=$SR_USER
 starrocks.password=$SR_PASSWORD
@@ -549,9 +598,13 @@ EOF
   java -cp "$OUT_DIR" BenchJmxSampler "$BENCH_JMX_PORT" "$connector" \
     > "$jmx_file" 2> "$OUT_DIR/jmx-$run_id.log" &
   jmx_pid=$!
-  note "worker pid=$worker_pid, heap=$BENCH_HEAP, url=$url"
+  if [ "$transport" = arrow-adbc ]; then
+    note "worker pid=$worker_pid, heap=$BENCH_HEAP, jdbc=$url, adbc=$adbc_uri"
+  else
+    note "worker pid=$worker_pid, heap=$BENCH_HEAP, url=$url"
+  fi
 
-  timing=$(wait_for_records "$topic" "$BENCH_ROWS" "$worker_started")
+  timing=$(wait_for_records "$topic" "$BENCH_ROWS" "$worker_started" snapshot 0)
   read -r to_first snap_stream_secs snap_total_secs snap_finished <<<"$timing"
   note "snapshot: first record in $to_first s; all $BENCH_ROWS in $snap_total_secs s from worker start ($snap_stream_secs s after first)"
   assert_count_stable "$topic" "$BENCH_ROWS"
@@ -559,6 +612,9 @@ EOF
   jmx_results+=("$scenario snapshot $snap_jmx")
   if [ "$BENCH_READ_TIMINGS" = 1 ]; then
     read_results+=("$scenario snapshot $(read_stage_summary "$OUT_DIR/connect-$run_id.log" snapshot "$DB.$TABLE")")
+    if [ "$transport" = arrow-adbc ]; then
+      adbc_batch_results+=("$scenario snapshot $(adbc_batch_summary "$OUT_DIR/connect-$run_id.log" snapshot "$DB.$TABLE")")
+    fi
   fi
 
   change_phases=()
@@ -579,12 +635,13 @@ EOF
       sql="UPDATE $DB.$TABLE SET v = v + 1 WHERE id > $range_start AND id <= $range_end"
     fi
     log_start=$(wc -l < "$OUT_DIR/connect-$run_id.log")
+    note "[progress] $scenario changes/$phase_name: applying mutation ($phase_records expected records)"
     mutation_started=$(now)
     sr_sql "$sql;"
     mutation_committed=$(now)
     mutation_sql_secs=$(awk -v s="$mutation_started" -v e="$mutation_committed" 'BEGIN {printf "%.1f", e - s}')
     target=$(( target + phase_records ))
-    timing=$(wait_for_records "$topic" "$target" "$mutation_started")
+    timing=$(wait_for_records "$topic" "$target" "$mutation_started" "changes/$phase_name" "$(( target - phase_records ))")
     read -r _ _ chg_secs chg_finished <<<"$timing"
     note "$phase_name changes: $phase_records records in $chg_secs s from mutation start (SQL $mutation_sql_secs s)"
     assert_count_stable "$topic" "$target"
@@ -603,6 +660,9 @@ EOF
         : > "$stage_log"
       fi
       read_results+=("$scenario changes/$phase_name $(read_stage_summary "$stage_log" changes "$DB.$TABLE")")
+      if [ "$transport" = arrow-adbc ]; then
+        adbc_batch_results+=("$scenario changes/$phase_name $(adbc_batch_summary "$stage_log" changes "$DB.$TABLE")")
+      fi
       task_times=$(task_window_times "$stage_log" "$DB.$TABLE" "$mutation_started" "$chg_finished")
     fi
     read -r task_started task_finished <<<"$task_times"
@@ -646,6 +706,19 @@ if [ "$BENCH_READ_TIMINGS" = 1 ]; then
       "$tr" "$phase" "$query" "$next_ms" "$decode" "$map_ms" "$table_ms"
   done
   note "CHANGES excludes empty reads; snapshot Task sums exclude gaps between batches; table includes read and map"
+  note "next means ResultSet.next() for JDBC and Arrow batch loading for ADBC"
+  if [ "${#adbc_batch_results[@]}" -gt 0 ]; then
+    step "ADBC batch waits (ms; loaded batches only except EOF)"
+    printf '%-22s %-14s %8s %10s %10s %10s %9s %10s %10s %10s\n' \
+      scenario phase batches first later later-max EOF rows/avg rows/min rows/max
+    for r in "${adbc_batch_results[@]}"; do
+      read -r tr phase batches first later later_max eof avg_rows min_rows max_rows <<<"$r"
+      printf '%-22s %-14s %8s %10s %10s %10s %9s %10s %10s %10s\n' \
+        "$tr" "$phase" "$batches" "$first" "$later" "$later_max" "$eof" \
+        "$avg_rows" "$min_rows" "$max_rows"
+    done
+    note "batch waits include the loadNextBatch call and exclude per-row decode; EOF is measured separately"
+  fi
 fi
 
 if [ "${#change_timelines[@]}" -gt 0 ]; then

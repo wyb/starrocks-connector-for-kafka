@@ -400,6 +400,6 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
 
     /** Test injection point: test subclasses override to return a scripted fake. */
     protected CdcClient createClient(StarRocksCdcSourceConfig config) {
-        return new StarRocksJdbcClient(config);
+        return CdcClientFactory.create(config);
     }
 }

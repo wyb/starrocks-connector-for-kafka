@@ -22,114 +22,19 @@ package com.starrocks.connector.kafka.source;
 
 import org.apache.kafka.connect.errors.DataException;
 
-import java.math.BigDecimal;
-import java.sql.ResultSet;
-import java.sql.SQLException;
-import java.sql.Timestamp;
 import java.time.LocalDateTime;
 import java.time.ZoneOffset;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
-import java.util.Calendar;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TimeZone;
 
 /**
- * Reads JDBC rows according to their declared ColumnType, not driver metadata.
- * Typed getters normalize scalar values across transports. Subclasses decode transport-specific
- * nested values into lists and maps, which this class converts into Connect values.
+ * Converts transport-specific nested values into the connector's neutral values.
+ * JDBC ResultSet access belongs to JdbcRowReader; Arrow ADBC uses this conversion directly.
  */
 abstract class ValueReader {
-
-    private final Calendar utc = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
-
-    /** The reader for the connection's transport, chosen where the transport is known. */
-    static ValueReader forTransport(boolean arrowFlight) {
-        return arrowFlight ? new ArrowValueReader() : new MysqlValueReader();
-    }
-
-    /** The leading {@code cols.size()} columns; a CHANGES query's two trailing pseudo-columns are
-     * read by the caller. */
-    Object[] readRow(ResultSet rs, List<ColumnMeta> cols) throws SQLException {
-        Object[] row = new Object[cols.size()];
-        for (int i = 0; i < cols.size(); i++) {
-            row[i] = read(rs, i + 1, cols.get(i).type);
-        }
-        return row;
-    }
-
-    Object read(ResultSet rs, int index, ColumnType type) throws SQLException {
-        Object value;
-        switch (type.kind) {
-            case BOOLEAN:
-                value = rs.getBoolean(index);
-                break;
-            case TINYINT:
-                value = rs.getByte(index);
-                break;
-            case SMALLINT:
-                value = rs.getShort(index);
-                break;
-            case INT:
-                value = rs.getInt(index);
-                break;
-            case BIGINT:
-                value = rs.getLong(index);
-                break;
-            case FLOAT:
-                value = rs.getFloat(index);
-                break;
-            case DOUBLE:
-                value = rs.getDouble(index);
-                break;
-            // Connect's Decimal wants the BigDecimal at the schema's scale; the Arrow driver hands a
-            // DECIMALV2 back at scale 9 and MariaDB at the declared one. LARGEINT's scale is 0.
-            case DECIMAL:
-            case LARGEINT: {
-                BigDecimal d = rs.getBigDecimal(index);
-                value = d == null ? null : d.setScale(type.scale);
-                break;
-            }
-            case DATE: {
-                java.sql.Date d = rs.getDate(index, utc);
-                value = d == null ? null : dateText(d);
-                break;
-            }
-            case DATETIME: {
-                Timestamp ts = timestamp(rs, index);
-                value = ts == null ? null : dateTimeText(ts);
-                break;
-            }
-            // getString would charset-decode and lose the bytes; the schema side says BYTES.
-            case BYTES:
-                value = rs.getBytes(index);
-                break;
-            case ARRAY:
-            case MAP:
-            case STRUCT: {
-                Object raw = rs.getObject(index);
-                return raw == null || rs.wasNull() ? null : nested(type, raw);
-            }
-            case STRING:
-            case JSON:
-            case OPAQUE:
-            default:
-                value = rs.getString(index);
-                break;
-        }
-        // Primitive getters return 0/false for SQL NULL; only wasNull tells.
-        return rs.wasNull() ? null : value;
-    }
-
-    /**
-     * DATETIME through the UTC calendar, which makes the instant's UTC fields the stored digits.
-     * The Arrow reader overrides this to undo its driver's zone shift.
-     */
-    protected Timestamp timestamp(ResultSet rs, int index) throws SQLException {
-        return rs.getTimestamp(index, utc);
-    }
 
     /** The transport's raw form of a nested column to the neutral value. */
     protected abstract Object nested(ColumnType type, Object raw);
@@ -137,8 +42,8 @@ abstract class ValueReader {
     /** A leaf of the raw tree -- an element, a map key or value, a struct field -- to the canonical scalar. */
     protected abstract Object leaf(ColumnType type, Object raw);
 
-    /** The recursion both transports share, once they have a raw tree of lists, maps and leaves. */
-    protected final Object readNested(ColumnType type, Object raw) {
+    /** The recursion both transports share; Arrow handles its map-entry lists before calling here. */
+    protected Object readNested(ColumnType type, Object raw) {
         if (raw == null) {
             return null;
         }
@@ -177,11 +82,21 @@ abstract class ValueReader {
         }
     }
 
-    /** The map key as the STRING the wire schema declares, spelled per the declared key type. */
-    private String keyText(ColumnType keyType, Object rawKey) {
+    /** The map key as the STRING the wire schema declares; binary keys use lowercase hex. */
+    protected final String keyText(ColumnType keyType, Object rawKey) {
         Object key = rawKey == null ? null : leaf(keyType, rawKey);
         if (key == null) {
             throw new DataException("null map key in a " + keyType + "-keyed map");
+        }
+        if (keyType.kind == ColumnType.Kind.BYTES) {
+            byte[] bytes = as(byte[].class, key, keyType);
+            char[] hex = new char[bytes.length * 2];
+            for (int i = 0; i < bytes.length; i++) {
+                int value = bytes[i] & 0xff;
+                hex[i * 2] = Character.forDigit(value >>> 4, 16);
+                hex[i * 2 + 1] = Character.forDigit(value & 0x0f, 16);
+            }
+            return new String(hex);
         }
         return String.valueOf(key);
     }
@@ -203,31 +118,26 @@ abstract class ValueReader {
         return expected.cast(raw);
     }
 
-    // DATE and DATETIME as the text StarRocks prints: 2026-08-05 and 2026-08-05 12:34:56, .ffffff only
-    // when the microseconds are not zero (BE timestamp::to_string). Values come through the UTC
-    // calendar, so an instant's UTC fields are the stored digits.
+    // Match StarRocks DATETIME text: six fractional digits only when microseconds are nonzero.
+    private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("uuuu-MM-dd HH:mm:ss");
 
-    private static final DateTimeFormatter SECONDS = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss");
-
-    static String dateText(java.util.Date value) {
-        return utcSeconds(value.getTime()).toLocalDate().toString();
+    static String dateTimeText(LocalDateTime value) {
+        return dateTimeText(value, value.getNano() / 1_000);
     }
 
-    static String dateTimeText(java.util.Date value) {
-        long micros = value instanceof Timestamp
-                ? ((Timestamp) value).getNanos() / 1_000L
-                : Math.floorMod(value.getTime(), 1_000L) * 1_000L;
-        String text = SECONDS.format(utcSeconds(value.getTime()));
-        return micros == 0 ? text : String.format("%s.%06d", text, micros);
+    static String dateTimeText(long epochSeconds, int micros) {
+        return dateTimeText(LocalDateTime.ofEpochSecond(epochSeconds, 0, ZoneOffset.UTC), micros);
     }
 
-    // Timestamp.getTime() already folds the fraction into millis; keep only whole seconds here.
-    private static LocalDateTime utcSeconds(long epochMillis) {
-        return LocalDateTime.ofEpochSecond(Math.floorDiv(epochMillis, 1_000L), 0, ZoneOffset.UTC);
-    }
-
-    /** Package-visible for tests: the calendar this instance hands to temporal getters. */
-    Calendar utcCalendar() {
-        return utc;
+    private static String dateTimeText(LocalDateTime value, int micros) {
+        String text = SECONDS.format(value);
+        if (micros == 0) {
+            return text;
+        }
+        StringBuilder out = new StringBuilder(text.length() + 7).append(text).append('.');
+        for (int divisor = 100_000; divisor > 0; divisor /= 10) {
+            out.append((char) ('0' + micros / divisor % 10));
+        }
+        return out.toString();
     }
 }

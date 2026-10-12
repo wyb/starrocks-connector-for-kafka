@@ -26,24 +26,16 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.math.BigDecimal;
-import java.sql.Date;
 import java.sql.ResultSet;
-import java.sql.Timestamp;
-import java.time.LocalDate;
 import java.time.LocalDateTime;
-import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Calendar;
 import java.util.List;
-import java.util.TimeZone;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
-import static org.junit.Assert.assertNotSame;
 import static org.junit.Assert.assertNull;
 import static org.junit.Assert.assertSame;
-import static org.junit.Assert.assertTrue;
 
 /**
  * The single funnel every value passes through on both read paths. The getter chosen here comes
@@ -109,7 +101,7 @@ public class ValueReaderTest {
 
     private static Object extract(ColumnMeta col, Object value, RecordingResultSet handler) throws Exception {
         handler.next = value;
-        return new MysqlValueReader().read(proxyFor(handler), 1, col.type);
+        return JdbcRowReader.forTransport(false).read(proxyFor(handler), 1, col.type);
     }
 
     @Test
@@ -140,7 +132,7 @@ public class ValueReaderTest {
      */
     @Test
     public void testDecimalsAndTemporalsAreCanonicalizedHere() throws Exception {
-        ValueReader reader = new MysqlValueReader();
+        JdbcRowReader reader = JdbcRowReader.forTransport(false);
         RecordingResultSet h = new RecordingResultSet();
         h.next = new BigDecimal("1.5");
         assertEquals(new BigDecimal("1.50"), reader.read(proxyFor(h), 1, col("decimal", "decimal(18, 2)", 2).type));
@@ -151,16 +143,14 @@ public class ValueReaderTest {
         assertEquals(new BigDecimal("7"), reader.read(proxyFor(h), 1, col("decimal", "decimal(9, 0)", 0).type));
 
         h = new RecordingResultSet();
-        h.next = new Date(0L);
+        h.next = "1970-01-01";
         assertEquals("1970-01-01", reader.read(proxyFor(h), 1, col("date").type));
-        assertEquals(Arrays.asList("getDate"), h.calls);
+        assertEquals(Arrays.asList("getString"), h.calls);
 
-        Timestamp withMicros = new Timestamp(0L);
-        withMicros.setNanos(123_456_000);
         h = new RecordingResultSet();
-        h.next = withMicros;
+        h.next = "1970-01-01 00:00:00.123456";
         assertEquals("1970-01-01 00:00:00.123456", reader.read(proxyFor(h), 1, col("datetime").type));
-        assertEquals(Arrays.asList("getTimestamp"), h.calls);
+        assertEquals(Arrays.asList("getString"), h.calls);
     }
 
     /**
@@ -203,70 +193,6 @@ public class ValueReaderTest {
     }
 
     /**
-     * Temporal reads pass an explicit UTC calendar; without it the driver uses the JVM zone. This
-     * pins that we pass it, not that a driver honours it -- the Arrow Flight driver takes the
-     * calendar and still builds the value in the JVM default zone, which its reader undoes.
-     */
-    @Test
-    public void testTemporalGettersReceiveTheUtcCalendar() throws Exception {
-        final List<Object> seen = new ArrayList<>();
-        ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
-                new Class<?>[] {ResultSet.class}, (proxy, method, args) -> {
-                    if ("wasNull".equals(method.getName())) {
-                        return false;
-                    }
-                    seen.add(args == null || args.length < 2 ? null : args[1]);
-                    return "getDate".equals(method.getName()) ? new Date(0L) : new Timestamp(0L);
-                });
-
-        ValueReader reader = new MysqlValueReader();
-        reader.read(rs, 1, col("date").type);
-        reader.read(rs, 1, col("datetime").type);
-        assertEquals(2, seen.size());
-        for (Object cal : seen) {
-            assertEquals("UTC", ((Calendar) cal).getTimeZone().getID());
-        }
-    }
-
-    /**
-     * The Arrow driver hands back Timestamp.valueOf(digits) in the JVM zone whatever calendar it
-     * got; the Arrow reader routes that through fromJvmWallClock. The MySQL reader takes the value
-     * as MariaDB gave it, which is right there.
-     */
-    @Test
-    public void testArrowReaderUndoesItsDriversZoneShift() throws Exception {
-        TimeZone previous = TimeZone.getDefault();
-        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
-        try {
-            Timestamp shifted = Timestamp.valueOf(java.time.LocalDateTime.of(2026, 8, 5, 12, 34, 56, 123_456_000));
-            ResultSet rs = (ResultSet) Proxy.newProxyInstance(getClass().getClassLoader(),
-                    new Class<?>[] {ResultSet.class},
-                    (proxy, method, args) -> "wasNull".equals(method.getName()) ? Boolean.FALSE : shifted);
-            ColumnType ts = col("datetime").type;
-            assertEquals("2026-08-05 12:34:56.123456", new ArrowValueReader().read(rs, 1, ts));
-            assertEquals("2026-08-05 04:34:56.123456", new MysqlValueReader().read(rs, 1, ts));
-        } finally {
-            TimeZone.setDefault(previous);
-        }
-    }
-
-    /** Each reader is per-read and owns its Calendar: Calendar is not thread-safe. */
-    @Test
-    public void testEachReaderOwnsAUtcCalendar() {
-        ValueReader a = ValueReader.forTransport(false);
-        ValueReader b = ValueReader.forTransport(false);
-        assertNotSame(a.utcCalendar(), b.utcCalendar());
-        assertEquals(TimeZone.getTimeZone("UTC"), a.utcCalendar().getTimeZone());
-    }
-
-    /** The transport picks the reader; nothing downstream has to sniff the driver. */
-    @Test
-    public void testTransportPicksTheReader() {
-        assertTrue(ValueReader.forTransport(true) instanceof ArrowValueReader);
-        assertTrue(ValueReader.forTransport(false) instanceof MysqlValueReader);
-    }
-
-    /**
      * A nested column is read with getObject; the MySQL reader gets the BE text, the Arrow reader
      * the vector's List. Both end in the same neutral value.
      */
@@ -276,12 +202,12 @@ public class ValueReaderTest {
 
         RecordingResultSet mysql = new RecordingResultSet();
         mysql.next = "[\"2026-08-05\",null]";
-        Object fromText = new MysqlValueReader().read(proxyFor(mysql), 1, nested.type);
+        Object fromText = JdbcRowReader.forTransport(false).read(proxyFor(mysql), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), mysql.calls);
 
         RecordingResultSet arrow = new RecordingResultSet();
         arrow.next = Arrays.asList(20670, null);
-        Object fromArrow = new ArrowValueReader().read(proxyFor(arrow), 1, nested.type);
+        Object fromArrow = JdbcRowReader.forTransport(true).read(proxyFor(arrow), 1, nested.type);
         assertEquals(Arrays.asList("getObject"), arrow.calls);
 
         assertEquals(Arrays.asList("2026-08-05", null), fromText);
@@ -301,7 +227,7 @@ public class ValueReaderTest {
                                 ? new Object[] {20670, null} : null);
         RecordingResultSet h = new RecordingResultSet();
         h.next = array;
-        assertEquals(Arrays.asList("2026-08-05", null), new ArrowValueReader().read(proxyFor(h), 1, nested.type));
+        assertEquals(Arrays.asList("2026-08-05", null), JdbcRowReader.forTransport(true).read(proxyFor(h), 1, nested.type));
         assertEquals(Arrays.asList("getObject"), h.calls);
     }
 
@@ -311,7 +237,7 @@ public class ValueReaderTest {
         ColumnMeta unparsed = new ColumnMeta("s", "struct", "struct<x int>", 0, true);
         RecordingResultSet h = new RecordingResultSet();
         h.next = "{\"x\":1}";
-        assertEquals("{\"x\":1}", new MysqlValueReader().read(proxyFor(h), 1, unparsed.type));
+        assertEquals("{\"x\":1}", JdbcRowReader.forTransport(false).read(proxyFor(h), 1, unparsed.type));
         assertEquals(Arrays.asList("getString"), h.calls);
     }
 
@@ -320,50 +246,18 @@ public class ValueReaderTest {
     public void testReadRowReadsOnlyTheDeclaredColumns() throws Exception {
         RecordingResultSet h = new RecordingResultSet();
         h.next = 42;
-        Object[] row = new MysqlValueReader().readRow(proxyFor(h), Arrays.asList(col("int"), col("int")));
+        Object[] row = JdbcRowReader.forTransport(false).readRow(proxyFor(h), Arrays.asList(col("int"), col("int")));
         assertArrayEquals(new Object[] {42, 42}, row);
         assertEquals(Arrays.asList("getInt", "getInt"), h.calls);
     }
 
-    // -- DATE and DATETIME text, digit for digit what StarRocks prints. Fixtures are built as UTC
-    // instants, the way getTimestamp(i, utcCalendar) hands them over; Timestamp.valueOf would read
-    // the digits in the JVM's default zone instead.
-
-    private static Timestamp at(String seconds, int nanos) {
-        Timestamp ts = Timestamp.from(LocalDateTime.parse(seconds.replace(' ', 'T')).toInstant(ZoneOffset.UTC));
-        ts.setNanos(nanos);
-        return ts;
-    }
-
-    private static Date on(String day) {
-        return new Date(LocalDate.parse(day).atStartOfDay(ZoneOffset.UTC).toInstant().toEpochMilli());
-    }
-
-    @Test
-    public void testDateTextIsIsoCalendarDate() {
-        assertEquals("1970-01-01", ValueReader.dateText(new java.util.Date(0L)));
-        assertEquals("2026-08-05", ValueReader.dateText(on("2026-08-05")));
-    }
-
-    /** The fraction is printed only when it is non-zero, and then always as six digits. */
+    /** The fraction is absent for whole seconds and otherwise has exactly six digits. */
     @Test
     public void testDateTimeTextFractionFollowsStarRocks() {
-        assertEquals("2026-08-05 12:34:56", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 0)));
-        assertEquals("2026-08-05 12:34:56.123456", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 123_456_000)));
-        assertEquals("2026-08-05 12:34:56.120000", ValueReader.dateTimeText(at("2026-08-05 12:34:56", 120_000_000)));
-    }
-
-    /** A plain java.util.Date carries millis only; they become the first three fraction digits. */
-    @Test
-    public void testPlainDateUsesItsMillis() {
-        assertEquals("1970-01-01 00:00:01.500000", ValueReader.dateTimeText(new java.util.Date(1_500L)));
-        assertEquals("1970-01-01 00:00:00", ValueReader.dateTimeText(new java.util.Date(0L)));
-    }
-
-    /** Before the epoch the seconds and the fraction must still be split with floor semantics. */
-    @Test
-    public void testBeforeEpochSplitsWithFloorSemantics() {
-        assertEquals("1969-12-31", ValueReader.dateText(new java.util.Date(-1L)));
-        assertEquals("1969-12-31 23:59:59.999000", ValueReader.dateTimeText(new java.util.Date(-1L)));
+        for (String text : new String[] {"2026-08-05 12:34:56", "2026-08-05 12:34:56.123456",
+                "2026-08-05 12:34:56.120000", "1969-12-31 23:59:59.999999",
+                "1500-01-01 00:00:00", "0000-01-01 00:00:00"}) {
+            assertEquals(text, ValueReader.dateTimeText(LocalDateTime.parse(text.replace(' ', 'T'))));
+        }
     }
 }

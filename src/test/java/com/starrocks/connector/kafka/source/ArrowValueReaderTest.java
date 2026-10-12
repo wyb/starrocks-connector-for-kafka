@@ -26,13 +26,10 @@ import org.apache.kafka.connect.errors.DataException;
 import org.junit.Test;
 
 import java.math.BigDecimal;
-import java.sql.Timestamp;
-import java.time.LocalDateTime;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.TimeZone;
 
 import static org.junit.Assert.assertArrayEquals;
 import static org.junit.Assert.assertEquals;
@@ -41,7 +38,7 @@ import static org.junit.Assert.fail;
 
 /**
  * Feeds the reader the object shapes the Arrow Flight JDBC driver produces (verified against
- * flight-sql-jdbc-driver 18.0.0) and checks the neutral value, then the assembled Connect value.
+ * flight-sql-jdbc-core 18.0.0) and checks the neutral value, then the assembled Connect value.
  */
 public class ArrowValueReaderTest {
 
@@ -132,6 +129,18 @@ public class ArrowValueReaderTest {
         assertEquals(map("2026-08-05", "v"), new ArrowValueReader().nested(type("map<date,varchar(10)>"), dateKeyed));
     }
 
+    @Test
+    public void testBinaryMapKeysMatchTopLevelAndNestedEntryLists() {
+        byte[] key = new byte[] {0, (byte) 0xff};
+        Map<Object, Object> topLevel = new LinkedHashMap<>();
+        topLevel.put(key, 7);
+        ColumnType binaryMap = type("map<varbinary(4),int(11)>");
+        ArrowJdbcValueReader reader = new ArrowJdbcValueReader();
+        assertEquals(map("00ff", 7), reader.nested(binaryMap, topLevel));
+        assertEquals(Arrays.asList(map("00ff", 7)),
+                reader.nested(type("array<map<varbinary(4),int(11)>>"), Arrays.asList(entries(key, 7))));
+    }
+
     /** Struct fields come back in declared order and by name, even if the driver's map is sparse. */
     @Test
     public void testStructFollowsTheDeclaredFieldsNotTheMap() {
@@ -174,7 +183,7 @@ public class ArrowValueReaderTest {
         row.put("tags", entries(text("k"), 20670)); // nested, so the entry-list shape
 
         Object neutral = new ArrowValueReader().nested(t, Arrays.asList(row, null));
-        List<?> value = (List<?>) t.toConnectValue(s, neutral);
+        List<?> value = (List<?>) t.bindConnectValue(s).convert(neutral);
 
         Struct first = (Struct) value.get(0);
         first.validate();
@@ -193,9 +202,15 @@ public class ArrowValueReaderTest {
             assertEquals(true, e.getMessage().contains("array<int>"));
             assertEquals(true, e.getMessage().contains("LinkedHashMap"));
         }
+        try {
+            new ArrowValueReader().nested(type("array<json>"), Arrays.asList(map("k", 1)));
+            fail("a map must not be rendered as JSON text with Map.toString()");
+        } catch (DataException e) {
+            assertEquals(true, e.getMessage().contains("json"));
+        }
     }
 
-    /** The epoch-based entry points agree with the Date-based text of the base reader. */
+    /** Epoch-based values retain their stored calendar digits and microseconds. */
     @Test
     public void testEpochDaysAndMicrosMatchTheDateText() {
         assertEquals("2026-08-05", ArrowValueReader.dateOfEpochDays(20670));
@@ -205,19 +220,13 @@ public class ArrowValueReaderTest {
         assertEquals("1969-12-31 23:59:59.999999", ArrowValueReader.dateTimeOfEpochMicros(-1L));
     }
 
-    /** valueOf(LocalDateTime) then fromJvmWallClock must give the digits back, nanos included. */
     @Test
-    public void testFromJvmWallClockUndoesValueOf() {
-        TimeZone previous = TimeZone.getDefault();
-        TimeZone.setDefault(TimeZone.getTimeZone("Asia/Shanghai"));
-        try {
-            LocalDateTime digits = LocalDateTime.of(2026, 8, 5, 12, 34, 56, 123_456_000);
-            Timestamp shifted = Timestamp.valueOf(digits);            // what the Arrow driver does
-            assertEquals("2026-08-05 04:34:56.123456", ValueReader.dateTimeText(shifted));
-            assertEquals("2026-08-05 12:34:56.123456",
-                    ValueReader.dateTimeText(ArrowValueReader.fromJvmWallClock(shifted)));
-        } finally {
-            TimeZone.setDefault(previous);
-        }
+    public void testArrayValuesAreDetachedFromDriverContainers() {
+        ColumnType type = type("array<array<int>>");
+        List<Integer> driverValues = new java.util.ArrayList<>(Arrays.asList(1, 2));
+        Object neutral = new ArrowJdbcValueReader().nested(type, Arrays.asList(driverValues));
+        driverValues.set(0, 99);
+        assertEquals(Arrays.asList(Arrays.asList(1, 2)), neutral);
     }
+
 }

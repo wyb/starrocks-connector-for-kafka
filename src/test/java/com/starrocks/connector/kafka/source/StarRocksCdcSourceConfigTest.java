@@ -101,6 +101,30 @@ public class StarRocksCdcSourceConfigTest {
     }
 
     @Test
+    public void testConnectTimeoutMustBePositive() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.CONNECT_TIMEOUT_MS, "0");
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("zero connect timeout must be rejected");
+        } catch (ConfigException expected) {
+            assertTrue(expected.getMessage().contains(StarRocksCdcSourceConfig.CONNECT_TIMEOUT_MS));
+        }
+    }
+
+    @Test
+    public void testAdbcReadTimeoutMustBePositive() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.READ_TIMEOUT_MS, "0");
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("zero ADBC read timeout must be rejected");
+        } catch (ConfigException expected) {
+            assertTrue(expected.getMessage().contains(StarRocksCdcSourceConfig.READ_TIMEOUT_MS));
+        }
+    }
+
+    @Test
     public void testSnapshotBatchSizeMustBePositive() {
         Map<String, String> m = base();
         m.put(StarRocksCdcSourceConfig.SNAPSHOT_BATCH_SIZE, "0");
@@ -145,6 +169,13 @@ public class StarRocksCdcSourceConfigTest {
         assertEquals("fail", c.nonTrackablePolicy());
         assertFalse(c.tombstonesOnDelete());
         assertFalse(c.readTimingsEnabled());
+        assertEquals(StarRocksCdcSourceConfig.READ_TRANSPORT_JDBC, c.readTransport());
+        CdcClient client = CdcClientFactory.create(c);
+        try {
+            assertTrue(client instanceof StarRocksJdbcClient);
+        } finally {
+            client.close();
+        }
     }
 
     @Test
@@ -152,6 +183,46 @@ public class StarRocksCdcSourceConfigTest {
         Map<String, String> m = base();
         m.put(StarRocksCdcSourceConfig.READ_TIMINGS_ENABLED, "true");
         assertTrue(new StarRocksCdcSourceConfig(m).readTimingsEnabled());
+    }
+
+    @Test
+    public void testAdbcReadRequiresUriAndKeepsJdbcMetadataUrl() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.READ_TRANSPORT, StarRocksCdcSourceConfig.READ_TRANSPORT_ADBC);
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("ADBC URI must be required");
+        } catch (ConfigException expected) {
+            assertTrue(expected.getMessage().contains(StarRocksCdcSourceConfig.ADBC_URI));
+        }
+        m.put(StarRocksCdcSourceConfig.ADBC_URI, "grpc+tcp://fe1:9408");
+        StarRocksCdcSourceConfig config = new StarRocksCdcSourceConfig(m);
+        assertEquals("grpc+tcp://fe1:9408", config.adbcUri());
+        assertEquals(Arrays.asList("grpc+tcp://fe1:9408"), config.adbcUris());
+        assertEquals("jdbc:mysql://fe1:9030,fe2:9030", config.jdbcUrl());
+        CdcClient client = CdcClientFactory.create(config);
+        try {
+            assertTrue(client instanceof StarRocksAdbcClient);
+        } finally {
+            client.close();
+        }
+    }
+
+    @Test
+    public void testAdbcReadAcceptsDistinctEndpoints() {
+        Map<String, String> m = base();
+        m.put(StarRocksCdcSourceConfig.READ_TRANSPORT, StarRocksCdcSourceConfig.READ_TRANSPORT_ADBC);
+        m.put(StarRocksCdcSourceConfig.ADBC_URI,
+                "grpc+tcp://fe1:9408, grpc+tcp://fe2:9408");
+        assertEquals(Arrays.asList("grpc+tcp://fe1:9408", "grpc+tcp://fe2:9408"),
+                new StarRocksCdcSourceConfig(m).adbcUris());
+        m.put(StarRocksCdcSourceConfig.ADBC_URI, "grpc+tcp://fe1:9408,");
+        try {
+            new StarRocksCdcSourceConfig(m);
+            fail("An empty ADBC endpoint must be rejected");
+        } catch (ConfigException expected) {
+            assertTrue(expected.getMessage().contains(StarRocksCdcSourceConfig.ADBC_URI));
+        }
     }
 
     @Test

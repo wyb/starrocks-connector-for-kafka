@@ -79,7 +79,7 @@ public class SqlBuilderTest {
      * The Arrow Flight transport's only route to column meta.
      *
      * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
-     * matched positionally against the projected result set by {@code ValueReader#readRow}, so any other
+     * matched positionally against the projected result set by {@code JdbcRowReader#readRow}, so any other
      * order silently reads every value into the wrong field.
      */
     @Test

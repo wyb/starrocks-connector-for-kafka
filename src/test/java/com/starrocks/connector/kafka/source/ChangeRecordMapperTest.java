@@ -354,4 +354,43 @@ public class ChangeRecordMapperTest {
         assertEquals(deleteRecord.sourcePartition(), tombstone.sourcePartition());
         assertEquals(deleteRecord.sourceOffset(), tombstone.sourceOffset());
     }
+    @Test
+    public void testBoundKeyFieldsUseKeyIndexesAndPartitionIsImmutable() {
+        List<ColumnMeta> columns = Arrays.asList(
+                new ColumnMeta("v", "varchar", "varchar(20)", 0, true),
+                new ColumnMeta("id", "int", "int", 0, false, true),
+                new ColumnMeta("a", "array", "array<int>", 0, true));
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db", "orders", "sr.db.orders", columns);
+        List<Integer> firstArray = new ArrayList<>(Arrays.asList(1, null));
+        SourceRecord first = mapper.toSnapshotRecord(new Object[]{"first", 7, firstArray}, 10);
+        SourceRecord second = mapper.toChangeRecord(
+                new Object[]{"second", 8, Arrays.asList(2, 3)}, 0, 12, 10, 11);
+        assertSame(first.sourcePartition(), second.sourcePartition());
+        try {
+            first.sourcePartition().clear();
+            fail("sourcePartition must be immutable");
+        } catch (UnsupportedOperationException expected) {
+            assertEquals("orders", second.sourcePartition().get("table"));
+        }
+        assertEquals(7, ((Struct) first.key()).get("id"));
+        assertEquals(8, ((Struct) second.key()).get("id"));
+        Struct firstAfter = (Struct) ((Struct) first.value()).get("after");
+        assertSame(firstArray, firstAfter.get("a"));
+        assertEquals("first", firstAfter.get("v"));
+        assertEquals(Arrays.asList(1, null), firstAfter.get("a"));
+        assertEquals(10L, first.sourceOffset().get("bookmark_id"));
+        assertEquals(false, first.sourceOffset().get("snapshot_done"));
+        assertEquals(11L, second.sourceOffset().get("bookmark_id"));
+        assertEquals(true, second.sourceOffset().get("snapshot_done"));
+        ((Struct) first.value()).validate();
+        ((Struct) second.value()).validate();
+    }
+
+    @Test(expected = org.apache.kafka.connect.errors.DataException.class)
+    public void testRetainedArrayStillValidatesItsElements() {
+        ChangeRecordMapper mapper = new ChangeRecordMapper("db", "t", "sr.db.t",
+                Collections.singletonList(new ColumnMeta("a", "array", "array<int>", 0, true)));
+        mapper.toSnapshotRecord(new Object[]{Arrays.asList(1, "invalid")}, 10);
+    }
+
 }

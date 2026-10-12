@@ -41,63 +41,113 @@ assertions over the Arrow Flight SQL transport instead of the MySQL protocol. It
 `arrow_flight_port` first and fails with the remedy if the cluster has it disabled, and it injects
 the `--add-opens` flag Arrow needs into the worker JVM. Running both settings is the only way to
 know a transport change has not moved the delete-before-insert ordering or the temporal reads.
+With `SR_TRANSPORT=arrow-adbc`, the cluster smoke test places an unavailable Flight URI before
+the real FE and checks that the worker switches endpoints before the snapshot. Override the
+unavailable URI with `SR_ADBC_FAILOVER_URI` if port 1 on localhost is in use. Both smoke scripts
+also check the exact Kafka record count after mutations, restart, and bookmark reclamation.
 
 ## Transport benchmark
 
-Two entry points compare the MySQL protocol with Arrow Flight SQL on the same cluster. Neither
+Two entry points compare MySQL, Arrow Flight JDBC, and Arrow ADBC on the same cluster. Neither
 is part of `mvn test`.
 
-`TransportBench` (a JUnit class under `src/test/java`, selected only by name) drives
-`StarRocksJdbcClient` directly: for every table it pins one bookmark, reads the snapshot at it
-over both transports, alternating which goes first, and if `bench.mutation.sql` is given runs
-that once and reads the resulting CHANGES window over both. It also times `bookmark_create` on
+`PipelineBench` (a JUnit class under `src/test/java`, selected only by name) drives
+the selected `CdcClient` implementations directly: for every table it pins one bookmark, reads the snapshot at it
+over the selected transports, alternating which goes first, then reads the daily and burst
+CHANGES windows over each. A direct Maven invocation can instead set `bench.mutation.sql` for
+one custom CHANGES window. It also times `bookmark_create` on
 an unchanged table, the idle poll's fixed cost, per transport. It reports p50 and min wall time,
-rows/s, process CPU, allocation and RSS, and writes the same table to `target/transport-bench.txt`.
+rows/s, process CPU, allocation, RSS and encoded key+value size, and writes the same table to `target/pipeline-bench.txt`.
 
-`bench-transport.sh` runs this benchmark end to end: it creates `cdc_read_bench` with two
-equal-row-count tables, invokes `mvn -q test -Dtest=TransportBench`, then drops the database
+`BENCH_PIPELINE` selects one mode for every transport in a run (direct Maven: `-Dbench.pipeline=...`):
+
+| Mode | Work measured |
+| --- | --- |
+| `read` (default) | Read and decode, then count rows |
+| `map` | Read/decode plus production `ChangeRecordMapper` SourceRecord construction |
+| `serialize` | Read/decode/map plus Kafka `JsonConverter` key/value JSON encoding |
+
+`BENCH_TRANSPORTS` independently selects protocols. To debug the shared map or serialize
+logic, select a single transport, for example `BENCH_TRANSPORTS=mysql BENCH_PIPELINE=serialize`.
+The default still selects all three transports; they use identical pipeline settings.
+Earlier pipeline runs always included serialization; use `serialize` to compare with those results.
+
+Converter settings match `bench-cluster.sh`: `schemas.enable=false` for key and value,
+and `decimal.format=NUMERIC` for values. The benchmark uses test-scope Connect JSON 3.6.0,
+matching this project's Connect API version; the cluster benchmark uses the converter
+supplied by the installed Kafka worker. Only the required mapper/converters are initialized,
+outside measurements. Map mode consumes each record through a volatile reference to prevent
+JIT elimination, retaining only the latest record. Serialize mode counts and discards bytes
+per row. Neither mode retains an entire window.
+
+Total time/rows/s/CPU/allocation measure the selected mode, regardless of stage timing.
+The report names the mode and marks unexecuted stages and JSON size as `-`.
+Compare totals within the same mode. This benchmark excludes Kafka sends, Connect worker/SMTs,
+Task polling, CHANGES window buffering and offset fence rewrites; use the cluster benchmark
+for their combined effect. Inline mapping and serialization also change how much time the
+driver has to prefetch the next batch.
+
+`bench-pipeline.sh` runs this benchmark end to end: it creates `cdc_bench` with two
+equal-row-count tables, invokes `mvn -q test -Dtest=PipelineBench`, then drops the database
 even if the benchmark fails. Both tables have the same column order: the shared scalar columns
 are followed by `a`, `m`, `st`, and `j`. In `perf_complex` these are an eight-element ARRAY,
 a three-entry MAP, a STRUCT, and JSON; in `perf_scalar` they are VARCHAR columns containing
 corresponding text. This aligns the column count and approximates the text payload. JSON uses
 `getString()` in `ValueReader`, so its type contrast does not exercise the nested-value parser.
-If `cdc_read_bench` already exists, the script exits without changing it:
+The script uses the same schema and generated values as `bench-cluster.sh`. By default, each
+table has 2 million snapshot rows; it updates 50,000 rows and then a disjoint 500,000 rows,
+producing 100,000 daily and 1 million burst CHANGES records. It reads each fixed window in
+three rounds over all three transports, discarding the first round and checking exact record
+counts. Set `BENCH_TRANSPORTS` to select a subset.
+If `cdc_bench` already exists, the script exits without changing it:
 
 ```bash
 SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
-  BENCH_ROWS=1000000 ./src/test/integration/bench-transport.sh
+  ./src/test/integration/bench-pipeline.sh
 ```
 
-Knobs: `SR_PASSWORD` (empty), `BENCH_BUCKETS` (8), `BENCH_ROUNDS` (5; first discarded),
-`BENCH_READ_TIMINGS` (0). With `BENCH_READ_TIMINGS=1`, the report also shows p50 time spent in
-`ResultSet.next()` and `ValueReader.readRow()` for each read. These per-row clock calls add
-overhead, so use `BENCH_READ_TIMINGS=0` for throughput comparisons:
+Knobs: `SR_PASSWORD` (empty), `BENCH_ROWS` (2 million), `BENCH_DAILY_UPDATE_ROWS` (50,000),
+`BENCH_BURST_UPDATE_ROWS` (500,000), `BENCH_BUCKETS` (8), `BENCH_ROUNDS` (3; first discarded),
+`BENCH_READ_TIMINGS` (0), `BENCH_PIPELINE` (`read`). The two update sizes must sum to at most `BENCH_ROWS`. With
+`BENCH_READ_TIMINGS=1`, the report also shows p50 time spent in
+each transport's `executeQuery()`, JDBC `ResultSet.next()`, ADBC `loadNextBatch()`, and each
+transport's row value reader, plus `map` (SourceRecord construction) and `serialize`
+(key and value JSON encoding) when enabled by the selected pipeline mode. Each column is an independent median and may not sum to the
+median total. These
+clock calls add overhead, so use `BENCH_READ_TIMINGS=0` for throughput comparisons. For ADBC,
+the report also separates first, later, and EOF batch waits and shows batch counts and rows per
+batch. Individual ADBC calls from measured rounds are written to `target/pipeline-batches.tsv`
+with their wait time and row count:
 
 ```bash
 SR_HOST=127.0.0.1 SR_PORT=9039 SR_ARROW_PORT=9498 SR_USER=root \
-  BENCH_ROWS=1000000 BENCH_READ_TIMINGS=1 ./src/test/integration/bench-transport.sh
+  BENCH_PIPELINE=serialize BENCH_TRANSPORTS=mysql BENCH_READ_TIMINGS=1 \
+  ./src/test/integration/bench-pipeline.sh
 ```
 
 For temporary diagnostics in a Connect worker, set
 `source.read.timings.enabled=true` on the source connector and enable DEBUG logging for
-`com.starrocks.connector.kafka.source.StarRocksJdbcClient` and
+`com.starrocks.connector.kafka.source.StarRocksJdbcClient` or
+`com.starrocks.connector.kafka.source.StarRocksAdbcClient`, plus
 `com.starrocks.connector.kafka.source.StarRocksCdcSourceTask`. The client logs `query_ms`,
-`next_ms`, and `decode_ms`; the task logs `map_ms` and per-table `table_ms` for each emitted
+`next_ms`, and `decode_ms`; ADBC also logs batch counts, first/later/EOF waits, and rows per
+batch. The task logs `map_ms` and per-table `table_ms` for each emitted
 snapshot batch or CHANGES window. The connector setting is off by default. Turn it off after
 collecting the data because timing every row affects throughput.
-The report remains in `target/transport-bench.txt` after cleanup. Compare MySQL and Arrow
+The report remains in `target/pipeline-bench.txt` after cleanup. Compare transports
 within each table; the difference between tables also includes storage and wire-format costs,
-so it does not isolate the text parser's cost. `TransportBench` can still be invoked directly
+so it does not isolate the text parser's cost. `PipelineBench` can still be invoked directly
 with `-Dbench.*` against existing tables when data must remain available.
 
 `bench-cluster.sh` measures StarRocks → Connect → Kafka for scalar and complex tables over each
-transport. It creates `cdc_bench` for the run and refuses to run if that database already exists;
+transport (MySQL JDBC, Arrow Flight JDBC, and Arrow ADBC by default). It creates `cdc_bench`
+for the run and refuses to run if that database already exists;
 the database is removed during cleanup after a successful create. It uses the same schema and
-values as `bench-transport.sh`, with a separate table for
+values as `bench-pipeline.sh`, with a separate table for
 each shape/transport pair so one UPDATE cannot affect another run. The scalar table has VARCHAR
 text in the `a`, `m`, `st`, and `j` columns; the complex table uses ARRAY, MAP, STRUCT, and JSON.
 Each run uses the same worker settings and its own topic. Reports identify pairs such as
-`scalar/mysql` and `complex/arrow-flight`. By default, each table has 5 million snapshot rows.
+`scalar/mysql` and `complex/arrow-flight`. By default, each table has 2 million snapshot rows.
 After the snapshot, the script updates 50,000 rows and then a disjoint 500,000 rows, producing
 100,000 daily and 1 million burst CHANGES records respectively (DELETE + INSERT per update).
 Each phase waits for its exact Kafka offset before the next update. The report separates
@@ -115,13 +165,13 @@ The script requires a fresh topic for each run and never deletes a topic it did 
 ```bash
 SR_HOST=fe-leader SR_USER=root SR_PASSWORD=secret \
 KAFKA_BOOTSTRAP=broker1:9092 KAFKA_BIN=/opt/kafka/bin \
-BENCH_ROWS=5000000 BENCH_SHAPES='scalar complex' \
-BENCH_TRANSPORTS='mysql arrow-flight' ./bench-cluster.sh
+BENCH_ROWS=2000000 BENCH_SHAPES='scalar complex' \
+./bench-cluster.sh
 ```
 
 Build a fresh plugin jar with `mvn -DskipTests package` before the benchmark. The snapshot
 returns at most `BENCH_SNAPSHOT_BATCH_SIZE` records per poll (default 4096). For a comparison,
-repeat the benchmark with `BENCH_TRANSPORTS='arrow-flight mysql'` to reveal order/cache effects.
+repeat the benchmark with `BENCH_TRANSPORTS='arrow-adbc arrow-flight mysql'` to reveal order/cache effects.
 Use `BENCH_SHAPES=scalar` or `BENCH_SHAPES=complex` to run just one shape.
 Use `BENCH_DAILY_UPDATE_ROWS` and `BENCH_BURST_UPDATE_ROWS` to adjust the two update sizes;
 their sum must fit in `BENCH_ROWS`. To run one custom CHANGES phase instead, set
@@ -132,7 +182,7 @@ Kafka offset target as seconds from mutation start. Poll/write timestamps are sa
 second; the Kafka offset target is observed by a one-second polling loop. Raw epoch timestamps
 are saved to `change-timeline.tsv` beside the JMX samples. Task timestamps require
 `BENCH_READ_TIMINGS=1`, which also prints summed query/next/decode/map/table timings for snapshot
-and data-bearing CHANGES reads. Snapshot Task timings sum active batches, excluding gaps between
+and data-bearing CHANGES reads, plus ADBC batch-wait summaries. Snapshot Task timings sum active batches, excluding gaps between
 polls. The script enables DEBUG for both CDC classes when it supplies its own Kafka logging config; if you set
 `KAFKA_LOG4J_OPTS`, that config must enable them. Leave timing off for throughput comparisons.
 The script needs `javac` to build its dependency-free JMX sampler.
@@ -156,7 +206,7 @@ The rest of this page covers the Docker variant.
 
 - A Kafka image with the Connect scripts on board (default `apache/kafka:3.7.0`,
   override with `KAFKA_IMAGE`).
-- The shaded plugin jar built first:
+- The packaged plugin directory built first:
 
   ```bash
   cd ../../.. && mvn -DskipTests package
@@ -174,7 +224,7 @@ The script tears the containers down on exit, including on failure.
 
 | Step | Assertion |
 | --- | --- |
-| 0 | The primary shaded jar contains both the connector class and `org/mariadb/jdbc/Driver.class`, and is staged as the *only* jar in `target/smoke-plugin/` |
+| 0 | The package contains the connector jar and separate JDBC, Debezium, and Arrow dependencies, all staged in one `target/smoke-plugins/starrocks-cdc/` directory |
 | 2-3 | A PRIMARY KEY table with `enable_change_data_capture=true` produces topic `sr.smoke.orders` |
 | 5 | Initial snapshot emits exactly 3 `op="r"` records |
 | 5 | `UPDATE` emits `op="d"` (before image `v=20`) **before** `op="c"` (after image `v=200`) |
@@ -205,7 +255,7 @@ this assertion fails.
 | `docker-compose.yml` | StarRocks (shared-data) + Kafka (KRaft single node); image tags overridable |
 | `source.properties` | Connector config, mounted into the Kafka container |
 | `smoke.sh` | The run: preflight, seed, start worker, mutate, consume, assert, restart, assert |
-| `bench-transport.sh` | Create scalar and complex tables, run `TransportBench`, then remove its database |
+| `bench-pipeline.sh` | Create scalar and complex tables, benchmark read/map/JSON serialization with `PipelineBench`, then remove its database |
 | `bench-cluster.sh` | End-to-end transport benchmark against existing clusters; see above |
 
 `common.sh` deliberately holds only what is byte-identical between the two
@@ -217,14 +267,10 @@ de-duplication.
 
 The Connect worker properties are generated by `smoke.sh` at run time; Connect
 itself runs as `connect-standalone` inside the Kafka container with
-`../../../target/smoke-plugin` mounted at `/plugins`.
+`../../../target/smoke-plugins` mounted at `/plugins`.
 
-That directory is created by `smoke.sh` at step 0 and holds a copy of the primary
-shaded jar and nothing else — Connect treats every entry under `plugin.path` as a
-separate plugin location, and `target/` after a `mvn package` holds several
-copies of the connector (the primary jar, the `-with-dependencies` jar,
-`original-*.jar` with **no** bundled JDBC driver, plus `classes/` and the assembly
-directories). Mounting `target/` wholesale made it arbitrary which one the worker
-loaded, so a run could fail with `IllegalStateException: mariadb-java-client
-driver not found on classpath` while the jar under test was perfectly fine. The
-directory is removed again by the cleanup trap.
+The staged `starrocks-cdc/` subdirectory holds the connector jar and its separate
+runtime dependencies. Connect scans that subdirectory as one plugin and gives its
+jars one classloader. `target/` itself also contains alternate project jars and
+assembly directories, so it cannot be used as `plugin.path`. The staged root is
+removed by the cleanup trap.

@@ -4,7 +4,7 @@
 
 The StarRocks CDC source connector is a Kafka Connect **source** connector — the reverse direction of the existing StarRocks sink connector in this repository. It streams change data capture (CDC) events out of StarRocks **shared-data (cloud-native)** tables into Kafka topics, one topic per captured table.
 
-Internally it drives StarRocks' existing bookmark and CHANGES infrastructure over the FE's MySQL protocol (JDBC): it pins a position with the `bookmark_create`/`bookmark_renew`/`bookmark_release` meta functions, takes a point-in-time initial snapshot via the `[_BOOKMARK_<id>_]` query hint, and streams incremental changes via the `[_CHANGES_<base>_<head>_]` query hint. Every record is emitted as a Debezium envelope (`before`/`after`/`source`/`op`/`ts_ms`/`transaction`, built by Debezium's own `io.debezium.data.Envelope`) with a schema-carrying Kafka Connect `Struct` key and value. Delivery is **at-least-once**.
+Internally it uses JDBC for StarRocks' bookmark and metadata operations, then reads the point-in-time snapshot (`[_BOOKMARK_<id>_]`) and incremental CHANGES window (`[_CHANGES_<base>_<head>_]`) through the configured JDBC or Arrow ADBC transport. Every record is emitted as a Debezium envelope (`before`/`after`/`source`/`op`/`ts_ms`/`transaction`, built by Debezium's own `io.debezium.data.Envelope`) with a schema-carrying Kafka Connect `Struct` key and value. Delivery is **at-least-once**.
 
 ---
 
@@ -39,6 +39,8 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `starrocks.jdbc.url` | String | *(required)* | JDBC URL of the StarRocks FE endpoint(s). Comma-separate multiple FE hosts (e.g. `jdbc:mysql://fe1:9030,fe2:9030`) so the client can rotate to the leader for bookmark calls. The scheme selects the transport: `jdbc:mysql://` for the MySQL protocol, `jdbc:arrow-flight-sql://` for Arrow Flight SQL — see [Choosing a transport](#choosing-a-transport). |
+| `source.read.transport` | String | `jdbc` | `jdbc` reads through `starrocks.jdbc.url`; `arrow-adbc` uses Arrow ADBC for snapshot and CHANGES queries. Bookmarks and metadata still use JDBC. |
+| `starrocks.adbc.uri` | String | `""` | Required when `source.read.transport=arrow-adbc`; comma-separated Flight endpoints, for example `grpc+tcp://fe1:9408,grpc+tcp://fe2:9408`. |
 | `starrocks.database.name` | String | *(required)* | The name of the source StarRocks database. |
 | `starrocks.username` | String | *(required)* | The username used to connect to StarRocks. Needs the `OPERATE` privilege. |
 | `starrocks.password` | Password | *(required)* | The password used to connect to StarRocks. Stored as a Kafka Connect `Password`, so it is masked in logs and the connector status API. |
@@ -48,14 +50,15 @@ Internally it drives StarRocks' existing bookmark and CHANGES infrastructure ove
 | `source.snapshot.mode` | String | `initial` | Whether to take an initial snapshot before streaming changes. One of `initial`, `no_snapshot`. **`no_snapshot` cannot be combined with `source.nontrackable.policy=resnapshot`** — that pairing is rejected at startup with a `ConfigException`, because `resnapshot` rebuilds a table's position from a fresh snapshot and would silently drop changes with snapshots disabled. |
 | `source.no.snapshot.missing.position.policy` | String | `fail` | What `no_snapshot` does when a table has neither a durable offset nor a bookmark held by this connector: `fail` requires explicit initialization; `latest` creates a new bookmark at the current version. `latest` also applies after an old reference expires, so it can skip changes. |
 | `source.poll.interval.ms` | Long | `5000` | Milliseconds to sleep between polls after a poll that produced no records. |
-| `source.snapshot.batch.size` | Int | `4096` | Maximum snapshot records returned per table in one `poll()`. The snapshot cursor stays open across batches; each active table uses a separate JDBC read connection. Does not limit CHANGES windows. |
+| `source.snapshot.batch.size` | Int | `4096` | Maximum snapshot records returned per table in one `poll()`. The snapshot cursor stays open across batches; each active table uses a separate read connection. Does not limit CHANGES windows. |
 | `source.bookmark.ttl.ms` | Long | `604800000` (7 days) | Time-to-live, in milliseconds, for the bookmark backing each table's position. Renewed automatically while the task polls, paced off the lease the server actually grants; the TTL is the backstop for a connector that stops polling — see [Limitations](#limitations). A non-positive value drops only the per-reference limit: the cluster ceiling `bookmark_reference_max_ttl_ms` still expires the bookmark, so renewal keeps running. Even once the server reports no expiry at all, renewal re-probes every five minutes, since that ceiling is a mutable config an operator can set at any time. |
 | `source.nontrackable.policy` | String | `fail` | Action to take when a table's CHANGES window becomes non-trackable. One of `fail`, `resnapshot`. **`resnapshot` requires `source.snapshot.mode=initial`** (the default): combined with `source.snapshot.mode=no_snapshot` it is rejected at startup with a `ConfigException`, since there would be no snapshot to rebuild the table's position from. |
 | `source.tombstones.on.delete` | Boolean | `false` | When `true`, emits an extra tombstone record (null value, same key) immediately following each delete record. |
 | `source.max.retries` | Int | `3` | Number of attempts for a bookmark call before giving up (mirrors the sink's `sink.maxretries`). |
 | `source.poll.retry.timeout.ms` | Long | `600000` | How long a table's reads may keep failing across polls before the task fails instead of retrying. Each failed poll waits `source.poll.interval.ms` before the next try. `-1` retries forever; `0` fails on the first failed poll. |
-| `source.connect.timeout.ms` | Int | `1000` | Milliseconds before a connection attempt to StarRocks times out. The sink connector spells its own equivalent `connect.timeoutms`; the two are separate keys. |
-| `source.read.timings.enabled` | Boolean | `false` | Collect JDBC query, per-row `next()`/decode, and task record mapping timings for this connector. With DEBUG logging enabled for `StarRocksJdbcClient` and `StarRocksCdcSourceTask`, emits read and per-table task summaries. Adds overhead; use temporarily for diagnostics. |
+| `source.connect.timeout.ms` | Int | `1000` | Positive connection timeout in milliseconds for bookmark and metadata JDBC calls and for JDBC or Arrow ADBC read connections. The sink connector uses a separate `connect.timeoutms` key. |
+| `source.read.timeout.ms` | Int | `120000` | Maximum wait in milliseconds for an Arrow ADBC query, the next Flight batch, or CHANGES reader cleanup. Each wait has its own timeout; a timeout discards the read connection and retries on the next configured Flight endpoint. |
+| `source.read.timings.enabled` | Boolean | `false` | Collect query, read/decode, and task record mapping timings. With DEBUG logging enabled for `StarRocksJdbcClient` or `StarRocksAdbcClient`, and `StarRocksCdcSourceTask`, emits read and per-table summaries. Adds overhead; use temporarily for diagnostics. |
 
 A complete `connect-standalone`-style connector properties file:
 
@@ -88,12 +91,13 @@ source.tombstones.on.delete=false
 source.max.retries=3
 source.poll.retry.timeout.ms=600000
 source.connect.timeout.ms=1000
+source.read.timeout.ms=120000
 source.read.timings.enabled=false
 ```
 
 ### Choosing a transport
 
-The URL scheme is the entire switch — there is no separate transport setting, because a JDBC URL already names the driver it wants. Both drivers ship inside the plugin jar; the one you do not name stays inert.
+With `source.read.transport=jdbc` (the default), the URL scheme selects MySQL or Arrow Flight JDBC. The table below compares those JDBC paths. Set `source.read.transport=arrow-adbc` to read snapshot and CHANGES results as Arrow batches; `starrocks.jdbc.url` remains the JDBC endpoint for bookmarks and metadata.
 
 | | MySQL protocol | Arrow Flight SQL |
 | --- | --- | --- |
@@ -102,7 +106,7 @@ The URL scheme is the entire switch — there is no separate transport setting, 
 | Result path | Rows funnel back **through the FE** | FE plans and authorizes; result batches stream **from the BEs**, columnar |
 | Setup | None | Requires cluster config and a worker JVM flag (below) |
 
-Start with the MySQL protocol. It needs no setup and, for incremental windows, the volume is usually small enough that the FE is not the constraint. Reach for Arrow Flight when the FE is measurably the bottleneck — most often during a large initial snapshot, which is also the one-off part of the workload.
+Choose the read path using the table's column types and an end-to-end measurement. Arrow ADBC avoids JDBC row getters, but producing Kafka Connect records and writing to Kafka can dominate the total time.
 
 To use Arrow Flight SQL:
 
@@ -114,15 +118,26 @@ To use Arrow Flight SQL:
    ```
    StarRocks' own Arrow Flight documentation writes this flag as
    `--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED`. Naming the module is
-   correct when Arrow sits on the JVM's *module path*, but here the driver is shaded into the
-   plugin jar and loaded from the classpath by Connect's plugin classloader, so there is no named
+   correct when Arrow sits on the JVM's *module path*, but here Arrow is loaded from the
+   classpath by Connect's plugin classloader, so there is no named
    `org.apache.arrow.memory.core` module to open to. Only the `ALL-UNNAMED` half takes effect, and
    the module half earns a `WARNING: Unknown module` line on every JVM start — harmless, but not
    worth carrying.
 
 Everything else is identical: the same CHANGES windows, the same bookmarks, the same envelope. The connector skips the MySQL-only streaming fetch-size call on this transport, since Arrow streams RecordBatches natively.
 
-To verify a Flight deployment before trusting it, run the integration smoke test against your cluster with `SR_TRANSPORT=arrow-flight` — it runs the same assertions over the new transport, including the delete-before-insert ordering invariant, which is the thing most likely to regress when the driver underneath changes. It asserts the temporal columns to the exact string on both transports, and records the row so a second run over the other transport can diff the two byte for byte.
+To use Arrow ADBC reads, retain a MySQL JDBC URL for bookmark and metadata calls and add:
+
+```properties
+starrocks.jdbc.url=jdbc:mysql://fe1:9030,fe2:9030
+source.read.transport=arrow-adbc
+starrocks.adbc.uri=grpc+tcp://fe1:9408
+```
+
+Enable `arrow_flight_port` and the worker's `java.nio` JVM flag as above. For FE failover, list each Flight endpoint in `starrocks.adbc.uri`. Failed ADBC connection or read attempts advance to the next endpoint; JDBC bookmark calls rotate independently through `starrocks.jdbc.url`.
+ADBC requires columns whose types the connector can parse; a column carried as opaque server-rendered text is rejected during preflight. Use the JDBC read transport for that table.
+
+To verify a Flight deployment, run the integration smoke test against your cluster with `SR_TRANSPORT=arrow-flight` or `SR_TRANSPORT=arrow-adbc`. It checks the delete-before-insert ordering, typed complex values, and temporal values through the selected read path.
 
 Every record's key and value are schema-carrying Kafka Connect `Struct`s, so configure a schema-aware `key.converter`/`value.converter` (e.g. `JsonConverter` with `schemas.enable=true`, or an Avro/Protobuf converter backed by a schema registry).
 

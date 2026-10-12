@@ -42,7 +42,7 @@ import java.util.StringJoiner;
  */
 final class ColumnType {
 
-    /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text, as ValueReader prints it. */
+    /** Logical names of the DATE and DATETIME string schemas: StarRocks' own text. */
     static final String DATE_LOGICAL_NAME = "com.starrocks.data.Date";
     static final String DATETIME_LOGICAL_NAME = "com.starrocks.data.DateTime";
     /** Logical names of an OPAQUE complex column: the text BE renders, which is not JSON. */
@@ -200,44 +200,80 @@ final class ColumnType {
         return optional ? b.optional().build() : b.build();
     }
 
+    @FunctionalInterface
+    interface ConnectValueConverter {
+        Object convert(Object neutral);
+    }
+
+    private static final ConnectValueConverter IDENTITY = neutral -> neutral;
+
     /**
-     * Turns a reader's neutral value -- scalars already coerced, {@code List} for arrays,
-     * {@code Map<String, Object>} for both maps and structs -- into what the Connect schema wants:
-     * structs become {@link Struct}s, recursively. {@code schema} must be this type's own
-     * {@link #toConnectSchema} output.
+     * Binds a conversion to this type's Connect schema once. Readers transfer ownership of their
+     * neutral containers to the record: arrays/maps without STRUCT descendants already have the
+     * Connect representation and can be retained. Only paths containing STRUCT need rebuilding.
+     * The converter never mutates the input or retains per-row state.
      */
-    Object toConnectValue(Schema schema, Object neutral) {
-        if (neutral == null) {
-            return null;
-        }
+    ConnectValueConverter bindConnectValue(Schema schema) {
         switch (kind) {
             case ARRAY: {
-                List<Object> out = new ArrayList<>();
-                for (Object item : (List<?>) neutral) {
-                    out.add(element.toConnectValue(schema.valueSchema(), item));
+                ConnectValueConverter child = element.bindConnectValue(schema.valueSchema());
+                if (child == IDENTITY) {
+                    return IDENTITY;
                 }
-                return out;
+                return neutral -> {
+                    if (neutral == null) {
+                        return null;
+                    }
+                    List<?> in = (List<?>) neutral;
+                    List<Object> out = new ArrayList<>(in.size());
+                    for (Object item : in) {
+                        out.add(child.convert(item));
+                    }
+                    return out;
+                };
             }
             case MAP: {
-                Map<String, Object> out = new LinkedHashMap<>();
-                for (Map.Entry<?, ?> e : ((Map<?, ?>) neutral).entrySet()) {
-                    out.put((String) e.getKey(), value.toConnectValue(schema.valueSchema(), e.getValue()));
+                ConnectValueConverter child = value.bindConnectValue(schema.valueSchema());
+                if (child == IDENTITY) {
+                    return IDENTITY;
                 }
-                return out;
+                return neutral -> {
+                    if (neutral == null) {
+                        return null;
+                    }
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    for (Map.Entry<?, ?> e : ((Map<?, ?>) neutral).entrySet()) {
+                        out.put((String) e.getKey(), child.convert(e.getValue()));
+                    }
+                    return out;
+                };
             }
             case STRUCT: {
-                Map<?, ?> in = (Map<?, ?>) neutral;
-                Struct out = new Struct(schema);
-                for (Field f : fields) {
-                    Object v = f.type.toConnectValue(schema.field(f.name).schema(), in.get(f.name));
-                    if (v != null) {
-                        out.put(f.name, v);
-                    }
+                org.apache.kafka.connect.data.Field[] boundFields =
+                        new org.apache.kafka.connect.data.Field[fields.size()];
+                ConnectValueConverter[] children = new ConnectValueConverter[fields.size()];
+                for (int i = 0; i < fields.size(); i++) {
+                    Field field = fields.get(i);
+                    boundFields[i] = schema.field(field.name);
+                    children[i] = field.type.bindConnectValue(boundFields[i].schema());
                 }
-                return out;
+                return neutral -> {
+                    if (neutral == null) {
+                        return null;
+                    }
+                    Map<?, ?> in = (Map<?, ?>) neutral;
+                    Struct out = new Struct(schema);
+                    for (int i = 0; i < boundFields.length; i++) {
+                        Object v = children[i].convert(in.get(boundFields[i].name()));
+                        if (v != null) {
+                            out.put(boundFields[i], v);
+                        }
+                    }
+                    return out;
+                };
             }
             default:
-                return neutral;
+                return IDENTITY;
         }
     }
 

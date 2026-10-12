@@ -117,12 +117,25 @@ public class MysqlValueReaderTest {
         assertEquals(map(), read("map<int(11),int(11)>", "{}"));
     }
 
+    @Test
+    public void testBinaryMapKeysUseStableHexText() {
+        ColumnType type = ColumnTypeParser.parse("map<varbinary(4),int(11)>").get();
+        assertEquals(map("00ff", 7), new MysqlValueReader().nested(type, "{\"00FF\":7}"));
+        assertEquals(map("00ff", 7), new MysqlValueReader(MysqlValueReader.BinaryEncoding.BASE64)
+                .nested(type, "{\"AP8=\":7}"));
+    }
+
     /** struct_column.cpp prints quoted field names; fields come back in declared order. */
     @Test
     public void testStructByDeclaredFieldsWithMissingAsNull() {
         Object out = read("struct<`x` int(11), `y` varchar(10), `z` date>", "{\"x\":7,\"y\":\"seven\"}");
         assertEquals(map("x", 7, "y", "seven", "z", null), out);
         assertEquals(Arrays.asList("x", "y", "z"), new java.util.ArrayList<>(((Map<?, ?>) out).keySet()));
+
+        Object reversed = read("struct<`x` int(11), `y` varchar(10), `z` date>",
+                "{\"y\":\"seven\",\"x\":7}");
+        assertEquals(out, reversed);
+        assertEquals(Arrays.asList("x", "y", "z"), new java.util.ArrayList<>(((Map<?, ?>) reversed).keySet()));
     }
 
     @Test
@@ -163,4 +176,15 @@ public class MysqlValueReaderTest {
             }
         }
     }
+    @Test
+    public void testParsedRowsOwnTheirContainers() {
+        ColumnType type = ColumnTypeParser.parse("array<int>").get();
+        MysqlValueReader reader = new MysqlValueReader();
+        Object first = reader.nested(type, "[1,2]");
+        Object second = reader.nested(type, "[1,2]");
+        org.junit.Assert.assertNotSame(first, second);
+        ((List<?>) second).clear();
+        assertEquals(Arrays.asList(1, 2), first);
+    }
+
 }

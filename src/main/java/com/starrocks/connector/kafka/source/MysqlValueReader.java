@@ -55,9 +55,8 @@ final class MysqlValueReader extends ValueReader {
     @Override
     protected Object nested(ColumnType type, Object raw) {
         String text = as(String.class, raw, type);
-        Object tree = new Scanner(text).parse();
         try {
-            return readNested(type, tree);
+            return new Scanner(text).parse(type);
         } catch (NumberFormatException e) {
             throw new DataException("not a number for " + type + " (" + e.getMessage() + ") in: " + text, e);
         } catch (DataException e) {
@@ -73,7 +72,7 @@ final class MysqlValueReader extends ValueReader {
             case JSON:
             case DATE:
             case DATETIME:
-                // Dates arrive already in the text the base reader prints.
+                // Nested dates arrive already in the text used for Connect values.
                 return token;
             case BYTES:
                 return binary == BinaryEncoding.BASE64 ? Base64.getDecoder().decode(token) : hex(token);
@@ -133,12 +132,8 @@ final class MysqlValueReader extends ValueReader {
         return out;
     }
 
-    /**
-     * BE's text to a raw tree: {@code [...]} to a List, {@code {k:v,...}} to a LinkedHashMap keyed by
-     * the key token, a quoted value (either quote) to its unescaped String, a bare {@code null} to
-     * null, any other bare token to its String. No types involved.
-     */
-    private static final class Scanner {
+    /** Parses BE's nested text straight into neutral values, without an intermediate object tree. */
+    private final class Scanner {
         private final String text;
         private int pos;
 
@@ -146,8 +141,8 @@ final class MysqlValueReader extends ValueReader {
             this.text = text;
         }
 
-        Object parse() {
-            Object v = value();
+        Object parse(ColumnType type) {
+            Object v = value(type);
             skipSpaces();
             if (pos != text.length()) {
                 throw error("trailing characters");
@@ -155,36 +150,95 @@ final class MysqlValueReader extends ValueReader {
             return v;
         }
 
-        private Object value() {
+        private Object value(ColumnType type) {
             skipSpaces();
             if (pos >= text.length()) {
                 throw error("value expected");
             }
             char c = text.charAt(pos);
-            if (c == '[') {
-                pos++;
-                List<Object> out = new ArrayList<>();
-                if (!consume(']')) {
-                    do {
-                        out.add(value());
-                    } while (consume(','));
-                    expect(']');
-                }
-                return out;
+            if (c == '[' && type.kind == ColumnType.Kind.ARRAY) {
+                return array(type.element);
             }
-            if (c == '{') {
-                pos++;
-                Map<Object, Object> out = new LinkedHashMap<>();
-                if (!consume('}')) {
-                    do {
-                        Object key = value();
-                        expect(':');
-                        out.put(key, value());
-                    } while (consume(','));
-                    expect('}');
-                }
-                return out;
+            if (c == '{' && type.kind == ColumnType.Kind.MAP) {
+                return map(type);
             }
+            if (c == '{' && type.kind == ColumnType.Kind.STRUCT) {
+                return struct(type);
+            }
+            if (c == '[' || c == '{') {
+                throw error("expected " + type);
+            }
+            String token = token();
+            if (token == null) {
+                return null;
+            }
+            if (type.isNested()) {
+                throw error("expected " + type);
+            }
+            return leaf(type, token);
+        }
+
+        private List<Object> array(ColumnType element) {
+            pos++;
+            List<Object> out = new ArrayList<>();
+            if (!consume(']')) {
+                do {
+                    out.add(value(element));
+                } while (consume(','));
+                expect(']');
+            }
+            return out;
+        }
+
+        private Map<String, Object> map(ColumnType type) {
+            pos++;
+            Map<String, Object> out = new LinkedHashMap<>();
+            if (!consume('}')) {
+                do {
+                    out.put(keyText(type.key, token()), valueAfterColon(type.value));
+                } while (consume(','));
+                expect('}');
+            }
+            return out;
+        }
+
+        private Map<String, Object> struct(ColumnType type) {
+            pos++;
+            Map<String, Object> out = new LinkedHashMap<>();
+            for (ColumnType.Field field : type.fields) {
+                out.put(field.name, null);
+            }
+            if (!consume('}')) {
+                do {
+                    String name = token();
+                    ColumnType fieldType = null;
+                    for (ColumnType.Field field : type.fields) {
+                        if (field.name.equals(name)) {
+                            fieldType = field.type;
+                            break;
+                        }
+                    }
+                    if (fieldType == null) {
+                        throw new DataException("struct field '" + name + "' is not declared in " + type);
+                    }
+                    out.put(name, valueAfterColon(fieldType));
+                } while (consume(','));
+                expect('}');
+            }
+            return out;
+        }
+
+        private Object valueAfterColon(ColumnType type) {
+            expect(':');
+            return value(type);
+        }
+
+        private String token() {
+            skipSpaces();
+            if (pos >= text.length()) {
+                throw error("value expected");
+            }
+            char c = text.charAt(pos);
             if (c == '"' || c == '\'') {
                 return quoted(c);
             }

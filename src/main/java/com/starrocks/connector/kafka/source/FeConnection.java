@@ -247,7 +247,7 @@ final class FeConnection implements AutoCloseable {
     }
 
     private static String artifactFor(String driverClass) {
-        return ARROW_FLIGHT_DRIVER.equals(driverClass) ? "flight-sql-jdbc-driver" : "mariadb-java-client";
+        return ARROW_FLIGHT_DRIVER.equals(driverClass) ? "flight-sql-jdbc-core" : "mariadb-java-client";
     }
 
     /** Fans a comma-separated host list into one URL per host, copying scheme, path and query. */
