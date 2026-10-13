@@ -51,7 +51,7 @@ import java.util.concurrent.Callable;
  * transports alternating round by round. One pipeline mode applies to all selected transports; no Kafka sends.
  *
  * <p>Properties: {@code bench.db}, {@code bench.tables} (csv), {@code bench.user} (root),
- * {@code bench.password}, {@code bench.transports} (mysql,arrow-flight by default),
+ * {@code bench.password}, {@code bench.transports} (mysql,arrow-jdbc by default),
  * {@code bench.pipeline} (read by default; read, map, serialize), {@code bench.adbc.uri},
  * {@code bench.rounds} (3, first dropped), {@code bench.meta.iterations} (20),
  * {@code bench.daily.update.rows} and {@code bench.burst.update.rows} (disjoint ID ranges, two
@@ -97,7 +97,7 @@ public class PipelineBench {
         PipelineMode mode = PipelineMode.parse(System.getProperty("bench.pipeline", "read"));
         String mysqlUrl = System.getProperty("bench.mysql.url");
         String arrowUrl = System.getProperty("bench.arrow.url");
-        List<String> selected = split(System.getProperty("bench.transports", "mysql,arrow-flight"));
+        List<String> selected = split(System.getProperty("bench.transports", "mysql,arrow-jdbc"));
         Assume.assumeTrue("set -Dbench.mysql.url to run the pipeline bench", mysqlUrl != null);
         if (selected.isEmpty()) {
             throw new IllegalArgumentException("bench.transports must name at least one transport");
@@ -139,8 +139,8 @@ public class PipelineBench {
                     case "mysql":
                         transports.add(new Transport("mysql", mysql));
                         break;
-                    case "arrow-flight":
-                        transports.add(new Transport("arrow-flight", new StarRocksJdbcClient(
+                    case "arrow-jdbc":
+                        transports.add(new Transport("arrow-jdbc", new StarRocksJdbcClient(
                                 config(required("bench.arrow.url"), db, tables, user, password))));
                         break;
                     case "arrow-adbc":

@@ -303,7 +303,7 @@ source.read.transport=arrow-adbc
 starrocks.adbc.uri=grpc+tcp://fe1:9408</code></pre>
 <p>同样需要启用 <code>arrow_flight_port</code> 和上述 worker JVM 参数。可在 <code>starrocks.adbc.uri</code> 中列出多个 Flight 端点；ADBC 连接或读取失败时切换到下一端点，JDBC 书签操作则独立按 <code>starrocks.jdbc.url</code> 轮转。ADBC 要求连接器能解析列类型；对于只能按服务端原样文本传递的列，启动预检会拒绝该表，请使用 JDBC 读取。</p>
 
-<p>在集群上使用 <code>SR_TRANSPORT=arrow-flight</code> 或 <code>SR_TRANSPORT=arrow-adbc</code> 运行集成冒烟测试，核对所选读取路径的 delete→insert 顺序、复杂类型和时间值。</p>
+<p>在集群上使用 <code>SR_TRANSPORT=arrow-jdbc</code> 或 <code>SR_TRANSPORT=arrow-adbc</code> 运行集成冒烟测试，核对所选读取路径的 delete→insert 顺序、复杂类型和时间值。</p>
 
 <p>每条记录的 key 和 value 都是携带 schema 的 Kafka Connect <code>Struct</code>，因此需要配置支持 schema 的 <code>key.converter</code>/<code>value.converter</code>（例如启用了 <code>schemas.enable=true</code> 的 <code>JsonConverter</code>，或依赖 schema registry 的 Avro/Protobuf converter）。</p>
 

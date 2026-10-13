@@ -12,7 +12,7 @@
 #   SR_HOST / SR_PORT / SR_USER / SR_PASSWORD     as in smoke-cluster.sh (leader FE, OPERATE user)
 #   SR_ARROW_PORT        FE arrow_flight_port                        (default: FE config)
 #   KAFKA_BOOTSTRAP / KAFKA_BIN / KAFKA_EXTRA_PROPS / TOPIC_RF        as in smoke-cluster.sh
-#   BENCH_TRANSPORTS     mysql, arrow-flight, arrow-adbc in run order (default all three)
+#   BENCH_TRANSPORTS     mysql, arrow-jdbc, arrow-adbc in run order (default all three)
 #   BENCH_SHAPES         space-separated, scalar and/or complex      (default "scalar complex")
 #   BENCH_ROWS           rows to generate                            (default 2000000)
 #   BENCH_BUCKETS        table buckets                               (default 8)
@@ -55,7 +55,7 @@ SR_USER="${SR_USER:-root}"
 SR_PASSWORD="${SR_PASSWORD:-}"
 SR_ARROW_PORT="${SR_ARROW_PORT:-}"
 TOPIC_RF="${TOPIC_RF:-1}"
-BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-jdbc arrow-adbc}"
 BENCH_SHAPES="${BENCH_SHAPES:-scalar complex}"
 BENCH_ROWS="${BENCH_ROWS:-2000000}"
 BENCH_DAILY_UPDATE_ROWS="${BENCH_DAILY_UPDATE_ROWS:-50000}"
@@ -200,11 +200,11 @@ for tr in $BENCH_TRANSPORTS; do
   transport_count=$((transport_count + 1))
   case "$tr" in
     mysql) ;;
-    arrow-flight|arrow-adbc)
+    arrow-jdbc|arrow-adbc)
       afp=$(sr_config arrow_flight_port || true)
       [ -n "$afp" ] && [ "$afp" != "-1" ] || fail "arrow_flight_port is disabled on the FE (set it in fe.conf and be.conf, restart)"
       [ -n "$SR_ARROW_PORT" ] || SR_ARROW_PORT="$afp" ;;
-    *) fail "BENCH_TRANSPORTS entries must be mysql, arrow-flight or arrow-adbc, got '$tr'" ;;
+    *) fail "BENCH_TRANSPORTS entries must be mysql, arrow-jdbc or arrow-adbc, got '$tr'" ;;
   esac
 done
 [ "$transport_count" -gt 0 ] || fail "BENCH_TRANSPORTS must name at least one transport"
@@ -543,7 +543,7 @@ for transport in $BENCH_TRANSPORTS; do
   TABLE=$(bench_table_for "$shape" "$transport")
   case "$transport" in
     mysql)        url="jdbc:mysql://$SR_HOST:$SR_PORT"; opens=""; read_transport=jdbc; adbc_uri="" ;;
-    arrow-flight) url="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
+    arrow-jdbc)   url="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
                   opens="--add-opens=java.base/java.nio=ALL-UNNAMED"; read_transport=jdbc; adbc_uri="" ;;
     arrow-adbc)  url="jdbc:mysql://$SR_HOST:$SR_PORT"
                   opens="--add-opens=java.base/java.nio=ALL-UNNAMED"

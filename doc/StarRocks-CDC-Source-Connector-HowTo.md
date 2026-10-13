@@ -137,7 +137,7 @@ starrocks.adbc.uri=grpc+tcp://fe1:9408
 Enable `arrow_flight_port` and the worker's `java.nio` JVM flag as above. For FE failover, list each Flight endpoint in `starrocks.adbc.uri`. Failed ADBC connection or read attempts advance to the next endpoint; JDBC bookmark calls rotate independently through `starrocks.jdbc.url`.
 ADBC requires columns whose types the connector can parse; a column carried as opaque server-rendered text is rejected during preflight. Use the JDBC read transport for that table.
 
-To verify a Flight deployment, run the integration smoke test against your cluster with `SR_TRANSPORT=arrow-flight` or `SR_TRANSPORT=arrow-adbc`. It checks the delete-before-insert ordering, typed complex values, and temporal values through the selected read path.
+To verify a Flight deployment, run the integration smoke test against your cluster with `SR_TRANSPORT=arrow-jdbc` or `SR_TRANSPORT=arrow-adbc`. It checks the delete-before-insert ordering, typed complex values, and temporal values through the selected read path.
 
 Every record's key and value are schema-carrying Kafka Connect `Struct`s, so configure a schema-aware `key.converter`/`value.converter` (e.g. `JsonConverter` with `schemas.enable=true`, or an Avro/Protobuf converter backed by a schema registry).
 

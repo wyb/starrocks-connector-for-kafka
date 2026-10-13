@@ -36,8 +36,8 @@ Knobs: `SR_PORT` (9030), `SR_USER` (root), `SR_PASSWORD` (empty), `TOPIC_RF` (1)
 `KAFKA_EXTRA_PROPS` (a file of extra worker properties, appended verbatim — this
 is where SASL/SSL settings go), `KEEP_ON_FAILURE`.
 
-`SR_TRANSPORT=arrow-flight` (with `SR_ARROW_PORT`, default 9408) runs the identical
-assertions over the Arrow Flight SQL transport instead of the MySQL protocol. It checks the FE's
+`SR_TRANSPORT=arrow-jdbc` (with `SR_ARROW_PORT`, default 9408) runs the identical
+assertions through the Arrow Flight SQL JDBC driver. It checks the FE's
 `arrow_flight_port` first and fails with the remedy if the cluster has it disabled, and it injects
 the `--add-opens` flag Arrow needs into the worker JVM. Running both settings is the only way to
 know a transport change has not moved the delete-before-insert ordering or the temporal reads.
@@ -50,6 +50,11 @@ also check the exact Kafka record count after mutations, restart, and bookmark r
 
 Two entry points compare MySQL, Arrow Flight JDBC, and Arrow ADBC on the same cluster. Neither
 is part of `mvn test`.
+
+The transport options are `mysql`, `arrow-jdbc`, and `arrow-adbc`. Both Arrow options use
+Flight SQL; their client interfaces are JDBC and ADBC respectively. These names apply to
+`BENCH_TRANSPORTS` and the smoke test's `SR_TRANSPORT`. The JDBC URL scheme remains
+`jdbc:arrow-flight-sql://`.
 
 `PipelineBench` (a JUnit class under `src/test/java`, selected only by name) drives
 the selected `CdcClient` implementations directly: for every table it pins one bookmark, reads the snapshot at it
@@ -151,7 +156,7 @@ values as `bench-pipeline.sh`, with a separate table for
 each shape/transport pair so one UPDATE cannot affect another run. The scalar table has VARCHAR
 text in the `a`, `m`, `st`, and `j` columns; the complex table uses ARRAY, MAP, STRUCT, and JSON.
 Each run uses the same worker settings and its own topic. Reports identify pairs such as
-`scalar/mysql` and `complex/arrow-flight`. By default, each table has 2 million snapshot rows.
+`scalar/mysql` and `complex/arrow-jdbc`. By default, each table has 2 million snapshot rows.
 After the snapshot, the script updates 50,000 rows and then a disjoint 500,000 rows, producing
 100,000 daily and 1 million burst CHANGES records respectively (DELETE + INSERT per update).
 Each phase waits for its exact Kafka offset before the next update. The report separates
@@ -175,7 +180,7 @@ BENCH_ROWS=2000000 BENCH_SHAPES='scalar complex' \
 
 Build a fresh plugin jar with `mvn -DskipTests package` before the benchmark. The snapshot
 returns at most `BENCH_SNAPSHOT_BATCH_SIZE` records per poll (default 4096). For a comparison,
-repeat the benchmark with `BENCH_TRANSPORTS='arrow-adbc arrow-flight mysql'` to reveal order/cache effects.
+repeat the benchmark with `BENCH_TRANSPORTS='arrow-adbc arrow-jdbc mysql'` to reveal order/cache effects.
 Use `BENCH_SHAPES=scalar` or `BENCH_SHAPES=complex` to run just one shape.
 Use `BENCH_DAILY_UPDATE_ROWS` and `BENCH_BURST_UPDATE_ROWS` to adjust the two update sizes;
 their sum must fit in `BENCH_ROWS`. To run one custom CHANGES phase instead, set

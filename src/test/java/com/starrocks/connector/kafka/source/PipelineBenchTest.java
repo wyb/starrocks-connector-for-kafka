@@ -122,7 +122,7 @@ public class PipelineBenchTest {
                 PipelineBench.Report report = new PipelineBench.Report(phases, mode);
                 try (PipelineBench.RowPipeline pipeline = new PipelineBench.RowPipeline(
                         "db", "orders", COLUMNS, phases, mode)) {
-                    for (String transport : Arrays.asList("mysql", "arrow-flight", "arrow-adbc")) {
+                    for (String transport : Arrays.asList("mysql", "arrow-jdbc", "arrow-adbc")) {
                         PipelineBench.Sample sample = meter.measure(pipeline, () -> {
                             pipeline.snapshot(ROW, 10);
                             pipeline.change(ROW, 1, 11, 10, 11);
@@ -153,7 +153,7 @@ public class PipelineBenchTest {
                     assertEquals(!mode.serializes, fields[8].equals("-"));
                 }
                 assertTrue(rendered.contains("mysql"));
-                assertTrue(rendered.contains("arrow-flight"));
+                assertTrue(rendered.contains("arrow-jdbc"));
                 assertTrue(rendered.contains("arrow-adbc"));
                 assertEquals(phases, rendered.contains("Pipeline stages (independent p50 ms)"));
                 assertEquals(phases, rendered.contains("ADBC batch waits"));

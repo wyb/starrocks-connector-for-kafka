@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Benchmark read, SourceRecord mapping and JSON serialization over JDBC and Java ADBC on an existing
-# StarRocks cluster. BENCH_TRANSPORTS selects mysql, arrow-flight, or arrow-adbc.
+# StarRocks cluster. BENCH_TRANSPORTS selects mysql, arrow-jdbc, or arrow-adbc.
 # Owns cdc_bench and removes it on exit.
 set -euo pipefail
 
@@ -17,7 +17,7 @@ BENCH_BUCKETS="${BENCH_BUCKETS:-8}"
 BENCH_ROUNDS="${BENCH_ROUNDS:-3}"
 BENCH_READ_TIMINGS="${BENCH_READ_TIMINGS:-0}"
 BENCH_PIPELINE="${BENCH_PIPELINE:-read}"
-BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-flight arrow-adbc}"
+BENCH_TRANSPORTS="${BENCH_TRANSPORTS:-mysql arrow-jdbc arrow-adbc}"
 BENCH_DB="cdc_bench"
 
 case "$BENCH_PIPELINE" in
@@ -46,7 +46,7 @@ transport_count=0
 transport_csv=''
 for transport in $BENCH_TRANSPORTS; do
   case "$transport" in
-    mysql|arrow-flight|arrow-adbc) ;;
+    mysql|arrow-jdbc|arrow-adbc) ;;
     *) echo "BENCH_TRANSPORTS has unknown transport '$transport'" >&2; exit 1 ;;
   esac
   case "$selected_transports" in *" $transport "*) echo "BENCH_TRANSPORTS repeats '$transport'" >&2; exit 1 ;; esac

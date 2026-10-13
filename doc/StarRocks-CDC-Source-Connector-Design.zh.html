@@ -1048,7 +1048,7 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 </table>
 </div>
 
-<p>两套冒烟入口：<code>smoke.sh</code> 在 Docker 中运行 MySQL；<code>smoke-cluster.sh</code> 对接已有集群，以 <code>SR_TRANSPORT=mysql|arrow-flight|arrow-adbc</code> 选择路径。后者对每种传输检查快照、更新顺序、重启续读、时间及嵌套类型；对同一插件产物运行不同传输后，还比较快照值。</p>
+<p>两套冒烟入口：<code>smoke.sh</code> 在 Docker 中运行 MySQL；<code>smoke-cluster.sh</code> 对接已有集群，以 <code>SR_TRANSPORT=mysql|arrow-jdbc|arrow-adbc</code> 选择路径。后者对每种传输检查快照、更新顺序、重启续读、时间及嵌套类型；对同一插件产物运行不同传输后，还比较快照值。</p>
 
 <p>改变打包、驱动或取值路径后，应重新构建 package 并运行相关传输的集群冒烟。单次历史通过记录不能替代当前产物的验证；性能测量分别使用 <code>bench-pipeline.sh</code> 和 <code>bench-cluster.sh</code>。</p>
 

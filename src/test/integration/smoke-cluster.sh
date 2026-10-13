@@ -22,7 +22,7 @@
 #   KAFKA_EXTRA_PROPS  file of extra worker props (SASL/SSL)    (optional)
 #   TOPIC_RF           replication factor for the test topic    (default 1)
 #   KEEP_ON_FAILURE    set to 1 to keep the test db for triage  (default unset)
-#   SR_TRANSPORT       mysql | arrow-flight | arrow-adbc        (default mysql)
+#   SR_TRANSPORT       mysql | arrow-jdbc | arrow-adbc          (default mysql)
 #   SR_ARROW_PORT      FE arrow_flight_port for Flight reads    (default 9408)
 #   SR_ADBC_FAILOVER_URI  unavailable first Flight endpoint for ADBC failover test
 #                        (default grpc+tcp://127.0.0.1:1)
@@ -227,7 +227,7 @@ case "$SR_TRANSPORT" in
     READ_TRANSPORT=jdbc
     ADBC_URI=""
     ;;
-  arrow-flight)
+  arrow-jdbc)
     # Plaintext by default: the Arrow driver negotiates TLS unless told otherwise, and the FE's
     # Flight service is plaintext in a default deployment.
     CONNECTOR_JDBC_URL="jdbc:arrow-flight-sql://$SR_HOST:$SR_ARROW_PORT?useEncryption=false"
@@ -235,7 +235,7 @@ case "$SR_TRANSPORT" in
     ADBC_URI=""
     afp=$(sr_config arrow_flight_port || true)
     [ -n "$afp" ] && [ "$afp" != "-1" ] \
-      || fail "SR_TRANSPORT=arrow-flight but the FE reports arrow_flight_port='${afp:--1}'.
+      || fail "SR_TRANSPORT=arrow-jdbc but the FE reports arrow_flight_port='${afp:--1}'.
     Set a non-negative arrow_flight_port in fe.conf AND be.conf and restart -- it is not a
     mutable config, so ADMIN SET FRONTEND CONFIG will not do."
     note "FE arrow_flight_port=$afp"
@@ -252,7 +252,7 @@ case "$SR_TRANSPORT" in
     WORKER_JAVA_OPTS="--add-opens=java.base/java.nio=ALL-UNNAMED"
     ;;
   *)
-    fail "SR_TRANSPORT must be mysql, arrow-flight or arrow-adbc, got '$SR_TRANSPORT'"
+    fail "SR_TRANSPORT must be mysql, arrow-jdbc or arrow-adbc, got '$SR_TRANSPORT'"
     ;;
 esac
 if [ "$SR_TRANSPORT" = arrow-adbc ]; then
@@ -541,7 +541,7 @@ mine="$PARITY_DIR/after-$SR_TRANSPORT-$jar_key.json"
 printf '%s' "$first_r" | sed -n 's/.*"after":\(.*\),"source":.*/\1/p' > "$mine"
 [ -s "$mine" ] || fail "could not extract the after object from: $first_r"
 compared=0
-for other_transport in mysql arrow-flight arrow-adbc; do
+for other_transport in mysql arrow-jdbc arrow-adbc; do
   [ "$other_transport" != "$SR_TRANSPORT" ] || continue
   theirs="$PARITY_DIR/after-$other_transport-$jar_key.json"
   [ -s "$theirs" ] || continue

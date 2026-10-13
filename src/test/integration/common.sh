@@ -84,7 +84,7 @@ verify_plugin_jar() {
   for transport in "${transports[@]}"; do
     case "$transport" in
       mysql) ;;
-      arrow-flight)
+      arrow-jdbc)
         version=$(pom_dependency_version flight-sql-jdbc-core) \
           || fail "cannot find the Arrow Flight JDBC version in pom.xml"
         [ -f "$PACKAGE_PLUGIN_DIR/flight-sql-jdbc-core-$version.jar" ] \
