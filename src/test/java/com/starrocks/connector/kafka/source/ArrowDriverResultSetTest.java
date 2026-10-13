@@ -20,6 +20,8 @@
 
 package com.starrocks.connector.kafka.source;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import org.apache.arrow.driver.jdbc.ArrowFlightJdbcVectorSchemaRootResultSet;
 import org.apache.arrow.memory.BufferAllocator;
 import org.apache.arrow.memory.RootAllocator;
@@ -40,6 +42,8 @@ import org.apache.arrow.vector.types.pojo.ArrowType;
 import org.apache.arrow.vector.types.pojo.Field;
 import org.apache.arrow.vector.types.pojo.FieldType;
 import org.apache.arrow.vector.types.pojo.Schema;
+import org.apache.kafka.connect.json.JsonConverter;
+import org.apache.kafka.connect.source.SourceRecord;
 import org.junit.Test;
 
 import java.math.BigDecimal;
@@ -328,5 +332,89 @@ public class ArrowDriverResultSetTest {
                 assertEquals(Types.JAVA_OBJECT, rs.getMetaData().getColumnType(7));
             }
         }
+    }
+
+    /** NULL and literal escape-looking keys must survive all readers and JSON serialization. */
+    @Test
+    public void testNullMapKeysAcrossTransportsAndJson() throws Exception {
+        String[] keys = {null, "null", "\\N", "\\\\N", "\\", "", "plain"};
+        Map<String, Object> expected = new LinkedHashMap<>();
+        String[] encodedKeys = {"\\N", "null", "\\\\N", "\\\\\\N", "\\\\", "", "plain"};
+        ObjectMapper json = new ObjectMapper();
+        StringBuilder text = new StringBuilder("{");
+        for (int i = 0; i < keys.length; i++) {
+            if (i > 0) {
+                text.append(',');
+            }
+            text.append(json.writeValueAsString(keys[i])).append(':').append(i);
+            expected.put(encodedKeys[i], i);
+        }
+        text.append('}');
+        List<ColumnMeta> cols = Arrays.asList(
+                new ColumnMeta("m", "map", "map<varchar(10),int>", 0, true),
+                new ColumnMeta("am", "array", "array<map<varchar(10),int>>", 0, true),
+                new ColumnMeta("mi", "map", "map<int,int>", 0, true));
+        Schema arrowSchema = new Schema(Arrays.asList(
+                map("m", key(UTF8), leaf(MapVector.VALUE_NAME, INT)),
+                list("am", map(D, key(UTF8), leaf(MapVector.VALUE_NAME, INT))),
+                map("mi", key(INT), leaf(MapVector.VALUE_NAME, INT))));
+        try (BufferAllocator allocator = new RootAllocator();
+             VectorSchemaRoot root = VectorSchemaRoot.create(arrowSchema, allocator);
+             JsonConverter converter = new JsonConverter()) {
+            root.allocateNew();
+            fillStringMap((MapVector) root.getVector("m"), keys);
+            ListVector array = (ListVector) root.getVector("am");
+            array.startNewValue(0);
+            fillStringMap((MapVector) array.getDataVector(), keys);
+            array.endValue(0, 1);
+            MapVector ints = (MapVector) root.getVector("mi");
+            int index = ints.startNewValue(0);
+            StructVector entries = (StructVector) ints.getDataVector();
+            ((IntVector) entries.getChild(MapVector.KEY_NAME)).setNull(index);
+            ((IntVector) entries.getChild(MapVector.VALUE_NAME)).setSafe(index, 9);
+            entries.setIndexDefined(index);
+            ints.endValue(0, 1);
+            root.setRowCount(1);
+
+            Object[] adbc = new ArrowAdbcValueReader().readRow(root.getFieldVectors(), 0, cols);
+            MysqlValueReader mysql = new MysqlValueReader();
+            Object[] fromText = {mysql.nested(cols.get(0).type, text.toString()),
+                    mysql.nested(cols.get(1).type, "[" + text + "]"),
+                    mysql.nested(cols.get(2).type, "{null:9}")};
+            converter.configure(Collections.singletonMap("schemas.enable", false), false);
+            ChangeRecordMapper mapper = new ChangeRecordMapper("db", "t", "sr.db.t", cols);
+            try (ResultSet rs = ArrowFlightJdbcVectorSchemaRootResultSet.fromVectorSchemaRoot(root)) {
+                assertTrue(rs.next());
+                Object[] jdbc = JdbcRowReader.forTransport(true).readRow(rs, cols);
+                for (Object[] row : new Object[][]{fromText, jdbc, adbc}) {
+                    assertEquals(expected, row[0]);
+                    assertEquals(Collections.singletonList(expected), row[1]);
+                    assertEquals(Collections.singletonMap("\\N", 9), row[2]);
+                    SourceRecord record = mapper.toSnapshotRecord(row, 100L);
+                    JsonNode after = json.readTree(converter.fromConnectData(record.topic(),
+                            record.valueSchema(), record.value())).get("after");
+                    assertEquals(json.valueToTree(expected), after.get("m"));
+                    assertEquals(json.valueToTree(expected), after.get("am").get(0));
+                    assertEquals(9, after.get("mi").get("\\N").intValue());
+                }
+            }
+        }
+    }
+
+    private static void fillStringMap(MapVector vector, String[] keys) {
+        int start = vector.startNewValue(0);
+        StructVector entries = (StructVector) vector.getDataVector();
+        VarCharVector keyVector = (VarCharVector) entries.getChild(MapVector.KEY_NAME);
+        IntVector values = (IntVector) entries.getChild(MapVector.VALUE_NAME);
+        for (int i = 0; i < keys.length; i++) {
+            if (keys[i] == null) {
+                keyVector.setNull(start + i);
+            } else {
+                keyVector.setSafe(start + i, keys[i].getBytes(StandardCharsets.UTF_8));
+            }
+            values.setSafe(start + i, i);
+            entries.setIndexDefined(start + i);
+        }
+        vector.endValue(0, keys.length);
     }
 }

@@ -393,7 +393,7 @@ note "UPDATE: op=d(v=20) precedes op=c(v=200) OK"
 grep '"op":"d"' "$CONSUMED" | grep -q '"v":30[,}]' || fail "DELETE: missing op=d for id=3 (v=30)"
 note "DELETE: op=d OK"
 
-# The column list now comes only from information_schema, so both transports must agree on it.
+# The column list now comes only from information_schema, so all transports must agree on it.
 # BOOLEAN is the case that used to diverge: FE names its DATA_TYPE "tinyint" and only its
 # COLUMN_TYPE "tinyint(1)", so keying off the name alone yields int8 here and boolean there.
 grep -q '"flag":true' "$CONSUMED" \
@@ -430,19 +430,18 @@ note "resumed from committed offset, no snapshot replay OK"
 
 step "7. temporal columns"
 # These ride the same records step 5 already consumed. Both temporal columns are text in
-# StarRocks' own format, read through a UTC calendar, so the digits must be the stored ones.
+# StarRocks' own format; no worker timezone conversion may change the stored calendar fields.
 grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
   || { note "actual: $(head -1 "$CONSUMED")"
        grep -iE "DataException|Date type" "$OUT_DIR/connect.log" | tail -5 || true
-       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\"; a shifted day means the read used a non-UTC calendar, and no value at all means the converter rejected the record"; }
+       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\"; a different date means the stored calendar fields were not preserved; inspect the record and worker log"; }
 note "DATE -> \"$TZ_EXPECT_DATE\", independent of the worker's timezone"
 
-# On both transports. The Arrow driver builds a DATETIME in the JVM zone whatever Calendar it is
-# given (8h off on a UTC+8 worker); the connector undoes that per transport, so the same string
-# must come back here as over the MySQL protocol -- and parity below compares it too.
+# MySQL reads DATETIME text; Flight JDBC uses LocalDateTime; ADBC reads timestamp vectors.
+# All three must preserve the stored fields and microseconds; parity below compares them too.
 grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
   || { note "actual: $(head -1 "$CONSUMED")"
-       fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" on $SR_TRANSPORT; a whole-hour shift means a zone leaked into the read (on arrow-flight: the driver's JVM-zone shift is no longer being undone), a missing fraction means the microseconds were cut"; }
+       fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" on $SR_TRANSPORT; a shifted time means the stored fields were not preserved; a missing fraction means the microseconds were cut"; }
 note "DATETIME -> \"$TZ_EXPECT_DATETIME\", independent of the worker's timezone"
 
 step "8. bookmark reclamation actually happens"
@@ -509,7 +508,7 @@ note "VARBINARY -> BYTES -> base64 AQL/, in both op=r and op=d OK"
 # ARRAY, MAP and STRUCT are native Connect schemas now, so with schemas.enable off they must
 # be JSON arrays and objects -- not strings holding them -- and every nested element must be
 # the JSON type this table maps it to. Exact text, because the point of the native path is
-# that it is the same text on both transports; StarRocks' own rendering no longer reaches
+# that it is the same text on all transports; StarRocks' own rendering no longer reaches
 # the wire. JSON stays a string (Connect has no JSON type); the space after the colon is
 # StarRocks' JSON printer's, so it is allowed either way.
 first_r=$(grep '"op":"r"' "$CONSUMED" | grep '"id":1[,}]' | head -1)

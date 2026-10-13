@@ -464,12 +464,22 @@ public class StarRocksCdcSourceConnectorTest {
     @Test
     public void testAlterOffsetsResetsAPartitionItWouldRefuseToWrite() {
         FakeCdcClient fake = new FakeCdcClient();
+        fake.setHeldBookmarks("orders", 100L);
+        Map<String, String> stale = new HashMap<>(OffsetState.sourcePartition("db1", "orders"));
+        stale.put("legacy", "v1");
         Map<Map<String, ?>, Map<String, ?>> request = new HashMap<>();
         request.put(Collections.singletonMap(OffsetState.KEY_DB, "db1"), null);
+        request.put(stale, null);
+        // The canonical offset is not being reset. Its bookmark must survive, and clearing
+        // stale shapes needs neither a usable config nor a connection to the FE.
+        assertTrue(newConnector(fake).alterOffsets(new HashMap<>(), request));
+        assertTrue(fake.heldBookmarkQueries.isEmpty());
+        assertTrue(fake.releasedBookmarks.isEmpty());
         request.put(OffsetState.sourcePartition("db1", "orders"), null);
         assertTrue(newConnector(fake).alterOffsets(base(), request));
         // Only the shape a task writes can have references on the FE; the stale one is just cleared.
         assertEquals(Collections.singletonList("db1.orders:kc:c1"), fake.heldBookmarkQueries);
+        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
     }
 
     /**
@@ -509,7 +519,7 @@ public class StarRocksCdcSourceConnectorTest {
         assertEquals(Collections.singletonList("db1.orders:3:kc:c1"), fake.releasedBookmarks);
     }
 
-    /** A reset left half done would be undone at the next start, so it fails whole. */
+    /** An FE failure rejects the offset change; earlier FE releases are not rolled back. */
     @Test
     public void testAlterOffsetsResetIsRefusedWhenTheReferencesCannotBeReleased() {
         FakeCdcClient fake = new FakeCdcClient();

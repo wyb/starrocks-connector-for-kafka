@@ -24,6 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.sql.Connection;
+import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
@@ -43,11 +44,19 @@ public class StarRocksJdbcClient implements CdcClient {
     private final boolean readTimingsEnabled;
     private final FeConnection connection;
     private final ColumnMetaReader columnMetaReader;
+    private final FeConnection.ConnectionFactory connectionFactory;
+    // Only the poll thread reads/writes this preference. Each live cursor owns its own connection.
+    private int snapshotUrlIndex;
 
     public StarRocksJdbcClient(StarRocksCdcSourceConfig config) {
+        this(config, DriverManager::getConnection);
+    }
+
+    StarRocksJdbcClient(StarRocksCdcSourceConfig config, FeConnection.ConnectionFactory connectionFactory) {
         this.config = config;
         this.readTimingsEnabled = config.readTimingsEnabled();
-        this.connection = new FeConnection(config);
+        this.connectionFactory = connectionFactory;
+        this.connection = new FeConnection(config, connectionFactory);
         this.columnMetaReader = new ColumnMetaReader(connection);
     }
 
@@ -108,7 +117,8 @@ public class StarRocksJdbcClient implements CdcClient {
                 }
                 return ids;
             }
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException failure) {
+            SQLException e = connection.asSqlException(failure);
             connection.closeIfBroken(e);
             throw e;
         }
@@ -141,7 +151,8 @@ public class StarRocksJdbcClient implements CdcClient {
                 return new TableConfig(db, table, rs.getLong("TABLE_ID"), rs.getString("TABLE_MODEL"),
                         rs.getString("PROPERTIES"));
             }
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException failure) {
+            SQLException e = connection.asSqlException(failure);
             connection.closeIfBroken(e);
             throw e;
         }
@@ -155,9 +166,10 @@ public class StarRocksJdbcClient implements CdcClient {
         CdcReadTimings timings = CdcReadTimings.forRead(logTimings);
         // A streaming ResultSet can occupy its JDBC connection until EOF. Bookmark renewals and
         // releases still need the task's regular connection between snapshot batches.
-        FeConnection snapshotConnection = new FeConnection(config);
+        FeConnection snapshotConnection = new FeConnection(config, connectionFactory, snapshotUrlIndex);
         try {
             Connection c = snapshotConnection.get();
+            snapshotUrlIndex = snapshotConnection.urlIndex();
             Statement stmt = c.createStatement();
             try {
                 snapshotConnection.applyStreamingFetchSize(stmt);
@@ -169,25 +181,37 @@ public class StarRocksJdbcClient implements CdcClient {
                 return new JdbcSnapshotCursor(snapshotConnection, stmt, rs,
                         JdbcRowReader.forTransport(snapshotConnection.isArrowFlight()), cols,
                         timings, logTimings, db, table, bookmarkId);
-            } catch (SQLException e) {
+            } catch (SQLException | RuntimeException e) {
                 try {
                     stmt.close();
-                } catch (SQLException closeFailure) {
+                } catch (SQLException | RuntimeException closeFailure) {
                     e.addSuppressed(closeFailure);
                 }
                 throw e;
             }
-        } catch (SQLException e) {
-            snapshotConnection.close();
-            NonTrackableException nte = NonTrackableException.classify(e);
-            if (nte != null) {
-                throw nte;
+        } catch (SQLException | RuntimeException failure) {
+            try {
+                SQLException e = snapshotReadFailure(snapshotConnection, failure);
+                NonTrackableException nte = NonTrackableException.classify(e);
+                if (nte != null) {
+                    throw nte;
+                }
+                throw e;
+            } finally {
+                snapshotConnection.close();
             }
-            throw e;
         }
     }
 
-    private static final class JdbcSnapshotCursor implements SnapshotCursor {
+    private SQLException snapshotReadFailure(FeConnection snapshotConnection, Exception failure) {
+        SQLException e = snapshotConnection.asSqlException(failure);
+        snapshotConnection.closeIfBroken(e);
+        // Preserve rotation when this dedicated connection is disposed and the task retries.
+        snapshotUrlIndex = snapshotConnection.urlIndex();
+        return e;
+    }
+
+    private final class JdbcSnapshotCursor implements SnapshotCursor {
         private final FeConnection connection;
         private final Statement stmt;
         private final ResultSet rs;
@@ -238,13 +262,17 @@ public class StarRocksJdbcClient implements CdcClient {
                 }
                 rows++;
                 return row;
-            } catch (SQLException e) {
-                close();
-                NonTrackableException nte = NonTrackableException.classify(e);
-                if (nte != null) {
-                    throw nte;
+            } catch (SQLException | RuntimeException failure) {
+                try {
+                    SQLException e = snapshotReadFailure(connection, failure);
+                    NonTrackableException nte = NonTrackableException.classify(e);
+                    if (nte != null) {
+                        throw nte;
+                    }
+                    throw e;
+                } finally {
+                    close();
                 }
-                throw e;
             }
         }
 
@@ -280,13 +308,15 @@ public class StarRocksJdbcClient implements CdcClient {
         private void closeResultSetAndStatement() {
             try {
                 rs.close();
-            } catch (SQLException ignored) {
+            } catch (SQLException | RuntimeException e) {
                 // Closing the connection also disposes of the result set.
+                LOG.debug("Failed to close snapshot result set", e);
             } finally {
                 try {
                     stmt.close();
-                } catch (SQLException ignored) {
+                } catch (SQLException | RuntimeException e) {
                     // Closing the connection also disposes of the statement.
+                    LOG.debug("Failed to close snapshot statement", e);
                 }
             }
         }
@@ -339,7 +369,8 @@ public class StarRocksJdbcClient implements CdcClient {
                     }
                 }
             }
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException failure) {
+            SQLException e = connection.asSqlException(failure);
             connection.closeIfBroken(e);
             NonTrackableException nte = NonTrackableException.classify(e);
             if (nte != null) {

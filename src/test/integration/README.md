@@ -58,6 +58,9 @@ CHANGES windows over each. A direct Maven invocation can instead set `bench.muta
 one custom CHANGES window. It also times `bookmark_create` on
 an unchanged table, the idle poll's fixed cost, per transport. It reports p50 and min wall time,
 rows/s, process CPU, allocation, RSS and encoded key+value size, and writes the same table to `target/pipeline-bench.txt`.
+For an even number of measured samples, p50 is the average of the two middle values,
+including the bookmark latency report. With the default three rounds (first discarded),
+p50 therefore averages the two measured rounds.
 
 `BENCH_PIPELINE` selects one mode for every transport in a run (direct Maven: `-Dbench.pipeline=...`):
 
@@ -130,7 +133,8 @@ For temporary diagnostics in a Connect worker, set
 `com.starrocks.connector.kafka.source.StarRocksJdbcClient` or
 `com.starrocks.connector.kafka.source.StarRocksAdbcClient`, plus
 `com.starrocks.connector.kafka.source.StarRocksCdcSourceTask`. The client logs `query_ms`,
-`next_ms`, and `decode_ms`; ADBC also logs batch counts, first/later/EOF waits, and rows per
+`next_ms`, and `decode_ms` (`next_ms` measures JDBC next calls or ADBC batch loads);
+ADBC also logs batch counts, first/later/EOF waits, and rows per
 batch. The task logs `map_ms` and per-table `table_ms` for each emitted
 snapshot batch or CHANGES window. The connector setting is off by default. Turn it off after
 collecting the data because timing every row affects throughput.

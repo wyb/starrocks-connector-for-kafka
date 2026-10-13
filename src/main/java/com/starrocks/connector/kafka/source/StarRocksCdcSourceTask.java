@@ -69,7 +69,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         final ChangeRecordMapper mapper;
         // volatile: commit() reads it from the offset-committer thread to clamp the fence, while
         // the poll thread writes it. Apart from liveBookmarks and pendingReleases below, every
-        // other TableState field stays poll-thread-only, except snapshotBookmark cleared on stop.
+        // other TableState field stays poll-thread-only.
         volatile long committedBookmark = -1L;
         boolean snapshotDone = false;
         // stop() may detach and close this cursor while the poll thread is reading it.
@@ -154,8 +154,9 @@ public class StarRocksCdcSourceTask extends SourceTask {
             Map<Map<String, String>, Map<String, Object>> durable = durableOffsets(started);
             for (TableState ts : started) {
                 Map<String, Object> offset = durable.get(OffsetState.sourcePartition(db, ts.table));
-                // Adopt first: under no_snapshot, restoreOffset falls back to the oldest adopted reference.
-                adoptHeldBookmarks(ts, !snapshotInitial && !OffsetState.fromMap(offset).snapshotDone);
+                // Before the first offset flush, held references are the only surviving position.
+                OffsetState state = OffsetState.fromMap(offset);
+                adoptHeldBookmarks(ts, state.bookmarkId < 0 || (!snapshotInitial && !state.snapshotDone));
                 restoreOffset(ts, offset);
             }
             tables = started;
@@ -195,7 +196,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Adopts the holder's existing references for release and, under {@code no_snapshot}, restore.
+     * Adopts the holder's existing references for release and recovery before the first offset flush.
      * Listing them is required only when there is no durable position to restore from.
      */
     private void adoptHeldBookmarks(TableState t, boolean requiredForRestore) {
@@ -205,7 +206,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
         } catch (SQLException e) {
             if (requiredForRestore) {
                 throw new ConnectException("Cannot restore the position of " + db + "." + t.table
-                        + " under no_snapshot: there is no durable offset and the holder's bookmarks"
+                        + ": there is no usable durable position and the holder's bookmarks"
                         + " cannot be listed", e);
             }
             LOG.warn("Could not list the bookmarks {} holds on {}.{}; any left by a previous task expire by "
@@ -221,9 +222,11 @@ public class StarRocksCdcSourceTask extends SourceTask {
     }
 
     /**
-     * Restores a completed snapshot or change offset. An unfinished snapshot restarts; under
-     * {@code no_snapshot}, the oldest held bookmark supplies the position if no durable offset
-     * exists. With neither, fail unless the operator allowed a possibly lossy latest start.
+     * Restores a completed offset for incremental reads. Under {@code initial}, an unfinished
+     * snapshot replays its original bookmark, falling back to the oldest held reference when no
+     * durable offset exists; only a table with neither starts a new snapshot. Under
+     * {@code no_snapshot}, an unusable durable offset requires the oldest held reference, or an
+     * explicit possibly lossy latest start.
      */
     private void restoreOffset(TableState t, Map<String, Object> raw) {
         OffsetState state = OffsetState.fromMap(raw);
@@ -236,13 +239,17 @@ public class StarRocksCdcSourceTask extends SourceTask {
             return;
         }
         if (snapshotInitial) {
-            LOG.info("Table {}.{} starts fresh: the first poll takes the snapshot", db, t.table);
+            Long bookmark = state.bookmarkId >= 0 ? Long.valueOf(state.bookmarkId) : oldestHeldBookmark(t);
+            if (bookmark != null) {
+                t.snapshotBookmark = bookmark;
+                retain(t, bookmark);
+                LOG.info("Table {}.{} replays the snapshot at bookmark {} from the beginning", db, t.table, bookmark);
+            } else {
+                LOG.info("Table {}.{} starts fresh: the first poll takes the snapshot", db, t.table);
+            }
             return;
         }
-        Long oldest;
-        synchronized (t.liveBookmarks) {
-            oldest = t.liveBookmarks.isEmpty() ? null : Collections.min(t.liveBookmarks);
-        }
+        Long oldest = oldestHeldBookmark(t);
         if (oldest == null) {
             if (missingPositionLatest) {
                 LOG.warn("Table {}.{} has no durable offset or bookmark held by {}; starting from the current"
@@ -260,6 +267,12 @@ public class StarRocksCdcSourceTask extends SourceTask {
         t.snapshotDone = true;
         LOG.info("Table {}.{} starts at bookmark {}, the oldest reference {} still holds from an earlier start",
                 db, t.table, oldest, holder);
+    }
+
+    private static Long oldestHeldBookmark(TableState t) {
+        synchronized (t.liveBookmarks) {
+            return t.liveBookmarks.isEmpty() ? null : Collections.min(t.liveBookmarks);
+        }
     }
 
     /**
@@ -394,10 +407,14 @@ public class StarRocksCdcSourceTask extends SourceTask {
             CdcClient.SnapshotCursor cursor = t.snapshotCursor.get();
             if (cursor == null) {
                 checkRunning();
-                long bookmark = client.bookmarkCreate(db, t.table, holder, ttlMs);
+                // Keep the version across open/read failures: taking a newer snapshot could omit
+                // deletes of rows already delivered from this one.
+                if (t.snapshotBookmark < 0) {
+                    t.snapshotBookmark = client.bookmarkCreate(db, t.table, holder, ttlMs);
+                }
+                long bookmark = t.snapshotBookmark;
                 retain(t, bookmark);
                 cursor = client.openSnapshot(db, t.table, t.cols, bookmark);
-                t.snapshotBookmark = bookmark;
                 t.snapshotCursor.set(cursor);
                 LOG.info("Starting snapshot of {}.{} at bookmark {}", db, t.table, bookmark);
             }
@@ -411,6 +428,7 @@ public class StarRocksCdcSourceTask extends SourceTask {
                     closeSnapshot(t);
                     t.committedBookmark = b0;
                     t.snapshotDone = true;
+                    t.snapshotBookmark = -1L;
                     LOG.info("Finished snapshot of {}.{} at bookmark {}", db, t.table, b0);
                     return;
                 }
@@ -434,7 +452,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     private static void closeSnapshot(TableState t) {
         CdcClient.SnapshotCursor cursor = t.snapshotCursor.getAndSet(null);
-        t.snapshotBookmark = -1L;
         if (cursor != null) {
             cursor.close();
         }
@@ -442,7 +459,6 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     private static void closeSnapshotAsync(TableState t) {
         CdcClient.SnapshotCursor cursor = t.snapshotCursor.getAndSet(null);
-        t.snapshotBookmark = -1L;
         if (cursor != null) {
             closeAsync(cursor::close, "snapshot-" + t.table);
         }
@@ -562,19 +578,21 @@ public class StarRocksCdcSourceTask extends SourceTask {
 
     private void applyPolicy(TableState t, NonTrackableException e) {
         String note = leaseStateNote(t, monotonicMs());
+        long position = t.snapshotDone ? t.committedBookmark : t.snapshotBookmark;
         if (policyResnapshot) {
             // Leave liveBookmarks untouched: the failed window's bookmark really was created
             // server-side, and commit()'s release rule owns cleaning it up.
-            LOG.warn("CHANGES window not trackable for {}.{} from base bookmark {}; {}=resnapshot, so this table's "
+            LOG.warn("CDC read not trackable for {}.{} at bookmark {}; {}=resnapshot, so this table's "
                             + "position is discarded and the whole table is re-read on the next poll. Cause: {}",
-                    db, t.table, t.committedBookmark, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY,
+                    db, t.table, position, StarRocksCdcSourceConfig.NONTRACKABLE_POLICY,
                     e.getMessage() + note);
             t.snapshotDone = false;
+            t.snapshotBookmark = -1L;
             t.committedBookmark = -1L;
         } else {
             // Connect logs the exception that kills the task, so everything goes into its message.
-            throw new ConnectException("CHANGES window not trackable for " + db + "." + t.table
-                    + " from base bookmark " + t.committedBookmark + "; "
+            throw new ConnectException("CDC read not trackable for " + db + "." + t.table
+                    + " at bookmark " + position + "; "
                     + StarRocksCdcSourceConfig.NONTRACKABLE_POLICY + "=fail, so the task stops." + note, e);
         }
     }

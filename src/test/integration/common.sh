@@ -14,10 +14,10 @@ PLUGIN_DIR="$PLUGIN_ROOT/starrocks-cdc"
 OUT_DIR="$(mktemp -d)"
 CONSUMED="$OUT_DIR/consumed.json"
 
-# DATE and DATETIME arrive as the text StarRocks prints, read through a UTC calendar so the
-# digits are the stored ones whatever zone the worker runs in. A whole-hour shift in the
-# string means the worker's local zone leaked into the read; a missing .123456 means the
-# microseconds were cut.
+# DATE and DATETIME arrive as text preserving the stored calendar fields, independent of
+# the worker timezone: JDBC uses text/LocalDateTime and ADBC reads temporal vectors directly.
+# A whole-hour shift means the local zone leaked into the read; a missing .123456 means
+# the microseconds were cut.
 TZ_DATE="2026-08-05"
 TZ_DATETIME="2026-08-05 12:34:56.123456"
 TZ_EXPECT_DATE="2026-08-05"

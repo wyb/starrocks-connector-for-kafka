@@ -259,7 +259,8 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
      * Validates offsets before Connect stores them, including their partition and value types.
      * A reset also releases the holder's FE bookmarks; otherwise {@code no_snapshot} could resume
      * from an old reference and undo the reset. Empty resets cover all configured tables, and a
-     * failed release rejects the reset rather than leaving it partly applied.
+     * failed release prevents Connect from updating offsets. FE releases already completed are
+     * not rolled back, so this is not an atomic reset across the two systems.
      */
     @Override
     public boolean alterOffsets(Map<String, String> connectorConfig,
@@ -272,7 +273,7 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
                 // A reset, and DELETE /offsets sends every stored partition this way. Validating
                 // those would leave a partition whose shape this connector no longer writes with no
                 // supported way to clear it, since a reset is the only way.
-                if (namesATable(entry.getKey())) {
+                if (isTablePartition(entry.getKey())) {
                     resets.add(entry.getKey());
                 }
                 continue;
@@ -368,10 +369,12 @@ public class StarRocksCdcSourceConnector extends SourceConnector {
         }
     }
 
-    /** Whether the partition names a db and a table: the shape every task writes, and the only one the FE
-     *  knows. */
-    private static boolean namesATable(Map<String, ?> partition) {
-        return stringAt(partition, OffsetState.KEY_DB) != null && stringAt(partition, OffsetState.KEY_TABLE) != null;
+    /** Only an exact task partition owns FE references. Clearing a stale shape must not release
+     *  bookmarks belonging to a different offset that happens to name the same table. */
+    private static boolean isTablePartition(Map<String, ?> partition) {
+        return partition != null && partition.size() == 2
+                && stringAt(partition, OffsetState.KEY_DB) != null
+                && stringAt(partition, OffsetState.KEY_TABLE) != null;
     }
 
     /** {@code partition} itself may be null: Connect passes a request's {@code "partition": null} through as is. */

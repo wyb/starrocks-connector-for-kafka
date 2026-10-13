@@ -279,9 +279,9 @@
   <h1>StarRocks CDC Source Connector 设计文档</h1>
   <div class="meta">
     <span>分支<b>cdc-source-connector</b></span>
-    <span>状态<b>已实现 · 未提交</b></span>
+    <span>范围<b>当前实现与恢复语义</b></span>
     <span>交付语义<b>at-least-once</b></span>
-    <span>验证<b>双通道集群冒烟 9/9</b></span>
+    <span>验证<b>单测与三种传输的集成入口</b></span>
   </div>
   <p class="lead">本文描述连接器<strong>当前已实现</strong>的设计，而非最初的计划。使用方法见同目录下的《使用指南》；本文回答的是"为什么这样设计"。</p>
 </header>
@@ -295,7 +295,7 @@
 <div class="tablewrap">
 <table>
   <tr><th>原语</th><th>作用</th></tr>
-  <tr><td><code>bookmark_create</code> / <code>bookmark_release</code></td><td>元函数，在服务端钉住/释放一个版本位置，同时充当 vacuum 栅栏</td></tr>
+  <tr><td><code>bookmark_create</code> / <code>bookmark_renew</code> / <code>bookmark_release</code></td><td>元函数，在服务端钉住、续租或释放一个版本位置，同时充当 vacuum 栅栏</td></tr>
   <tr><td><code>[_BOOKMARK_&lt;id&gt;_]</code></td><td>查询提示，读取该 bookmark 钉住的时间点快照</td></tr>
   <tr><td><code>[_CHANGES_&lt;base&gt;_&lt;head&gt;_]</code></td><td>查询提示，读取两个 bookmark 之间的增量变更</td></tr>
   <tr><td><code>__CHANGE_TYPE__</code> / <code>__ROW_VERSION__</code></td><td>CHANGES 结果集的元数据伪列（0=INSERT/UPSERT，1=DELETE）</td></tr>
@@ -306,8 +306,8 @@
 
 <div class="invariant">
   <span class="tag">设计取舍</span>
-  <p>曾评估过三条路线：<strong>①</strong> 在 StarRocks 内部实现订阅并直写 Kafka；<strong>②</strong> 引入 Flink 消费 CDC 再走 Flink-Kafka 生态；<strong>③</strong> 写一个 Kafka Connect source connector 走 JDBC。</p>
-  <p>选择 ③ 的理由：不动服务端代码（① 需要在 FE/BE 里维护一套投递、重试、位点管理），不引入一整个计算引擎作为纯搬运层（②），并且可以直接复用 Connect 生态既有的 offset 存储、rebalance、SMT、converter、DLQ 与 exactly-once 框架。代价是数据要经过一次 JDBC 序列化——这也是后来引入 Arrow Flight SQL 通道的动机。</p>
+  <p>曾评估过三条路线：<strong>①</strong> 在 StarRocks 内部实现订阅并直写 Kafka；<strong>②</strong> 引入 Flink 消费 CDC 再走 Flink-Kafka 生态；<strong>③</strong> 写一个 Kafka Connect source connector。</p>
+  <p>选择 ③ 的理由：不动服务端代码（① 需要在 FE/BE 里维护一套投递、重试、位点管理），不引入一整个计算引擎作为纯搬运层（②），并且可以直接复用 Connect 生态既有的 offset 存储、rebalance、SMT、converter、DLQ 与 exactly-once 框架。连接器提供 MySQL JDBC、Arrow Flight JDBC 和 Arrow ADBC 三种读取路径；ADBC 直接读取 Arrow 向量，省去 JDBC 对象适配。各路径仍需把列值转换为 Connect 记录，再由 worker 的 converter 编码。</p>
 </div>
 
 <h2 id="architecture"><span class="no">2</span>总体架构</h2>
@@ -401,15 +401,15 @@
   </div>
   <div class="flow">↑ 由 CdcClient 供给</div>
   <div class="box">
-    <h4>CdcClient / StarRocksJdbcClient</h4>
-    <p>接口 + JDBC 实现。<code>StarRocksJdbcClient</code> 只保留业务查询（bookmark 函数、快照/CHANGES 读、表元数据），底下三块各自独立：</p>
+    <h4>CdcClient / 两种客户端实现</h4>
+    <p><code>CdcClientFactory</code> 按 <code>source.read.transport</code> 选择 <code>StarRocksJdbcClient</code> 或 <code>StarRocksAdbcClient</code>。两者都用 JDBC 处理书签和元数据；前者按 JDBC URL 选择 MySQL 或 Flight 驱动，后者通过 ADBC URI 读取快照和 CHANGES。</p>
   </div>
   <div class="flow">↓ 委托</div>
   <div class="box">
-    <h4>FeConnection　·　ColumnMetaReader　·　ValueReader</h4>
-    <p><strong>FeConnection</strong>：URL 扇出、传输通道判定、连接复用、FE leader 轮转、有界重试。<br>
-       <strong>ColumnMetaReader</strong>：权威列清单，两种传输同一策略——只读 <code>information_schema</code>（见第 6 节）；类型由 <code>ColumnMeta</code> 从 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>。<br>
-       <strong>ValueReader</strong>：结果集行 → <code>Object[]</code>，<em>用同一份列清单定类型</em>。</p>
+    <h4>FeConnection · ColumnMetaReader · 行与值读取器</h4>
+    <p><strong>FeConnection</strong>：URL 扇出、传输通道判定、连接复用、FE leader 跟随、连接故障切换、有界重试。<br>
+       <strong>ColumnMetaReader</strong>：权威列清单，三种读取路径同一策略——只读 <code>information_schema</code>（见第 6 节）；类型由 <code>ColumnMeta</code> 从 <code>DATA_TYPE</code>/<code>COLUMN_TYPE</code> 折成 <code>ColumnType</code>。<br>
+       <strong>JdbcRowReader / ArrowAdbcValueReader</strong>：JDBC 行或 Arrow 向量 → <code>Object[]</code>，用同一份列清单定类型；<code>ValueReader</code> 提供共享的值转换。</p>
   </div>
 </div>
 
@@ -417,7 +417,7 @@
 
 <div class="invariant">
   <span class="tag">为什么要拆</span>
-  <p>拆分之前 <code>StarRocksJdbcClient</code> 是 728 行、32 个方法，同时承担驱动注册、URL 解析、连接生命周期、leader 轮转重试、列元数据、类型映射、行提取和全部业务查询。最直接的证据是它的测试：为了测 URL 解析，测试得用反射撬开 private static 方法——需要反射才能测一个纯函数，说明边界画错了。现在 <code>FeConnection.parseUrls</code> 和 <code>ColumnMetaReader.toJdbcType</code> 都是包内可见，直接调用即可。</p>
+  <p>连接、元数据、取值和业务查询分开后，可分别验证 URL 解析、类型转换及资源生命周期。<code>FeConnection.parseUrls</code> 是包内纯函数，连接工厂可注入故障；<code>ColumnMeta</code>/<code>ColumnTypeParser</code> 单独负责类型解释。状态机通过 <code>CdcClient</code> 测试替身验证，不需要反射访问 JDBC client 的私有实现。</p>
 </div>
 
 <h4>为什么 Connector 要做 preflight</h4>
@@ -547,7 +547,7 @@
 
 <p>每条 <code>SourceRecord</code> 都背着自己的位置（<code>ChangeRecordMapper</code>）：</p>
 
-<pre><code><span class="c">// 变更记录</span>
+<pre><code><span class="c">// 变更窗口的最后一条记录；其余记录的 bookmark_id 为 base</span>
 sourcePartition = {"db": db, "table": table}
 sourceOffset    = {"bookmark_id": head, "snapshot_done": true}
 
@@ -558,79 +558,40 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <ul>
   <li><strong>sourcePartition 按表拆分</strong>，而不是整个连接器一个位点。表之间因此互相独立，rebalance 把表重新分配到别的 task 上也能各自恢复。</li>
-  <li><strong>bookmark_id 存的是窗口的 head</strong>，即"读到哪儿了"。重启后它成为下一个窗口的 base。</li>
+  <li><strong>窗口末条记录的 bookmark_id 才是 head</strong>，其余记录写 base，避免部分确认跳过未交付的行。末条 offset 持久化后，head 成为重启续读的 base。</li>
 </ul>
 
 <h3>3.2 恢复路径</h3>
 
 <ol class="seq">
   <li><span class="who">start()</span>拿到本 task 分到的表清单，把全部表的 partition 一次交给 <code>reader.offsets(...)</code> 读回 raw map，与 <code>commit()</code> 同一趟读法。</li>
-  <li><span class="who">start()</span>另从 <code>information_schema.table_bookmark_references</code> 取回 holder 在该表上仍持有的全部引用，压回 <code>liveBookmarks</code>——前一个 task 留下的、窗口未落盘的 head 和未发出的释放由此走正常围栏释放，而不是等 TTL；<code>no_snapshot</code> 下它们还是下一步的后备位点。</li>
+  <li><span class="who">start()</span>从 <code>information_schema.table_bookmark_references</code> 接管 holder 仍持有的引用，放回 <code>liveBookmarks</code> 供续租、恢复和围栏释放。没有可用持久位点时，这次查询失败必须阻止启动，不能把失败当成空引用列表。</li>
   <li><span class="who">restoreOffset()</span><code>OffsetState.fromMap</code> 解码，容忍 <code>bookmark_id</code> 被反序列化成 <code>Integer</code> 或 <code>Long</code>；解不出非负数就整条丢弃回 <code>OffsetState.NONE</code>，不把 <code>-1</code> 哨兵和 <code>snapshot_done</code> 配成矛盾状态。</li>
-  <li><span class="who">restoreOffset()</span><strong>只信 <code>snapshot_done=true</code></strong>：是则 <code>committedBookmark = bookmark_id</code>、<code>snapshotDone = true</code>；否则（含完全没有 offset）<code>initial</code> 模式保持 fresh，下次 poll 重做整表快照；<code>no_snapshot</code> 模式取 <code>liveBookmarks</code> 里最旧的引用作 base。没有引用时默认启动失败；显式设置 <code>source.no.snapshot.missing.position.policy=latest</code> 才在下次 poll 从当前版本建立新位点，可能跳过停机期间的变更。</li>
+  <li><span class="who">restoreOffset()</span>有效 <code>snapshot_done=true</code> offset 直接作为增量 base。<code>initial</code> 的未完成 offset 保留原 bookmark 从头重做快照；没有有效 offset 时选 holder 最旧引用，两者都没有才创建新快照。<code>no_snapshot</code> 没有已完成 offset 时用最旧引用续读；无引用则默认 <code>fail</code>，显式 <code>latest</code> 才建立当前版本起点。</li>
   <li><span class="who">restoreOffset()</span>把恢复出来的 bookmark <strong>重新压回 <code>liveBookmarks</code></strong>。</li>
-  <li><span class="who">poll()</span><code>head = bookmarkCreate(...)</code>；若 <code>head == committedBookmark</code> 则本轮无新版本，直接跳过（idle dedup）；否则读 <code>[_CHANGES_base_head_]</code>。</li>
+  <li><span class="who">poll()</span>未完成快照先在固定 bookmark 上分批读取；完成后创建 head。若 <code>head == committedBookmark</code> 则跳过，否则读 <code>[_CHANGES_base_head_]</code>。</li>
 </ol>
 
 <figure>
-<div class="figwrap">
-<svg viewBox="0 0 760 330" role="img" aria-label="重启时的位点恢复决策流程">
-  <defs>
-    <marker id="a3" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
-      <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
-    </marker>
-  </defs>
-
-  <rect class="bx" x="264" y="8" width="232" height="42" rx="5"/>
-  <text class="tb" x="380" y="26" text-anchor="middle">start()</text>
-  <text class="tms" x="380" y="42" text-anchor="middle">reader.offsets([{db, table}…])</text>
-  <line class="ln" x1="380" y1="50" x2="380" y2="66" marker-end="url(#a3)"/>
-
-  <path class="bxa" d="M380 70 L492 102 L380 134 L268 102 Z"/>
-  <text class="tm" x="380" y="99" text-anchor="middle">snapshot_done</text>
-  <text class="tm" x="380" y="115" text-anchor="middle">== true ?</text>
-
-  <path class="ln" d="M268 102 L185 102 L185 160" marker-end="url(#a3)"/>
-  <text class="ta" x="214" y="95">true</text>
-
-  <path class="ln" d="M492 102 L585 102 L585 160" marker-end="url(#a3)"/>
-  <text class="ts" x="500" y="95" fill="var(--amber)">false，或完全没有 offset</text>
-
-  <rect class="bxa" x="60" y="164" width="250" height="80" rx="5"/>
-  <text class="tms" x="72" y="184">committedBookmark = bookmark_id</text>
-  <text class="tms" x="72" y="202">snapshotDone = true</text>
-  <text class="tms" x="72" y="220" fill="var(--danger)">liveBookmarks.addLast(bookmark_id)</text>
-  <text class="td" x="72" y="236">★ 漏掉这行 = 每次重启泄漏一个 bookmark</text>
-
-  <rect class="bxw" x="450" y="164" width="270" height="80" rx="5"/>
-  <text class="tb" x="462" y="186">保持 fresh，不信任该位点</text>
-  <text class="tms" x="462" y="206">committedBookmark = -1</text>
-  <text class="tms" x="462" y="224">snapshotDone = false</text>
-
-  <line class="ln" x1="185" y1="244" x2="185" y2="264" marker-end="url(#a3)"/>
-  <line class="ln" x1="585" y1="244" x2="585" y2="264" marker-end="url(#a3)"/>
-
-  <rect class="bx" x="60" y="268" width="250" height="48" rx="5"/>
-  <text class="tb" x="72" y="288">续读</text>
-  <text class="tms" x="72" y="306">[_CHANGES_&lt;id&gt;_&lt;head&gt;_]</text>
-
-  <rect class="bx" x="450" y="268" width="270" height="48" rx="5"/>
-  <text class="tb" x="462" y="288">bootstrap()</text>
-  <text class="ts" x="462" y="306">initial 重做快照；no_snapshot 从持有引用续读</text>
-</svg>
-</div>
-<figcaption><b>图 3</b>只有 <code>snapshot_done=true</code> 的位点才被信任。★ 那一行不是可选的：它把恢复出来的 bookmark 重新放回本地的存活队列，否则服务端那一份永远等不到释放。这个 bug 真实发生过——集群冒烟日志里 21275 一直不被释放、而相邻 id 都正常回收，才定位到。</figcaption>
+<div class="tablewrap"><table>
+  <tr><th>恢复依据（按优先级）</th><th>initial</th><th>no_snapshot</th></tr>
+  <tr><td>有效 offset，snapshot_done=true</td><td colspan="2">从该 bookmark 续读 CHANGES</td></tr>
+  <tr><td>有效 offset，snapshot_done=false</td><td>在该 bookmark 从头重放快照</td><td>从 holder 最旧引用续读；无引用按 fail/latest</td></tr>
+  <tr><td>无有效 offset，但仍有 holder 引用</td><td>在最旧 bookmark 从头重放快照</td><td>从最旧 bookmark 续读 CHANGES</td></tr>
+  <tr><td>无有效 offset，引用列表为空</td><td>首次 poll 创建新 bookmark 并读快照</td><td>fail 停止；latest 创建新起点，只读此后变更</td></tr>
+</table></div>
+<figcaption><b>图 3</b>恢复依据优先使用可用的持久位点。没有可用持久位点时，引用列表必须可读。恢复的 bookmark 经 <code>retain</code> 保留，快照重试只关闭游标，不更换版本。</figcaption>
 </figure>
 
 <div class="invariant">
   <span class="tag">不变式 · 快照崩溃语义</span>
-  <p>快照行的 offset 一律 <code>snapshot_done=false</code>，变更记录一律 <code>true</code>。因此在"第一条变更记录的 offset 落盘"之前的任意时刻崩溃，恢复出来的都是 <code>false</code>，会<strong>整表重做快照</strong>，而不是接着一份投递了一半的快照往下走。宁可重复，不留静默空洞。</p>
+  <p>快照行的 offset 一律 <code>snapshot_done=false</code>，变更记录为 <code>true</code>。首次持久化已完成 offset 之前崩溃，会在<strong>原 bookmark</strong> 上从头重放快照，然后继续读取其后的变更。优先使用未完成 offset 中的 bookmark；首次 flush 前则用 holder 最旧引用。读取失败也保留该 bookmark，仅重新打开游标。原版本无法读取时按不可追踪策略处理，默认失败；显式 resnapshot 才改用新版本。</p>
 </div>
 
 <div class="invariant">
   <span class="tag">不变式 · 恢复的 bookmark 必须重新入队</span>
-  <p>第 4 步不是可选的。漏掉它的话，每次重启/rebalance/改配置都会在服务端留下一个孤儿 bookmark，钉住 vacuum 直到 TTL（默认 7 天）过期。这个 bug 真实发生过，是在集群冒烟日志里看到 21275 一直不被释放、而相邻 id 都正常释放才定位到的。</p>
-  <p>重新入队是安全的：<code>commit()</code> 只释放严格早于"上一轮 ack 水位"的 bookmark，所以这一个会一直活到更新窗口的记录被确认为止——那正是保护崩溃重放基点所需要的栅栏。</p>
+  <p>第 5 步不是可选的。漏掉它的话，每次重启/rebalance/改配置都会在服务端留下一个孤儿 bookmark，钉住 vacuum 直到 TTL（默认 7 天）过期。这个 bug 真实发生过，是在集群冒烟日志里看到 21275 一直不被释放、而相邻 id 都正常释放才定位到的。</p>
+  <p>重新入队是安全的：<code>commit()</code> 只授权释放严格小于 <code>min(持久 offset 的 bookmark, committedBookmark)</code> 的引用，ack 本身不构成释放依据；poll 线程执行实际释放。</p>
 </div>
 
 <h3>3.3 释放围栏：只信 offset store 已经落盘的位置</h3>
@@ -725,17 +686,17 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <li>续租失败不触发 <code>source.nontrackable.policy</code>：位点是否真丢了由下一次 CHANGES 读判定，
       恢复入口保持唯一。</li>
   <li>续租只在 poll 线程发 SQL；锁内仅拷贝 <code>liveBookmarks</code>。单次 poll 长于租约
-      （如大表初始快照）时无法续租——见使用指南限制第 1 条。</li>
+      （如慢快照批次或大 CHANGES 窗口）时无法续租——见使用指南限制第 1 条。</li>
 </ul>
 
 <h3>3.5 线程模型</h3>
 
-<p>Connect 运行时会从两个线程调进来，而 JDBC client 是单线程的：</p>
+<p>运行中的轮询与 offset 提交由不同线程执行；停止时还会并发关闭资源。正常 JDBC 查询与书签维护由 poll 线程串行发起：</p>
 
 <div class="tablewrap">
 <table class="threads">
   <tr><th>线程</th><th>入口</th><th>约束</th></tr>
-  <tr><td>task poll 线程</td><td><code>poll()</code>、<code>bootstrap()</code>、<code>drainPendingReleases()</code>、<code>renewLiveBookmarks()</code></td><td><strong>所有 JDBC 都在这里</strong></td></tr>
+  <tr><td>task poll 线程</td><td><code>poll()</code>、<code>bootstrap()</code>、<code>drainPendingReleases()</code>、<code>renewLiveBookmarks()</code></td><td>正常 JDBC 查询及书签维护在此执行；ADBC 的阻塞读取使用内部执行器，资源关闭可在后台执行</td></tr>
   <tr><td>SourceTaskOffsetCommitter</td><td><code>commit()</code></td><td>读 offset store（阻塞 IO），只入队待释放 id，<strong>不发 SQL</strong></td></tr>
 </table>
 </div>
@@ -911,26 +872,27 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <h4>分区策略</h4>
 <p>不自定义 partitioner。key 是主键 struct，默认 partitioner 按 key 哈希——同一主键的所有变更因此天然落在同一分区，顺序得以保持。这正是下游需要的语义，自定义分区算法只会破坏它。</p>
 
-<h2 id="transport"><span class="no">6</span>双传输通道</h2>
+<h2 id="transport"><span class="no">6</span>三种读取路径</h2>
 
-<p>数据面走哪条通道，完全由 <code>starrocks.jdbc.url</code> 的 scheme 决定，没有单独的开关配置：</p>
+<p><code>source.read.transport</code> 选择 JDBC 或 ADBC。选择 JDBC 时，<code>starrocks.jdbc.url</code> 的 scheme 再决定 MySQL 或 Flight JDBC；选择 ADBC 时，<code>starrocks.adbc.uri</code> 决定读取端点，JDBC URL 继续负责书签与元数据。</p>
 
 <div class="tablewrap">
 <table>
-  <tr><th></th><th>MySQL 协议</th><th>Arrow Flight SQL</th></tr>
-  <tr><td>URL</td><td><code>jdbc:mysql://</code>（内部重写为 <code>jdbc:mariadb://</code>）</td><td><code>jdbc:arrow-flight-sql://</code>（原样保留）</td></tr>
-  <tr><td>驱动</td><td>mariadb-java-client 3.3.3</td><td>flight-sql-jdbc-core 18.0.0</td></tr>
-  <tr><td>端口</td><td><code>query_port</code>（默认 9030）</td><td><code>arrow_flight_port</code>（默认 -1，需显式开启）</td></tr>
-  <tr><td>流式读</td><td><code>setFetchSize(1024)</code></td><td>驱动自带，不设置</td></tr>
-  <tr><td>列元数据</td><td colspan="2"><code>information_schema.columns</code>，两条通道相同；驱动的 <code>ResultSetMetaData</code> 一概不用</td></tr>
+  <tr><th></th><th>MySQL JDBC</th><th>Arrow Flight JDBC</th><th>Arrow ADBC</th></tr>
+  <tr><td>source.read.transport</td><td colspan="2"><code>jdbc</code>（默认）</td><td><code>arrow-adbc</code></td></tr>
+  <tr><td>读取端点</td><td><code>jdbc:mysql://</code>（内部改为 <code>jdbc:mariadb://</code>）</td><td><code>jdbc:arrow-flight-sql://</code></td><td><code>starrocks.adbc.uri</code>，如 <code>grpc+tcp://host:port</code></td></tr>
+  <tr><td>驱动</td><td>mariadb-java-client</td><td>flight-sql-jdbc-core</td><td>adbc-driver-flight-sql</td></tr>
+  <tr><td>服务端端口</td><td><code>query_port</code></td><td colspan="2"><code>arrow_flight_port</code>，须在集群开启</td></tr>
+  <tr><td>流式读取</td><td><code>setFetchSize(1024)</code></td><td>驱动自带</td><td><code>ArrowReader.loadNextBatch()</code></td></tr>
+  <tr><td>书签和元数据</td><td colspan="3">均通过 <code>starrocks.jdbc.url</code>；列清单来自 <code>information_schema.columns</code>，不依赖 ResultSetMetaData</td></tr>
 </table>
 </div>
 
-<p>两个 JDBC 驱动随 package 目录中的其他运行依赖一起部署；<code>-with-dependencies.jar</code> 则包含这些依赖。Arrow Flight JDBC 使用 <code>flight-sql-jdbc-core</code>，避免与 ADBC 所用的 Arrow 类重复。</p>
+<p>驱动版本由 <code>pom.xml</code> 管理。package 目录包含连接器及运行依赖，部署时整组放在同一个插件子目录；<code>-with-dependencies.jar</code> 是另一种包含依赖的产物。Flight JDBC 使用 <code>flight-sql-jdbc-core</code>，与 ADBC 共用 Arrow 依赖，避免再引入一份驱动内嵌的 Arrow 类。</p>
 
 <figure>
 <div class="figwrap">
-<svg viewBox="0 0 760 292" role="img" aria-label="按 JDBC URL scheme 分流到两个传输通道">
+<svg viewBox="0 0 760 292" role="img" aria-label="source.read.transport 为 jdbc 时，按 URL scheme 选择驱动">
   <defs>
     <marker id="a7" viewBox="0 0 8 8" refX="7.5" refY="4" markerWidth="7" markerHeight="7" orient="auto">
       <path d="M0 0 L8 4 L0 8 z" fill="var(--ink-2)"/>
@@ -959,9 +921,9 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <line class="ln" x1="565" y1="146" x2="565" y2="162" marker-end="url(#a7)"/>
 
   <rect class="bxg" x="50" y="166" width="290" height="28" rx="4"/>
-  <text class="tm" x="195" y="185" text-anchor="middle">mariadb-java-client 3.3.3</text>
+  <text class="tm" x="195" y="185" text-anchor="middle">mariadb-java-client</text>
   <rect class="bxg" x="420" y="166" width="290" height="28" rx="4"/>
-  <text class="tm" x="565" y="185" text-anchor="middle">flight-sql-jdbc-core 18.0.0</text>
+  <text class="tm" x="565" y="185" text-anchor="middle">flight-sql-jdbc-core</text>
 
   <line class="ln" x1="195" y1="194" x2="195" y2="208" marker-end="url(#a7)"/>
   <line class="ln" x1="565" y1="194" x2="565" y2="208" marker-end="url(#a7)"/>
@@ -975,23 +937,23 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <rect class="bx" x="420" y="212" width="290" height="76" rx="4"/>
   <text class="tms" x="434" y="230">流式读　驱动自带，不设置</text>
   <text class="tms" x="434" y="248">列元数据　information_schema.columns</text>
-  <text class="tms" x="434" y="268" fill="var(--danger)">⚠ 驱动自述不可用：4 列的表报告 8 列，</text>
+  <text class="tms" x="434" y="268" fill="var(--danger)">⚠ 历史驱动问题：4 列曾报告为 8 列，</text>
   <text class="tms" x="434" y="282" fill="var(--danger)">　全部 nullable=false、precision=scale=0</text>
 </svg>
 </div>
-<figcaption><b>图 7</b>没有单独的传输开关配置：URL 的 scheme 就是开关。两条路径的分歧只有两处——流式读怎么开、列元数据从哪来——但都不是可以想当然的，红字那两条各自是一次线上级别的失败。</figcaption>
+<figcaption><b>图 7</b><code>source.read.transport=jdbc</code> 时的驱动分支。ADBC 的数据读取由独立 URI 配置，书签与元数据仍经过 JDBC。流式设置和历史驱动元数据问题说明了为何列类型必须取自 information_schema。</figcaption>
 </figure>
 
 <div class="invariant warn">
   <span class="tag">两个踩过的坑</span>
-  <p><strong><code>setFetchSize(Integer.MIN_VALUE)</code> 是 MySQL Connector/J 的习惯用法，MariaDB 驱动会直接抛异常。</strong>（其 <code>setFetchSize</code> 字节码是 <code>ifge</code> → <code>athrow "invalid fetch size"</code>。）这个缺陷让流式读 100% 不可用，而且任何单测都抓不到——单测全部注入 <code>FakeCdcClient</code>。现在用正数 1024。</p>
-  <p><strong>Arrow 通道的列元数据不可用</strong>，必须绕开驱动、改用 <code>information_schema.columns</code> 当普通行读。实测证据：一张 4 列的表，驱动报告 <strong>8 列</strong>，且全部 <code>nullable=false</code>、<code>precision=0, scale=0</code>。三个成因叠加——FE 的 <code>ArrowUtils.convertToArrowType</code> 给 <code>FieldType</code> 传了 <code>metadata=null</code>；驱动的 <code>ConvertUtils</code> 从不调用 <code>Field.isNullable()</code>（18.0.0 与 19.0.0 均如此）；prepared statement 路径把 schema 返回了两次。</p>
+  <p><strong><code>setFetchSize(Integer.MIN_VALUE)</code> 是 MySQL Connector/J 的习惯用法，MariaDB 驱动会直接抛异常。</strong>（其 <code>setFetchSize</code> 字节码是 <code>ifge</code> → <code>athrow "invalid fetch size"</code>。）这个缺陷让流式读 100% 不可用，而且任何单测都抓不到——当时状态机单测只注入 <code>FakeCdcClient</code>。现在用正数 1024。</p>
+  <p><strong>列清单统一来自 <code>information_schema.columns</code></strong>。早期集成曾观察到 Flight JDBC 报告重复列、错误的 nullable 及缺失 precision/scale；MySQL 的结果集元数据也不足以区分部分 StarRocks 类型。当前实现不依赖这些驱动元数据。驱动或服务端升级后，具体问题是否仍存在应以对应版本测试为准。</p>
 </div>
 
 <div class="invariant">
   <span class="tag">不变式 · 列类型只有一个真相源</span>
   <p>上面那条坑还有个后半段：schema 端换用了 <code>information_schema</code>，取值端却仍在问驱动。<code>extractValue</code> 曾经 switch 在 <code>ResultSetMetaData.getColumnType()</code> 上，而 <code>ChangeRecordMapper</code> 用的是 <code>ColumnMetaReader</code> 给出的清单——同一条读取路径上两个真相源，其中一个已知在 Arrow 通道上不可信。两者一旦分歧，就是 schema 说 <code>Date</code>、值却是 <code>String</code>，在序列化时抛 <code>DataException</code>，且离成因很远。</p>
-  <p>现在 <code>streamSnapshot</code>/<code>streamChanges</code> 接的是 <code>List&lt;ColumnMeta&gt;</code> 而非列名，<code>ValueReader</code> 按同一份清单取值，两边不可能再漂移。</p>
+  <p>现在 <code>streamSnapshot</code>/<code>streamChanges</code> 接的是 <code>List&lt;ColumnMeta&gt;</code> 而非列名，JDBC 与 ADBC 读取器按同一份清单取值，两边不可能再漂移。</p>
 </div>
 
 <div class="invariant">
@@ -999,10 +961,10 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <p>这两种类型曾经在 schema 端和取值端<em>同时</em>落到 STRING 默认分支，所以什么都不报错——字节被按连接字符集解码，非法序列变成 U+FFFD，原始字节不可恢复。两侧现已改为 <code>Schema.BYTES</code> + <code>getBytes()</code>；因为是两侧同时改，单独改一侧会立刻抛 <code>DataException</code>，这也正是新增测试所钉住的。</p>
 </div>
 
-<p>时间类型的读取统一传入一个每次新建的 <code>Calendar.getInstance(TimeZone.getTimeZone("UTC"))</code>，避免 worker 本地时区泄漏进结果。</p>
+<p>DATE/DATETIME 保留存储的日历字段：两种 JDBC 的 DATE 都读字符串；MySQL DATETIME 读字符串，Flight JDBC DATETIME 读 <code>LocalDateTime</code> 后格式化，避免 <code>Timestamp</code> 的本地时区归一化；ADBC 直接读取 epoch 天数/微秒并转换为无时区文本。无需每行创建 Calendar。</p>
 
 <h4>FE leader 轮转</h4>
-<p><code>bookmark_create</code>/<code>bookmark_release</code> 只能在 FE leader 上执行。客户端捕获 "must run on the FE leader"，关闭当前连接、轮转到下一个配置的 host 重试；轮转次数上限为 URL 个数，转满一圈仍未找到 leader 则抛出最后一个异常。其他 <code>SQLException</code> 则在同一 URL 上按 <code>source.max.retries</code> 重试。所以用户只需在 <code>starrocks.jdbc.url</code> 里列出全部 FE，不必自己指向 leader。</p>
+<p><code>bookmark_create</code>/<code>bookmark_release</code> 只能在 FE leader 上执行。客户端捕获 "must run on the FE leader" 或连接故障后，关闭当前连接、轮转到下一个配置的 host 重试；每次调用最多遍历一轮 URL。其他 SQL 错误，以及仅配置一个端点时的连接故障，仍按 <code>source.max.retries</code> 在当前 URL 上重试。首次建立元数据和快照连接也会跳过无法连接的 FE；运行中读取失败后关闭连接，并在下一次重试时使用下一端点。认证和 SQL 错误不触发故障切换。</p>
 
 <h2 id="config"><span class="no">7</span>配置项</h2>
 
@@ -1011,7 +973,9 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 <div class="tablewrap">
 <table>
   <tr><th>键</th><th>默认值</th><th>说明</th></tr>
-  <tr><td><code>starrocks.jdbc.url</code></td><td>必填</td><td>FE 查询端点；scheme 决定传输通道</td></tr>
+  <tr><td><code>starrocks.jdbc.url</code></td><td>必填</td><td>书签与元数据的 FE JDBC 端点；JDBC 读取也使用它</td></tr>
+  <tr><td><code>source.read.transport</code></td><td>jdbc</td><td>jdbc | arrow-adbc；只选择快照和 CHANGES 的读取路径</td></tr>
+  <tr><td><code>starrocks.adbc.uri</code></td><td>空</td><td>ADBC 读取端点；选择 arrow-adbc 时必填，多个 URI 以逗号分隔</td></tr>
   <tr><td><code>starrocks.database.name</code></td><td>必填</td><td>源库名</td></tr>
   <tr><td><code>starrocks.username</code> / <code>.password</code></td><td>必填</td><td>需 <code>OPERATE</code> 权限</td></tr>
   <tr><td><code>starrocks.table.names</code></td><td>必填</td><td>逗号分隔的表名</td></tr>
@@ -1020,12 +984,15 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
   <tr><td><code>source.snapshot.mode</code></td><td><code>initial</code></td><td><code>initial</code> | <code>no_snapshot</code></td></tr>
   <tr><td><code>source.no.snapshot.missing.position.policy</code></td><td><code>fail</code></td><td><code>fail</code> | <code>latest</code>；缺少 offset 和 holder 引用时是否从当前版本重新开始</td></tr>
   <tr><td><code>source.poll.interval.ms</code></td><td><code>5000</code></td><td>空轮询之间的休眠</td></tr>
+  <tr><td><code>source.snapshot.batch.size</code></td><td>4096</td><td>每表每次 poll 返回的最大快照行数</td></tr>
+  <tr><td><code>source.read.timeout.ms</code></td><td>120000</td><td>ADBC 查询、下一批及 CHANGES 资源清理分别等待的超时，毫秒</td></tr>
+  <tr><td><code>source.read.timings.enabled</code></td><td>false</td><td>收集查询、读取、decode 和 task 映射耗时，通过 DEBUG 输出</td></tr>
   <tr><td><code>source.bookmark.ttl.ms</code></td><td><code>604800000</code>（7天）</td><td>续租请求的租约时长；task 轮询期间按服务端授予值的 1/3 自动续租，TTL 只兜底停止轮询后的遗留引用</td></tr>
   <tr><td><code>source.nontrackable.policy</code></td><td><code>fail</code></td><td><code>fail</code> | <code>resnapshot</code></td></tr>
   <tr><td><code>source.tombstones.on.delete</code></td><td><code>false</code></td><td>删除后追加墓碑</td></tr>
-  <tr><td><code>source.max.retries</code></td><td><code>3</code></td><td>同 URL 重试次数</td></tr>
+  <tr><td><code>source.max.retries</code></td><td><code>3</code></td><td>bookmark 调用在同 URL 上的最大尝试次数；多端点连接故障或 leader 重定向立即轮转</td></tr>
   <tr><td><code>source.poll.retry.timeout.ms</code></td><td><code>600000</code></td><td>单表读取持续失败多久后 task 失败；<code>-1</code> 永远重试，<code>0</code> 首次失败即停</td></tr>
-  <tr><td><code>source.connect.timeout.ms</code></td><td><code>1000</code></td><td>连接超时</td></tr>
+  <tr><td><code>source.connect.timeout.ms</code></td><td>1000</td><td>JDBC/ADBC 建立连接的超时，毫秒</td></tr>
 </table>
 </div>
 
@@ -1035,119 +1002,67 @@ sourceOffset    = {"bookmark_id": b0, "snapshot_done": false}</code></pre>
 
 <p>整体是 <strong>at-least-once</strong>。崩溃时未落盘的 offset 会导致从上一个已持久化的 bookmark 重新读一个窗口，重复投递已发出的记录。这也是"key 用主键 struct"重要的原因：PRIMARY KEY 表 + 主键 key 让下游可以幂等地应用。</p>
 
-<p>Connect 的 KIP-618 exactly-once source 支持可以叠加：<code>exactlyOnceSupport()</code> 仅在 <code>source.snapshot.mode=no_snapshot</code> 且缺位点策略为默认的 <code>fail</code> 时返回 <code>SUPPORTED</code>，其余情况返回 <code>UNSUPPORTED</code>。快照行带的是 <code>snapshot_done=false</code>，<code>restoreOffset</code> 只信 <code>true</code>，所以事务已提交的快照在重启后仍会整份重做。<code>latest</code> 可能跳过缺失的位点与当前版本之间的变更。流式窗口提交的 offset 是重启要续的 bookmark。仍需 distributed 模式，而两套冒烟 harness 都是 standalone，因此这条路径目前只有单测覆盖。</p>
+<p>Connect 的 KIP-618 exactly-once source 支持可以叠加：<code>exactlyOnceSupport()</code> 仅在 <code>source.snapshot.mode=no_snapshot</code> 且缺位点策略为默认的 <code>fail</code> 时返回 <code>SUPPORTED</code>，其余情况返回 <code>UNSUPPORTED</code>。快照行带的是 <code>snapshot_done=false</code>，<code>initial</code> 会按原 bookmark 重放未完成快照，所以事务已提交的快照在重启后仍会整份重做。<code>latest</code> 可能跳过缺失的位点与当前版本之间的变更。流式窗口提交的 offset 是重启要续的 bookmark。仍需 distributed 模式，而两套冒烟 harness 都是 standalone，因此这条路径目前只有单测覆盖。</p>
 
 <div class="invariant warn">
   <span class="tag">缺口 1 · 空闲表每次重启都会全量重做快照</span>
   <p>唯一写 <code>snapshot_done=true</code> 的地方是变更记录。若快照做完后表一直没有变更，<code>poll()</code> 会命中 idle dedup（<code>head == committedBookmark</code> 直接跳过），一条变更记录都不发，持久 offset 就永远停在 <code>snapshot_done=false</code>。重启即整表重读。</p>
-  <p>语义上仍是 at-least-once（只是重复），但大表上代价不小。倾向的修法：让 bootstrap 结束时也能落一个 <code>snapshot_done=true</code> 的位点。</p>
+  <p>语义上仍是 at-least-once（只是重复），但大表上代价不小。若将来要独立持久化完成标志，必须先保证所有快照批次已交付，不能只在 EOF 时把内存标志当成持久提交。</p>
 </div>
 
 <div class="invariant warn">
   <span class="tag">缺口 2（已补）· bootstrap 未产生记录时，首个窗口持久化之前曾存在丢数据窗口</span>
-  <p>当 bootstrap 没有发出任何记录时——<code>no_snapshot</code> 模式，或者 <code>initial</code> 模式下快照时表为空——不会有任何 offset 落盘。<code>initial</code> 下重启只是把快照在当前版本重做，最终状态一条不少；<code>no_snapshot</code> 下重启曾经会在<em>当前版本</em>重开 bookmark，崩溃到重启之间的变更被静默跳过，那一小段是 at-most-once。</p>
-  <p>现在的修法：holder 仍持有的引用在启动时被接管，<code>no_snapshot</code> 下没有 offset 就从其中最旧的一个续读；既没有持久 offset 又没有引用时默认启动失败，因为无法区分首次运行与引用过期。用户可显式设置 <code>source.no.snapshot.missing.position.policy=latest</code>，让 task 从当前版本自动建立新位点，同时接受可能跳过变更的风险。REST 重置 offset 时 Connector 的 <code>alterOffsets</code> 先释放这些引用（请求里置 null 的表，空 map 的 DELETE 则是配置里所有表；从未落盘的表要 PATCH 置 null），重置后同样遵循该策略。</p>
+  <p><code>no_snapshot</code> 建立起点或 <code>initial</code> 读到空快照时，没有记录就没有 offset 可供 Connect 持久化。此时若重启直接创建当前版本 bookmark，会跳过旧起点之后的变更；用当前快照替代也无法补回已经删除的行。</p>
+  <p>启动时接管 holder 仍持有的引用：<code>initial</code> 没有有效 offset 时在最旧 bookmark 上重放快照，再读其后的 CHANGES；<code>no_snapshot</code> 则从最旧引用直接续读。缺少可恢复持久位点时，引用查询失败阻止启动。引用列表为空时，initial 创建新快照，no_snapshot 按 fail/latest 处理。显式重置 offset 会先释放请求中标准表分区的引用，空请求覆盖全部配置表；此前成功的 FE 释放不会因后续失败回滚，详见使用指南。</p>
 </div>
 
 <figure>
-<div class="figwrap">
-<svg viewBox="0 0 760 302" role="img" aria-label="两个已知缺口的时间轴">
-  <rect class="bxw" x="8" y="8" width="744" height="138" rx="5"/>
-  <text class="tb" x="24" y="30">缺口 1 · 空闲表每次重启都会全量重做快照<tspan class="ts">　（重复投递，语义仍成立，但代价大）</tspan></text>
-  <line class="ax" x1="40" y1="76" x2="716" y2="76"/>
-
-  <circle cx="110" cy="76" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
-  <text class="tms" x="110" y="62" text-anchor="middle">poll #1 · bootstrap</text>
-  <text class="tms" x="110" y="100" text-anchor="middle">快照 N 行</text>
-  <text class="tms" x="110" y="116" text-anchor="middle">offset = {b0, false}</text>
-
-  <circle cx="310" cy="76" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
-  <text class="tms" x="310" y="62" text-anchor="middle">poll #2 … #n</text>
-  <text class="tms" x="310" y="100" text-anchor="middle">head == b0 → idle dedup</text>
-  <text class="tms" x="310" y="116" text-anchor="middle">一条记录都不发出</text>
-
-  <circle cx="510" cy="76" r="5" fill="var(--surface)" stroke="var(--amber)" stroke-width="1.6"/>
-  <text class="tms" x="510" y="62" text-anchor="middle">表一直没有变更</text>
-  <text class="tms" x="510" y="100" text-anchor="middle" fill="var(--amber)">于是 snapshot_done</text>
-  <text class="tms" x="510" y="116" text-anchor="middle" fill="var(--amber)">永远停在 false</text>
-
-  <circle cx="670" cy="76" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
-  <text class="tms" x="670" y="62" text-anchor="middle">重启</text>
-  <text class="tms" x="670" y="100" text-anchor="middle" fill="var(--danger)">读到 false</text>
-  <text class="tms" x="670" y="116" text-anchor="middle" fill="var(--danger)">→ 整表重读</text>
-
-  <text class="ts" x="24" y="138">唯一写 <tspan class="tm">snapshot_done=true</tspan> 的地方是变更记录；没有变更，就没人翻转这个标志。</text>
-
-  <rect class="bxd" x="8" y="158" width="744" height="138" rx="5"/>
-  <text class="tb" x="24" y="180">缺口 2 · bootstrap 未产生记录时，首个位点落盘前存在丢数据窗口<tspan class="ts">　（at-most-once）</tspan></text>
-  <line class="ax" x1="40" y1="226" x2="716" y2="226"/>
-
-  <circle cx="130" cy="226" r="5" fill="var(--surface)" stroke="var(--ink-2)" stroke-width="1.6"/>
-  <text class="tms" x="130" y="212" text-anchor="middle">poll #1 · bootstrap</text>
-  <text class="tms" x="130" y="250" text-anchor="middle">no_snapshot，或快照时表为空</text>
-  <text class="tms" x="130" y="266" text-anchor="middle">0 条记录 → offset store 为空</text>
-
-  <circle cx="345" cy="226" r="5" fill="var(--surface)" stroke="var(--amber)" stroke-width="1.6"/>
-  <text class="tms" x="345" y="212" text-anchor="middle" fill="var(--amber)">表发生变更</text>
-  <text class="tms" x="345" y="250" text-anchor="middle" fill="var(--amber)">版本 v1 → v2</text>
-
-  <circle cx="545" cy="226" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
-  <text class="tms" x="545" y="212" text-anchor="middle">崩溃 &amp; 重启</text>
-  <text class="tms" x="545" y="250" text-anchor="middle">读不到任何 offset</text>
-  <text class="tms" x="545" y="266" text-anchor="middle">→ 视为首次运行</text>
-
-  <circle cx="678" cy="226" r="5" fill="var(--surface)" stroke="var(--danger)" stroke-width="1.6"/>
-  <text class="tms" x="678" y="212" text-anchor="middle">新建 bookmark</text>
-  <text class="tms" x="678" y="250" text-anchor="middle" fill="var(--danger)">位于当前版本 v2</text>
-
-  <path class="lnd dash" d="M345 232 L345 278 L678 278 L678 240"/>
-  <text class="td" x="511" y="292" text-anchor="middle">修补前：v1 … v2 之间的变更被静默跳过；现在从仍持有的 b0 续读</text>
-</svg>
-</div>
-<figcaption><b>图 8</b>两者的成因相同——<strong>没有记录，就没有 offset</strong>——但后果不同：缺口 1 只是重复，缺口 2 曾是真的丢数据。缺口 2 已用启动时接管的引用补上（<code>no_snapshot</code> 下无 offset 时从最旧的持有引用续读）；缺口 1 的修法仍是让 bootstrap 结束时能独立落一个位点，而不是依赖第一条变更记录去翻转标志。</figcaption>
+<div class="tablewrap"><table>
+  <tr><th>尚无已完成持久 offset 的情况</th><th>重启行为</th><th>边界</th></tr>
+  <tr><td>快照已读完，但尚未持久化变更 offset</td><td>原 bookmark 上重放快照，然后续读变更</td><td>可能重复投递，不通过换新版本跳过变更</td></tr>
+  <tr><td>空快照或 no_snapshot 起点，尚无任何持久 offset</td><td>使用 holder 最旧引用；initial 重放该快照，no_snapshot 直接续读</td><td>必须能列出引用；引用已过期时按启动/不可追踪策略处理</td></tr>
+</table></div>
+<figcaption><b>图 8</b>没有记录就没有 offset。持有引用补充首次 flush 前的恢复依据；它不能替代已经过期的服务端版本。</figcaption>
 </figure>
 
-<p class="lead">缺口 1 由代码推导得出，尚未编写复现测试；缺口 2 的修补由 <code>StarRocksCdcSourceTaskTest</code> 与 <code>StarRocksCdcSourceConnectorTest</code> 覆盖。两者都不是某轮改动引入的，是设计本身的推论。</p>
+<p><code>StarRocksCdcSourceTaskTest</code> 覆盖快照重放、空快照、首次 flush 前恢复及 no_snapshot 的缺位点策略；<code>StarRocksCdcSourceConnectorTest</code> 覆盖显式 offset 重置与 FE 引用清理。</p>
 
 <h4>不可追踪的处理</h4>
 <p>当 CHANGES 窗口跨越了破坏可追踪性的操作（PK 表 CDC 属性关闭期间的写入、DELETE/TRUNCATE 于非 PK 表、分区 drop/重写、schema 重写型 ALTER、bucket 数变更等），服务端报 <code>CDC-ERROR-1 (CHANGE_NOT_TRACKABLE)</code> 或 FE 规划期的 "not trackable"。<code>NonTrackableException.classify</code> 需要同时匹配这几类措辞——早期只匹配 <code>CDC-ERROR-</code> 前缀，导致 <code>resnapshot</code> 策略事实上从未生效。</p>
 
 <h2 id="verification"><span class="no">9</span>验证情况</h2>
 
-<p>单测覆盖状态机（注入共享的 <code>FakeCdcClient</code>）与纯函数部分，<code>source</code> + <code>common</code> 两个包共 <strong>140</strong> 个，整个模块 159 个。但状态机单测<strong>无法覆盖真实 JDBC 行为</strong>——<code>setFetchSize</code> 那个缺陷就是明证：它让流式读 100% 不可用，而全部单测照常通过。因此集成冒烟是必需的，不是补充。</p>
+<p>单测覆盖状态机、取值、schema/记录映射和资源生命周期；驱动回归测试使用进程内真实 ResultSet 或 Arrow 向量。测试清单见代码详解，数量与结果以当前 Maven/Surefire 报告为准。单测不覆盖真实 FE/BE、插件隔离及 Kafka 投递的完整组合，因此仍需集成冒烟。</p>
 
 <div class="tablewrap">
 <table>
   <tr><th>步骤</th><th>断言</th></tr>
-  <tr><td>0</td><td>主 shaded jar 同时包含连接器类、mariadb 驱动、Debezium Envelope、Arrow 驱动，且被单独 stage 到一个只含它一个 jar 的目录</td></tr>
+  <tr><td>0</td><td>检查 package 插件目录中的连接器、MariaDB JDBC、所选传输的 Flight JDBC/ADBC 依赖、Debezium Envelope 及版本资源；整组 jar 放在同一个插件子目录下供 worker 加载</td></tr>
   <tr><td>2–3</td><td>开启 CDC 的 PK 表产出目标 topic</td></tr>
   <tr><td>5</td><td>初始快照恰好 3 条 <code>op=r</code>；UPDATE 产出 <code>op=d</code>(v=20) <strong>先于</strong> <code>op=c</code>(v=200)；DELETE 产出 <code>op=d</code>；线上格式为 Debezium envelope</td></tr>
   <tr><td>6</td><td>杀掉并重启 worker，从持久 offset 续读：新行以 <code>op=c</code> 出现，快照<strong>不重放</strong></td></tr>
   <tr><td>7</td><td>DATE / DATETIME 的时区无关取值</td></tr>
   <tr><td>8–9</td><td>bookmark 释放数量符合预期，无释放失败</td></tr>
+  <tr><td>10</td><td>VARBINARY、ARRAY/MAP/STRUCT 和嵌套元素的精确值；同一插件产物的传输结果一致性</td></tr>
+  <tr><td>11</td><td>预检拒绝 HLL 列，并在错误中点名该列</td></tr>
 </table>
 </div>
 
-<p>两套入口：<code>smoke.sh</code>（Docker 自建环境）与 <code>smoke-cluster.sh</code>（对接已有集群，附带 preflight 检查与唯一命名的一次性数据库）。<code>SR_TRANSPORT=mysql|arrow-flight</code> 切换传输通道，两种设置各跑一遍是确认"传输层改动没有挪动删除/插入顺序或时间类型读取"的唯一办法。</p>
+<p>两套冒烟入口：<code>smoke.sh</code> 在 Docker 中运行 MySQL；<code>smoke-cluster.sh</code> 对接已有集群，以 <code>SR_TRANSPORT=mysql|arrow-flight|arrow-adbc</code> 选择路径。后者对每种传输检查快照、更新顺序、重启续读、时间及嵌套类型；对同一插件产物运行不同传输后，还比较快照值。</p>
 
-<p><strong>当前状态：两个通道各自 9 步全绿</strong>（真实集群，非 Docker）。</p>
+<p>改变打包、驱动或取值路径后，应重新构建 package 并运行相关传输的集群冒烟。单次历史通过记录不能替代当前产物的验证；性能测量分别使用 <code>bench-pipeline.sh</code> 和 <code>bench-cluster.sh</code>。</p>
 
-<h2 id="open"><span class="no">10</span>未决事项</h2>
+<h2 id="open"><span class="no">10</span>验证边界与维护事项</h2>
 
-<div class="tablewrap">
-<table>
-  <tr><th>事项</th><th>状态</th></tr>
-  <tr><td>Arrow Flight 通道 DATETIME 存在整小时偏移</td><td>已知限制 11；step 7 在该通道只断言列存在并打印实际值，不断言数值</td></tr>
-  <tr><td>缺口 1、缺口 2（见第 8 节）</td><td>已识别，未写复现测试，未修</td></tr>
-  <tr><td>FE <code>ArrowUtils.convertToArrowType</code> 传 <code>metadata=null</code>，丢失 precision/scale</td><td>待提上游</td></tr>
-  <tr><td>FE prepared statement 返回双份 schema</td><td>待提上游</td></tr>
-  <tr><td>arrow-java <code>ConvertUtils</code> 不读 <code>Field.isNullable()</code></td><td>待提上游；影响所有 Arrow Flight JDBC 下游，不限于本项目</td></tr>
-  <tr><td><code>bookmark_acquire</code> FE 元函数（原计划 1）</td><td>按决定推迟；当前用 <code>bookmark_create</code> 的幂等性替代</td></tr>
-  <tr><td>净变更（<code>enable_cdc_net_change</code>）</td><td>已按决定<strong>移除</strong>。原有 <code>source.netchanges</code> 开关会在每条连接上设置该会话变量，但从无任何测试覆盖，且未验证净变更模式下排序不变式是否仍成立。若日后重新引入，须先补冒烟用例</td></tr>
-  <tr><td>重构后的两个通道未重跑集群冒烟</td><td><strong>待办</strong>：本轮改动触及取值路径（列类型来源收敛、BINARY 走 BYTES）与打包（新增版本资源），单测 179/179 通过，但 MySQL 与 Arrow Flight 两条通道都应在真实集群上各跑一遍再合并</td></tr>
-  <tr><td>分支 <code>cdc-source-connector</code></td><td>已 push 至 origin，未开 PR</td></tr>
-</table>
-</div>
+<div class="tablewrap"><table>
+  <tr><th>事项</th><th>当前边界</th></tr>
+  <tr><td>Exactly-once</td><td>仅 no_snapshot + fail 报告支持；现有冒烟用 standalone，distributed worker 的事务与崩溃恢复须另做集成验证</td></tr>
+  <tr><td>快照完成位点</td><td>第一条变更记录持久化前仍可能重放原快照；不要把 EOF 或 producer ack 当成已完成持久位点</td></tr>
+  <tr><td>大 CHANGES 窗口</td><td>task 仍将完整窗口保存在堆中；快照批次限制不约束增量窗口大小</td></tr>
+  <tr><td>DDL 与不可追踪窗口</td><td>列清单只在启动时加载；DDL 后需重启。resnapshot 不能重建丢失位置后的删除，可能需要下游对账</td></tr>
+  <tr><td>驱动与元数据</td><td>以 pom.xml 中的版本及真实驱动测试为准；权威列清单继续使用 information_schema</td></tr>
+  <tr><td>净变更模式</td><td>未提供 source.netchanges 开关；若引入，需先验证排序、更新对与墓碑语义</td></tr>
+</table></div>
 
 <footer>
   相关文档：《StarRocks CDC Source Connector 使用指南》（<code>doc/StarRocks-CDC-Source-Connector-HowTo.zh.html</code>）、集成冒烟说明（<code>src/test/integration/README.md</code>）。

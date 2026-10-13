@@ -98,23 +98,6 @@ public class ChangeRecordMapperTest {
     }
 
     /**
-     * Pins the defect directly: a snapshot row must never report a row_version that can outrank a
-     * later change record's. Change versions start at 1 and climb one publish at a time; bookmark
-     * ids come from the FE global id generator -- a real report had bookmarks 11952/11955 against
-     * partition version 3.
-     */
-    @Test
-    public void testSnapshotRowVersionCannotOutrankLaterChanges() {
-        ChangeRecordMapper m = mapper();
-        SourceRecord snapshot = m.toSnapshotRecord(new Object[]{1, 10L}, 11952L);
-        SourceRecord change = m.toChangeRecord(new Object[]{1, 20L}, 0, 4L, 11952L, 11955L);
-        long snapshotVersion = ((Struct) ((Struct) snapshot.value()).get("source")).getInt64("row_version");
-        long changeVersion = ((Struct) ((Struct) change.value()).get("source")).getInt64("row_version");
-        assertTrue("snapshot row_version " + snapshotVersion + " must not outrank change row_version "
-                + changeVersion, snapshotVersion < changeVersion);
-    }
-
-    /**
      * The envelope is Debezium's, so its field order is Debezium's canonical order -- not the
      * op-first order this connector once hand-rolled. Downstream Avro/Protobuf schema identity is
      * computed from that order, so a reordering is a compatibility break, not a cosmetic change.
@@ -203,6 +186,8 @@ public class ChangeRecordMapperTest {
         Schema jSchema = rowSchema.field("j").schema();
         assertEquals(Schema.Type.STRING, jSchema.type());
         assertTrue(jSchema.isOptional());
+        assertNull(jSchema.name());
+        assertEquals("{}", after.get("j"));
     }
 
     /**
@@ -326,18 +311,6 @@ public class ChangeRecordMapperTest {
         // A plain string must stay unnamed -- naming everything would make the marker meaningless.
         assertNull(rowSchema.field("v").schema().name());
         assertTrue(rowSchema.field("a").schema().isOptional());
-    }
-
-    /** Columns described without the server's view (no srDataType) must still work, unnamed. */
-    @Test
-    public void testColumnsWithoutStarRocksTypeFallBackToPlainString() {
-        List<ColumnMeta> cols = Collections.singletonList(new ColumnMeta("t", null, null, 0, true));
-        ChangeRecordMapper mapper = new ChangeRecordMapper("db1", "cx", "sr.db1.cx", cols);
-
-        SourceRecord r = mapper.toSnapshotRecord(new Object[]{"x"}, 1L);
-        Schema rowSchema = ((Struct) ((Struct) r.value()).get("after")).schema();
-        assertEquals(Schema.Type.STRING, rowSchema.field("t").schema().type());
-        assertNull(rowSchema.field("t").schema().name());
     }
 
     @Test

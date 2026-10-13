@@ -31,12 +31,10 @@ import org.junit.Before;
 import org.junit.Test;
 
 import java.sql.SQLException;
-import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.Deque;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -404,7 +402,11 @@ public class StarRocksCdcSourceTaskTest {
             assertFalse(task.tables.get(0).snapshotDone);
         }
 
+        // A mutation advances the head while the cursor is closed. Retry must stay at 100.
+        fake.enqueueHead("orders", 101L);
         assertEquals(2, task.poll().size()); // Replays the first batch under at-least-once delivery.
+        assertEquals(Arrays.asList(100L, 100L), fake.openedSnapshots);
+        assertEquals(1, fake.createdBookmarks.size());
         assertEquals(1, fake.snapshotCursorCloses);
         assertEquals(2, fake.snapshotCalls);
         assertEquals(1, task.poll().size());
@@ -511,8 +513,7 @@ public class StarRocksCdcSourceTaskTest {
 
     // ------------------------------------------------------------------
     // Invariant 1: a bookmark is released only once commit() has authorized it, and commit()
-    // authorizes strictly below the ack watermark as it stood at the PREVIOUS commit() -- one whole
-    // commit cycle behind, so the fence can never be ahead of what the last flush made durable.
+    // authorizes only bookmarks strictly below the durable offset. SQL runs on the next poll.
     // ------------------------------------------------------------------
 
     private static long bookmarkOf(SourceRecord r) {
@@ -549,41 +550,6 @@ public class StarRocksCdcSourceTaskTest {
         }
     }
 
-    /**
-     * Acknowledgement order cannot matter, because acknowledgement no longer fences anything.
-     * Connect commits the longest acked <em>prefix</em> and also calls {@code commitRecord} for
-     * records it dropped, so any watermark derived from acks is an upper bound on durability --
-     * releasing against it unpins the bookmark a restart resumes from.
-     */
-    @Test
-    public void testReleaseFollowsTheFlushNotTheWindowOrder() throws Exception {
-        fake.enqueueHead("orders", 100L);
-        task.start(baseProps());
-        task.poll();
-
-        fake.enqueueHead("orders", 101L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 10L}, 0, 5001L));
-        List<SourceRecord> first = task.poll();
-        fake.enqueueHead("orders", 102L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 20L}, 0, 5002L));
-        List<SourceRecord> second = task.poll();
-        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
-
-        // The later window's callback lands first, and nothing is flushed.
-        task.commit();
-        pollToFlushReleases();
-        task.commit();
-        pollToFlushReleases();
-        assertTrue("acks released " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
-        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
-
-        // Only the flushed position moves the fence, and it releases strictly below itself.
-        flushOffset("orders", 102L);
-        task.commit();
-        pollToFlushReleases();
-        assertEquals(Collections.singletonList(102L), liveBookmarksOf(task));
-    }
-
     @Test
     public void testFailedReleaseIsRetriedOnTheNextPoll() throws Exception {
         fake.enqueueHead("orders", 100L);
@@ -618,25 +584,14 @@ public class StarRocksCdcSourceTaskTest {
         task.poll();
     }
 
-    private static boolean warnedPollOutpacesLeaseOf(StarRocksCdcSourceTask task) throws Exception {
-        java.lang.reflect.Field tablesField = StarRocksCdcSourceTask.class.getDeclaredField("tables");
-        tablesField.setAccessible(true);
-        Object state = ((List<?>) tablesField.get(task)).get(0);
-        java.lang.reflect.Field f = state.getClass().getDeclaredField("warnedPollOutpacesLease");
-        f.setAccessible(true);
-        return f.getBoolean(state);
+    private static boolean warnedPollOutpacesLeaseOf(StarRocksCdcSourceTask task) {
+        return task.tables.get(0).warnedPollOutpacesLease;
     }
 
-    private static List<Long> liveBookmarksOf(StarRocksCdcSourceTask task, String table) throws Exception {
-        java.lang.reflect.Field f = StarRocksCdcSourceTask.class.getDeclaredField("tables");
-        f.setAccessible(true);
-        for (Object st : (List<?>) f.get(task)) {
-            java.lang.reflect.Field nameField = st.getClass().getDeclaredField("table");
-            nameField.setAccessible(true);
-            if (table.equals(nameField.get(st))) {
-                java.lang.reflect.Field live = st.getClass().getDeclaredField("liveBookmarks");
-                live.setAccessible(true);
-                return new ArrayList<>((Deque<Long>) live.get(st));
+    private static List<Long> liveBookmarksOf(StarRocksCdcSourceTask task, String table) {
+        for (StarRocksCdcSourceTask.TableState state : task.tables) {
+            if (table.equals(state.table)) {
+                return new ArrayList<>(state.liveBookmarks);
             }
         }
         throw new AssertionError("no TableState for " + table);
@@ -646,94 +601,51 @@ public class StarRocksCdcSourceTaskTest {
         return new ArrayList<>(task.tables.get(0).liveBookmarks);
     }
 
-    /**
-     * A release is fenced by what Connect made durable, not by what was acked. Acking every record
-     * of both windows must release nothing while the offset store still names the older bookmark.
-     */
+    /** Acks alone cannot release bookmarks; a durable offset releases only older positions. */
     @Test
-    public void testReleaseWaitsForTheDurableOffsetNotTheAck() throws Exception {
+    public void testReleaseFollowsDurableOffsetsAndKeepsCurrentAndFutureBookmarks() throws Exception {
         fake.enqueueHead("orders", 100L);
         fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
         task.start(baseProps());
-        List<SourceRecord> b1Records = task.poll();
+        SourceRecord snapshot = task.poll().get(0);
+        List<SourceRecord> changes = new ArrayList<>();
+        for (long head = 101L; head <= 103L; head++) {
+            fake.enqueueHead("orders", head);
+            fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, head}, 0, head));
+            changes.addAll(task.poll());
+        }
 
-        fake.enqueueHead("orders", 101L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
-        List<SourceRecord> b2Records = task.poll();
-        assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
-
-        // Everything acked, nothing flushed: the durable position is still wherever it was.
+        // No flush, then out-of-order acknowledgements: neither authorizes a release.
         task.commit();
         pollToFlushReleases();
-        assertTrue("acks alone released " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
-        assertEquals(Arrays.asList(100L, 101L), liveBookmarksOf(task));
-
-        // Connect flushes 101; only now is 100 unreachable by any restart.
-        flushOffset("orders", 101L);
+        task.commitRecord(changes.get(2));
+        task.commitRecord(snapshot);
+        task.commitRecord(changes.get(0));
+        task.commitRecord(changes.get(1));
         task.commit();
         pollToFlushReleases();
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
-        assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
-
-        // 101 is the durable position itself and stays pinned however often commit runs.
-        task.commit();
-        pollToFlushReleases();
-        task.commit();
-        pollToFlushReleases();
-        assertEquals(Collections.singletonList(101L), liveBookmarksOf(task));
-    }
-
-    /**
-     * Safety property: whatever else commit() releases, it must never release the bookmark the
-     * durably-committed offset names -- releasing it unpins that version for vacuum, and a restart
-     * then resumes from a base StarRocks can no longer read ("bookmark N not found"), which
-     * {@code policy=fail} turns into a permanently dead task and {@code policy=resnapshot} into a
-     * silent full re-read. Commits are repeated here so the assertions bite after the one-cycle
-     * release lag has been paid off, not merely because the fence had not caught up yet.
-     */
-    @Test
-    public void testCommitNeverReleasesTheDurableBookmark() throws Exception {
-        // Four bookmarks live, acked only through B2=101: B1=100 is releasable, B2 is not.
-        fake.enqueueHead("orders", 100L); // B1
-        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
-        task.start(baseProps());
-        List<SourceRecord> b1Records = task.poll();
-
-        fake.enqueueHead("orders", 101L); // B2
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
-        List<SourceRecord> b2Records = task.poll();
-
-        fake.enqueueHead("orders", 102L); // B3
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
-        task.poll();
-
-        fake.enqueueHead("orders", 103L); // B4
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{3, 300L}, 0, 5003L));
-        task.poll();
-
+        assertTrue(fake.releasedBookmarks.isEmpty());
         assertEquals(Arrays.asList(100L, 101L, 102L, 103L), liveBookmarksOf(task));
 
-        // Kafka Connect confirmed records up to and including B2's; B3/B4's are still in flight.
         flushOffset("orders", 101L);
-
-        // First commit only arms the fence at the ack watermark; the second is the one that acts.
         task.commit();
-        pollToFlushReleases();
-        task.commit();
-        pollToFlushReleases();
-
-        assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
-        assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
-
-        // Repeating commit() must not start releasing the acked bookmark either, however many
-        // further cycles run with no newer ack.
-        task.commit();
-        pollToFlushReleases();
-        task.commit();
+        assertTrue("commit must not issue release SQL", fake.releasedBookmarks.isEmpty());
         pollToFlushReleases();
         assertEquals(Collections.singletonList("db1.orders:100:kc:c1"), fake.releasedBookmarks);
         assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
+        for (int cycle = 0; cycle < 3; cycle++) {
+            task.commit();
+            pollToFlushReleases();
+        }
+        assertEquals("the durable and future bookmarks remain pinned", 1, fake.releasedBookmarks.size());
+        assertEquals(Arrays.asList(101L, 102L, 103L), liveBookmarksOf(task));
 
+        flushOffset("orders", 103L);
+        task.commit();
+        pollToFlushReleases();
+        assertEquals(Arrays.asList("db1.orders:100:kc:c1", "db1.orders:101:kc:c1",
+                "db1.orders:102:kc:c1"), fake.releasedBookmarks);
+        assertEquals(Collections.singletonList(103L), liveBookmarksOf(task));
     }
 
     /**
@@ -869,55 +781,53 @@ public class StarRocksCdcSourceTaskTest {
         assertFalse(deleteRecord == tombstone);
     }
 
+    /** Replaying the original snapshot keeps deletes between that version and restart visible. */
     @Test
-    public void testCommitReleasesNothingBeforeAnyFlush() throws Exception {
-        fake.enqueueHead("orders", 100L);
-        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
-        task.start(baseProps());
-        task.poll();
+    public void testSnapshotRestartPreservesDeletesWithAndWithoutFlushedOffset() throws Exception {
+        for (boolean flushed : new boolean[]{false, true}) {
+            FakeCdcClient client = new FakeCdcClient();
+            client.setColumns("orders", ORDERS_COLS);
+            client.enqueueHead("orders", 100L);
+            client.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}, new Object[]{2, 200L}));
+            Map<String, String> props = baseProps();
+            props.put(StarRocksCdcSourceConfig.SNAPSHOT_BATCH_SIZE, "1");
+            Map<Map<String, String>, Map<String, Object>> store = new HashMap<>();
+            StarRocksCdcSourceTask first = newBareTask(client);
+            first.initialize(contextReading(store));
+            first.start(props);
+            SourceRecord delivered = first.poll().get(0);
+            assertEquals(1, ((Struct) ((Struct) delivered.value()).get("after")).get("id"));
+            if (flushed) {
+                store.put(OffsetState.sourcePartition("db1", "orders"),
+                        new HashMap<>(delivered.sourceOffset()));
+            }
+            first.stop();
 
-        fake.enqueueHead("orders", 101L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 5001L));
-        task.poll();
-
-        fake.enqueueHead("orders", 102L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{2, 200L}, 0, 5002L));
-        task.poll();
-
-        // No record has been acked, so no offset is known to be durable and nothing may be dropped,
-        // however many bookmarks have piled up -- and however many commit cycles run, so that this
-        // pins the no-ack rule itself rather than just the one-cycle release lag.
-        for (int cycle = 0; cycle < 3; cycle++) {
-            task.commit();
-            pollToFlushReleases();
+            client.setHeldBookmarks("orders", 100L);
+            // Row 1 is gone at head 101, but remains in the snapshot at 100.
+            client.enqueueHead("orders", 101L);
+            client.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L},
+                    ChangeRecordMapper.CHANGE_TYPE_DELETE, 10L));
+            StarRocksCdcSourceTask restarted = newBareTask(client);
+            restarted.initialize(contextReading(store));
+            restarted.start(props);
+            try {
+                SourceRecord replay = restarted.poll().get(0);
+                assertEquals(100L, bookmarkOf(replay));
+                assertEquals(delivered.key(), replay.key());
+                assertEquals(2, ((Struct) ((Struct) restarted.poll().get(0).value()).get("after")).get("id"));
+                assertNull(restarted.poll()); // EOF
+                assertEquals(Arrays.asList(100L, 100L), client.openedSnapshots);
+                assertEquals(1, client.createdBookmarks.size());
+                SourceRecord deletion = restarted.poll().get(0);
+                assertEquals(Collections.singletonList("100_101"), client.streamedWindows);
+                assertEquals("d", ((Struct) deletion.value()).getString("op"));
+                assertEquals(delivered.key(), deletion.key());
+                assertTrue(client.releasedBookmarks.isEmpty());
+            } finally {
+                restarted.stop();
+            }
         }
-
-        assertTrue("released " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
-        assertEquals(Arrays.asList(100L, 101L, 102L), liveBookmarksOf(task));
-    }
-
-    /**
-     * A crash mid-snapshot leaves {@code snapshot_done=false} durable. Resuming from the bookmark it
-     * names would skip whatever rows never made it out -- a silent gap. The table must go back to
-     * fresh and redo the snapshot whole, duplicates and all.
-     */
-    @Test
-    public void testRestoringAHalfDeliveredSnapshotRedoesItWhole() throws Exception {
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, false));
-        task.start(baseProps());
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-
-        fake.enqueueHead("orders", 11955L);
-        fake.enqueueSnapshotRows("orders", rows(new Object[]{1, 100L}));
-
-        List<SourceRecord> out = task.poll();
-
-        assertEquals("the snapshot must be taken again", 1, fake.snapshotCalls);
-        assertNotNull(out);
-        assertTrue("no CHANGES window may be opened from a position that was never durable",
-                fake.streamedWindows.isEmpty());
-        assertTrue("nothing may be released: the restored id was never held",
-                fake.releasedBookmarks.isEmpty());
     }
 
     /**
@@ -947,24 +857,6 @@ public class StarRocksCdcSourceTaskTest {
         assertTrue("no CHANGES window may be opened from -1", fake.streamedWindows.isEmpty());
     }
 
-    @Test
-    public void testRestartResumesFromCommittedOffset() throws Exception {
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, true));
-        task.start(baseProps());
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
-
-        fake.enqueueHead("orders", 11955L);
-        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 9001L));
-
-        List<SourceRecord> out = task.poll();
-
-        assertNotNull(out);
-        assertEquals(1, out.size());
-        assertTrue(fake.streamedWindows.contains("11952_11955"));
-        assertEquals(0, fake.snapshotCalls);
-        assertTrue(fake.releasedBookmarks.isEmpty());
-    }
-
     /**
      * A restart used to orphan the bookmark it resumed from: restoreOffset set committedBookmark
      * but never put the id back in the retention deque, so no commit cycle could reach it and it
@@ -976,16 +868,18 @@ public class StarRocksCdcSourceTaskTest {
     public void testRestartedBookmarkIsEventuallyReleased() throws Exception {
         durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(11952L, true));
         task.start(baseProps());
-        StarRocksCdcSourceTask.TableState t = task.tables.get(0);
 
         // Retained rather than dropped on the floor.
         assertEquals(Collections.singletonList(11952L), liveBookmarksOf(task));
 
         fake.enqueueHead("orders", 11955L);
         fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 100L}, 0, 9001L));
-        task.poll();
+        List<SourceRecord> out = task.poll();
+        assertEquals(1, out.size());
+        assertEquals(Collections.singletonList("11952_11955"), fake.streamedWindows);
+        assertEquals(0, fake.snapshotCalls);
 
-        // Acked but not flushed: the resumed base is still the durable position and must stay.
+        // Delivered but not flushed: the resumed base is still the durable position and must stay.
         task.commit();
         pollToFlushReleases();
         assertTrue("released too early: " + fake.releasedBookmarks, fake.releasedBookmarks.isEmpty());
@@ -1029,7 +923,7 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(Collections.singletonList(130L), liveBookmarksOf(task));
     }
 
-    /** With no durable offset the table is fresh, but the leftovers are still taken back and released. */
+    /** Recovered references stay pinned until the replay's subsequent change position is durable. */
     @Test
     public void testLeftoversOfAFreshTableAreReleasedOnceTheSnapshotIsDurable() throws Exception {
         fake.setHeldBookmarks("orders", 90L, 95L);
@@ -1040,9 +934,15 @@ public class StarRocksCdcSourceTaskTest {
 
         task.poll();
         assertEquals(1, fake.snapshotCalls);
-        assertEquals(Arrays.asList(90L, 95L, 100L), liveBookmarksOf(task));
+        assertEquals(Collections.singletonList(90L), fake.openedSnapshots);
+        assertEquals(Arrays.asList(90L, 95L), liveBookmarksOf(task));
 
-        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(90L, false));
+        task.commit();
+        assertTrue(fake.releasedBookmarks.isEmpty());
+        fake.enqueueChanges("orders", new FakeCdcClient.ChangeRow(new Object[]{1, 200L}, 0, 1L));
+        task.poll();
+        flushOffset("orders", 100L);
         task.commit();
         pollToFlushReleases();
         assertEquals(Arrays.asList("db1.orders:90:kc:c1", "db1.orders:95:kc:c1"), fake.releasedBookmarks);
@@ -1071,6 +971,39 @@ public class StarRocksCdcSourceTaskTest {
         fake.enqueueHead("orders", 101L);
         fake.failNextChangesWithNonTrackable("orders");
         task.poll();
+    }
+
+    @Test
+    public void testUnavailableSnapshotBookmarkUsesConfiguredPolicy() throws Exception {
+        for (String policy : new String[]{"fail", "resnapshot"}) {
+            FakeCdcClient client = new FakeCdcClient();
+            client.snapshotFailureByTable.put("orders", new SQLException("bookmark 100 not found"));
+            durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
+            StarRocksCdcSourceTask restored = newTask(client);
+            Map<String, String> props = baseProps();
+            props.put(StarRocksCdcSourceConfig.NONTRACKABLE_POLICY, policy);
+            restored.start(props);
+            try {
+                if ("fail".equals(policy)) {
+                    try {
+                        restored.poll();
+                        fail("unavailable snapshot must not silently advance");
+                    } catch (ConnectException expected) {
+                        assertTrue(expected.getMessage(), expected.getMessage().contains("bookmark 100"));
+                    }
+                    assertTrue(client.createdBookmarks.isEmpty());
+                } else {
+                    assertNull(restored.poll());
+                    assertEquals(-1L, restored.tables.get(0).snapshotBookmark);
+                    client.enqueueHead("orders", 101L);
+                    client.enqueueSnapshotRows("orders", rows(new Object[]{2, 200L}));
+                    assertEquals(101L, bookmarkOf(restored.poll().get(0)));
+                    assertEquals(Arrays.asList(100L, 101L), client.openedSnapshots);
+                }
+            } finally {
+                restored.stop();
+            }
+        }
     }
 
     /**
@@ -1595,26 +1528,6 @@ public class StarRocksCdcSourceTaskTest {
     // lasted source.poll.retry.timeout.ms.
     // ------------------------------------------------------------------
 
-    /**
-     * A transient FE failure must not kill the task. Connect retries only RetriableException;
-     * anything else is logged as "will not recover until manually restarted", which would turn
-     * every FE restart and leader failover into an operator page.
-     */
-    @Test
-    public void testTransientSqlFailureIsRetriableNotFatal() throws Exception {
-        fake.enqueueHead("orders", 100L);
-        task.start(baseProps());
-        task.poll();
-
-        fake.bookmarkCreateFailure = new SQLException("Communications link failure");
-        try {
-            task.poll();
-            fail("expected the poll to surface the failure");
-        } catch (RetriableException expected) {
-            assertTrue(expected.getMessage(), expected.getMessage().contains("orders"));
-        }
-    }
-
     /** Connect re-polls at once after a RetriableException, so the pause has to be ours. */
     @Test
     public void testRetriableFailureWaitsAPollIntervalBeforeThrowing() throws Exception {
@@ -1648,6 +1561,7 @@ public class StarRocksCdcSourceTaskTest {
             paced.poll();
             fail("expected the poll to surface the failure");
         } catch (RetriableException expected) {
+            assertTrue(expected.getMessage(), expected.getMessage().contains("orders"));
             assertEquals(Collections.singletonList(250L), sleeps);
         }
     }
@@ -2136,29 +2050,34 @@ public class StarRocksCdcSourceTaskTest {
         assertEquals(130L, task.tables.get(0).committedBookmark);
     }
 
-    /** With a snapshot to redo, held references are only adopted for release, never taken as the position. */
+    /** A durable unfinished position takes precedence over both older and newer held bookmarks. */
     @Test
-    public void testInitialModeIgnoresHeldBookmarksForItsPosition() throws Exception {
-        fake.setHeldBookmarks("orders", 100L, 130L);
+    public void testUnfinishedSnapshotOffsetOutranksHeldBookmarks() throws Exception {
+        fake.setHeldBookmarks("orders", 90L, 130L);
+        durableOffsets.put(OffsetState.sourcePartition("db1", "orders"), OffsetState.sourceOffset(100L, false));
         task.start(baseProps());
         assertFalse(task.tables.get(0).snapshotDone);
         task.poll();
         assertEquals(1, fake.snapshotCalls);
+        assertEquals(Collections.singletonList(100L), fake.openedSnapshots);
+        assertTrue(fake.createdBookmarks.isEmpty());
     }
 
     /** With no durable offset, an unreadable reference list must not silently skip earlier changes. */
     @Test
-    public void testAnUnreadableReferenceListUnderNoSnapshotFailsStart() throws Exception {
-        Map<String, String> props = baseProps();
-        props.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, StarRocksCdcSourceConfig.SNAPSHOT_MODE_NO_SNAPSHOT);
+    public void testAnUnreadableReferenceListWithoutPositionFailsStart() throws Exception {
         SQLException unavailable = new SQLException("Unknown table 'table_bookmark_references'");
         fake.heldBookmarksFailure = unavailable;
-        try {
-            task.start(props);
-            fail("expected startup to fail rather than lose the position");
-        } catch (ConnectException e) {
-            assertTrue(e.getMessage(), e.getMessage().contains("db1.orders"));
-            assertSame(unavailable, e.getCause());
+        for (String mode : new String[]{"initial", "no_snapshot"}) {
+            Map<String, String> props = baseProps();
+            props.put(StarRocksCdcSourceConfig.SNAPSHOT_MODE, mode);
+            try {
+                newTask(fake).start(props);
+                fail("expected startup to fail rather than lose the position");
+            } catch (ConnectException e) {
+                assertTrue(e.getMessage(), e.getMessage().contains("db1.orders"));
+                assertSame(unavailable, e.getCause());
+            }
         }
         assertTrue("startup must not create a fresh bookmark", fake.createdBookmarks.isEmpty());
     }

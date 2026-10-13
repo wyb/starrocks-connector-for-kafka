@@ -29,23 +29,13 @@ import static org.junit.Assert.*;
 
 public class OffsetStateTest {
 
-    /**
-     * Every snapshot row carries {@code snapshot_done=false}; a reader that accepted any non-null
-     * value would resume a half-delivered snapshot instead of redoing it, which is the one gap the
-     * marker exists to prevent.
-     */
-    @Test
-    public void testSnapshotDoneFalseIsNotReadAsDone() {
-        assertFalse(OffsetState.fromMap(OffsetState.sourceOffset(11955L, false)).snapshotDone);
-        assertEquals(11955L, OffsetState.fromMap(OffsetState.sourceOffset(11955L, false)).bookmarkId);
-    }
-
     @Test
     public void testRoundTrip() {
-        Map<String, Object> m = OffsetState.sourceOffset(11955L, true);
-        OffsetState s = OffsetState.fromMap(m);
-        assertEquals(11955L, s.bookmarkId);
-        assertTrue(s.snapshotDone);
+        for (boolean done : new boolean[]{false, true}) {
+            OffsetState s = OffsetState.fromMap(OffsetState.sourceOffset(11955L, done));
+            assertEquals(11955L, s.bookmarkId);
+            assertEquals(done, s.snapshotDone);
+        }
 
         Map<String, String> partition = OffsetState.sourcePartition("db1", "t");
         assertEquals(2, partition.size());

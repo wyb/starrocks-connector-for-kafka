@@ -82,6 +82,7 @@ final class FakeCdcClient implements CdcClient {
     final List<String> createHolders = new ArrayList<>();
     final List<String> releaseHolders = new ArrayList<>();
     final List<String> streamedWindows = new ArrayList<>();
+    final List<Long> openedSnapshots = new ArrayList<>();
     int snapshotCalls = 0;
     volatile int snapshotCursorCloses = 0;
     CountDownLatch snapshotCursorClosed;
@@ -202,6 +203,7 @@ final class FakeCdcClient implements CdcClient {
     @Override
     public SnapshotCursor openSnapshot(String db, String table, List<ColumnMeta> cols, long bookmarkId) {
         snapshotCalls++;
+        openedSnapshots.add(bookmarkId);
         if (snapshotOpenEntered != null) {
             snapshotOpenEntered.countDown();
             try {
@@ -218,7 +220,7 @@ final class FakeCdcClient implements CdcClient {
             private volatile boolean closed;
 
             @Override
-            public Object[] next() throws SQLException {
+            public Object[] next() throws SQLException, NonTrackableException {
                 if (snapshotNextEntered != null) {
                     snapshotNextEntered.countDown();
                     try {
@@ -236,6 +238,10 @@ final class FakeCdcClient implements CdcClient {
                 }
                 SQLException scripted = snapshotFailureByTable.remove(table);
                 if (scripted != null) {
+                    NonTrackableException nonTrackable = NonTrackableException.classify(scripted);
+                    if (nonTrackable != null) {
+                        throw nonTrackable;
+                    }
                     throw scripted;
                 }
                 return null;

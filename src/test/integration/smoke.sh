@@ -202,7 +202,7 @@ echo "UPDATE: op=d(v=20) precedes op=c(v=200) OK"
 grep '"op":"d"' "$CONSUMED" | grep -q '"v":30[,}]' || fail "DELETE: missing op=d for id=3 (v=30)"
 echo "DELETE: op=d OK"
 
-# The column list now comes only from information_schema, so both transports must agree on it.
+# The column list now comes only from information_schema, so all transports must agree on it.
 # BOOLEAN is the case that used to diverge: FE names its DATA_TYPE "tinyint" and only its
 # COLUMN_TYPE "tinyint(1)", so keying off the name alone yields int8 here and boolean there.
 grep -q '"flag":true' "$CONSUMED" \
@@ -224,11 +224,11 @@ grep -q '"transaction"' "$CONSUMED" \
   || fail "records carry no transaction field — the envelope is not the Debezium one"
 echo "Debezium envelope shape confirmed on the wire"
 
-# A DATE read in the worker's local zone is not a wrong value but a rejected record: Connect's
-# Date logical type demands UTC midnight and the converter throws, so the row never arrives.
+# DATE and DATETIME are Connect strings preserving the stored calendar fields.
+# Check exact values so timezone shifts or lost microseconds cannot pass.
 grep -q "\"d\":\"$TZ_EXPECT_DATE\"" "$CONSUMED" \
   || { docker compose exec -T kafka grep -iE "DataException|Date type" /tmp/connect.log | tail -5 || true
-       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\" (got: $(grep -o '\"d\":[^,}]*' "$CONSUMED" | head -1)); a shifted day means a non-UTC calendar, no value means the converter rejected the record"; }
+       fail "DATE $TZ_DATE should arrive as the string \"$TZ_EXPECT_DATE\" (got: $(grep -o '\"d\":[^,}]*' "$CONSUMED" | head -1)); a different date means the stored calendar fields were not preserved; inspect the record and worker log"; }
 grep -q "\"ts\":\"$TZ_EXPECT_DATETIME\"" "$CONSUMED" \
   || fail "DATETIME $TZ_DATETIME should arrive as the string \"$TZ_EXPECT_DATETIME\" (got: $(grep -o '\"ts\":[^,}]*' "$CONSUMED" | head -1)); a whole-hour shift means the worker's timezone leaked in, a missing fraction means the microseconds were cut"
 echo "temporal columns OK: DATE -> \"$TZ_EXPECT_DATE\", DATETIME -> \"$TZ_EXPECT_DATETIME\""

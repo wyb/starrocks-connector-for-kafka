@@ -23,11 +23,14 @@ package com.starrocks.connector.kafka.source;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.io.IOException;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.SQLNonTransientConnectionException;
+import java.sql.SQLRecoverableException;
+import java.sql.SQLTransientConnectionException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.List;
@@ -69,18 +72,33 @@ final class FeConnection implements AutoCloseable {
 
     private final StarRocksCdcSourceConfig config;
     private final List<String> urls;
+    private final ConnectionFactory connectionFactory;
     private int urlIndex;
     private volatile Connection conn;
     private volatile boolean closed;
 
     FeConnection(StarRocksCdcSourceConfig config) {
+        this(config, DriverManager::getConnection);
+    }
+
+    @FunctionalInterface
+    interface ConnectionFactory {
+        Connection open(String url, Properties props) throws SQLException;
+    }
+
+    FeConnection(StarRocksCdcSourceConfig config, ConnectionFactory connectionFactory) {
+        this(config, connectionFactory, 0);
+    }
+
+    FeConnection(StarRocksCdcSourceConfig config, ConnectionFactory connectionFactory, int startUrlIndex) {
         this.config = config;
+        this.connectionFactory = connectionFactory;
         this.urls = parseUrls(config.jdbcUrl());
         if (this.urls.isEmpty()) {
             throw new IllegalArgumentException(
                     "No usable host found in " + StarRocksCdcSourceConfig.JDBC_URL + ": " + config.jdbcUrl());
         }
-        this.urlIndex = 0;
+        this.urlIndex = startUrlIndex;
         String driverClass = driverClassFor(urls.get(0));
         registerDriver(driverClass, artifactFor(driverClass));
     }
@@ -89,7 +107,42 @@ final class FeConnection implements AutoCloseable {
         return !urls.isEmpty() && urls.get(0).startsWith(ARROW_FLIGHT_SCHEME_PREFIX);
     }
 
+    int urlIndex() {
+        return urlIndex;
+    }
+
+    /** Flight JDBC can throw unchecked transport errors from ResultSet.next() as well as queries. */
+    SQLException asSqlException(Exception failure) {
+        if (failure instanceof SQLException) {
+            return (SQLException) failure;
+        }
+        if (isArrowFlight() && FlightFailures.isFlightFailure(failure)) {
+            return new SQLException(failure.getMessage(), failure);
+        }
+        // Programming errors (including consumer failures) must not enter the SQL retry loop.
+        throw (RuntimeException) failure;
+    }
+
     Connection get() throws SQLException {
+        // Metadata and dedicated snapshot connections also need failover before any bookmark
+        // statement runs. Visit each endpoint once, without nesting executeOnLeader's retries.
+        SQLException last = null;
+        for (int i = 0; i < urls.size(); i++) {
+            try {
+                return getCurrent();
+            } catch (SQLException | RuntimeException failure) {
+                SQLException e = asSqlException(failure);
+                if (closed || Thread.currentThread().isInterrupted() || !isConnectionFailure(e)) {
+                    throw e;
+                }
+                last = e;
+                rotateAfterFailure("FE connection failed");
+            }
+        }
+        throw last;
+    }
+
+    private Connection getCurrent() throws SQLException {
         if (closed) {
             throw new SQLException("FE connection is closed");
         }
@@ -116,8 +169,8 @@ final class FeConnection implements AutoCloseable {
 
     /**
      * Runs a leader-only statement, returning its single-row single-column result (null if empty).
-     * A "must run on the FE leader" failure rotates to the next URL; each is tried at most once per
-     * lap. Anything else is attempted up to {@code maxRetries()} times on the same URL.
+     * Leader redirects and connection failures move to the next URL. Other SQL failures, and
+     * connection failures with only one configured URL, keep the bounded per-URL retry budget.
      */
     String executeOnLeader(String sql) throws SQLException {
         int totalUrls = urls.size();
@@ -127,19 +180,21 @@ final class FeConnection implements AutoCloseable {
             boolean redirected = false;
             for (int attempt = 0; attempt < attempts; attempt++) {
                 try {
-                    Connection c = get();
+                    Connection c = getCurrent();
                     try (Statement stmt = c.createStatement();
                          ResultSet rs = stmt.executeQuery(sql)) {
                         return rs.next() ? rs.getString(1) : null;
                     }
-                } catch (SQLException e) {
+                } catch (SQLException | RuntimeException failure) {
+                    SQLException e = asSqlException(failure);
+                    if (closed || Thread.currentThread().isInterrupted()) {
+                        throw e;
+                    }
                     lastEx = e;
-                    if (isLeaderRedirect(e)) {
-                        closeQuietly();
-                        String from = urls.get(urlIndex);
-                        rotateUrl();
-                        LOG.warn("Bookmark function must run on the FE leader; rotating from {} to {}",
-                                from, urls.get(urlIndex));
+                    boolean leaderRedirect = isLeaderRedirect(e);
+                    if (leaderRedirect || (totalUrls > 1 && isConnectionFailure(e))) {
+                        rotateAfterFailure(leaderRedirect ? "Bookmark function must run on the FE leader"
+                                : "FE connection failed");
                         redirected = true;
                         break;
                     }
@@ -157,8 +212,52 @@ final class FeConnection implements AutoCloseable {
     }
 
     void closeIfBroken(SQLException e) {
-        if (e instanceof SQLNonTransientConnectionException) {
-            closeQuietly();
+        // A failed get() has already visited the endpoints and did not publish a connection.
+        // A failure on an established connection must move the next poll off that endpoint.
+        if (conn != null && isConnectionFailure(e)) {
+            rotateAfterFailure("FE connection failed");
+        }
+    }
+
+    private boolean isConnectionFailure(SQLException e) {
+        for (Throwable cause = e; cause != null; cause = cause.getCause()) {
+            if (cause instanceof SQLNonTransientConnectionException
+                    || cause instanceof SQLTransientConnectionException
+                    || cause instanceof SQLRecoverableException || cause instanceof IOException) {
+                return true;
+            }
+            if (cause instanceof SQLException) {
+                String state = ((SQLException) cause).getSQLState();
+                if (state != null && state.startsWith("08")) {
+                    return true;
+                }
+            }
+            if (isArrowFlight() && FlightFailures.isConnectionFailure(cause)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** Loaded only on the Flight path, so MySQL workers do not require Arrow's Java release. */
+    private static final class FlightFailures {
+        static boolean isFlightFailure(Throwable failure) {
+            for (Throwable cause = failure; cause != null; cause = cause.getCause()) {
+                if (cause instanceof org.apache.arrow.flight.FlightRuntimeException) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static boolean isConnectionFailure(Throwable cause) {
+            if (!(cause instanceof org.apache.arrow.flight.FlightRuntimeException)) {
+                return false;
+            }
+            org.apache.arrow.flight.FlightStatusCode code =
+                    ((org.apache.arrow.flight.FlightRuntimeException) cause).status().code();
+            return code == org.apache.arrow.flight.FlightStatusCode.UNAVAILABLE
+                    || code == org.apache.arrow.flight.FlightStatusCode.TIMED_OUT;
         }
     }
 
@@ -167,8 +266,9 @@ final class FeConnection implements AutoCloseable {
         if (c != null) {
             try {
                 c.close();
-            } catch (SQLException ignored) {
-                // close() contract is silent per the interface
+            } catch (SQLException | RuntimeException e) {
+                // Flight cleanup can also throw unchecked exceptions after a stream disconnects.
+                LOG.debug("Failed to close FE connection", e);
             }
             conn = null;
         }
@@ -186,7 +286,7 @@ final class FeConnection implements AutoCloseable {
         props.setProperty("user", config.username());
         props.setProperty("password", config.password());
         props.setProperty("connectTimeout", String.valueOf(config.connectTimeoutMs()));
-        Connection c = DriverManager.getConnection(url, props);
+        Connection c = connectionFactory.open(url, props);
         if (pinsSession(url)) {
             try (Statement stmt = c.createStatement()) {
                 stmt.execute(SESSION_SETUP_SQL);
@@ -209,6 +309,13 @@ final class FeConnection implements AutoCloseable {
 
     private void rotateUrl() {
         urlIndex = (urlIndex + 1) % urls.size();
+    }
+
+    private void rotateAfterFailure(String reason) {
+        closeQuietly();
+        String from = urls.get(urlIndex);
+        rotateUrl();
+        LOG.warn("{}; rotating from {} to {}", reason, from, urls.get(urlIndex));
     }
 
     private static boolean isLeaderRedirect(SQLException e) {

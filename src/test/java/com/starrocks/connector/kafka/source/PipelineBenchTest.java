@@ -162,6 +162,31 @@ public class PipelineBenchTest {
     }
 
     @Test
+    public void reportUsesTheSameMedianForThroughputAndBookmarkLatency() {
+        long[] millis = {900, 100, 200};
+        double[] expected = {900, 500, 200};
+        PipelineBench.Report report = new PipelineBench.Report(false, PipelineBench.PipelineMode.READ);
+        for (int i = 0; i < millis.length; i++) {
+            PipelineBench.Sample sample = new PipelineBench.Sample();
+            sample.rows = 1000;
+            sample.wallNanos = millis[i] * 1000000;
+            report.add("orders", "snapshot", "mysql", sample);
+            String summary = Arrays.stream(report.render().split("\n"))
+                    .filter(line -> line.startsWith("orders")).findFirst().get();
+            String[] fields = summary.trim().split("\\s+");
+            assertEquals(expected[i], Double.parseDouble(fields[4]), 0);
+            assertEquals(Math.round(1000000 / expected[i]), Long.parseLong(fields[6]));
+
+            PipelineBench.Report latency = new PipelineBench.Report(false, PipelineBench.PipelineMode.READ);
+            long[] nanos = Arrays.stream(Arrays.copyOf(millis, i + 1)).map(ms -> ms * 1000000).toArray();
+            latency.latency("bookmark", "mysql", nanos);
+            String line = Arrays.stream(latency.render().split("\n"))
+                    .filter(row -> row.startsWith("bookmark")).findFirst().get();
+            assertEquals(expected[i], Double.parseDouble(line.split("p50\\s+")[1].split("\\s+")[0]), 0);
+        }
+    }
+
+    @Test
     public void readModeOnlyCountsDecodedRows() {
         try (PipelineBench.RowPipeline pipeline = new PipelineBench.RowPipeline(
                 "db", "orders", COLUMNS, true, PipelineBench.PipelineMode.READ)) {

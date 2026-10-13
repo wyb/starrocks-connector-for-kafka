@@ -42,7 +42,7 @@ abstract class ValueReader {
     /** A leaf of the raw tree -- an element, a map key or value, a struct field -- to the canonical scalar. */
     protected abstract Object leaf(ColumnType type, Object raw);
 
-    /** The recursion both transports share; Arrow handles its map-entry lists before calling here. */
+    /** Object-tree conversion; MySQL text and ADBC vectors have their own direct container readers. */
     protected Object readNested(ColumnType type, Object raw) {
         if (raw == null) {
             return null;
@@ -82,11 +82,15 @@ abstract class ValueReader {
         }
     }
 
-    /** The map key as the STRING the wire schema declares; binary keys use lowercase hex. */
+    /**
+     * The map key as the STRING the wire schema declares. NULL is encoded as {@code \N}; a
+     * non-null key starting with a backslash gains one extra backslash to prevent collisions.
+     * Binary keys use lowercase hex.
+     */
     protected final String keyText(ColumnType keyType, Object rawKey) {
         Object key = rawKey == null ? null : leaf(keyType, rawKey);
         if (key == null) {
-            throw new DataException("null map key in a " + keyType + "-keyed map");
+            return "\\N";
         }
         if (keyType.kind == ColumnType.Kind.BYTES) {
             byte[] bytes = as(byte[].class, key, keyType);
@@ -98,7 +102,8 @@ abstract class ValueReader {
             }
             return new String(hex);
         }
-        return String.valueOf(key);
+        String text = String.valueOf(key);
+        return text.startsWith("\\") ? "\\" + text : text;
     }
 
     protected List<?> asList(Object raw, ColumnType type) {

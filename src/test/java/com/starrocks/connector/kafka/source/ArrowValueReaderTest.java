@@ -38,7 +38,7 @@ import static org.junit.Assert.fail;
 
 /**
  * Feeds the reader the object shapes the Arrow Flight JDBC driver produces (verified against
- * flight-sql-jdbc-core 18.0.0) and checks the neutral value, then the assembled Connect value.
+ * the bundled Flight JDBC driver) and checks the neutral value, then the assembled Connect value.
  */
 public class ArrowValueReaderTest {
 

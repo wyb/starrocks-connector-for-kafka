@@ -33,7 +33,7 @@ import java.util.List;
 import java.util.Set;
 
 /**
- * Reads columns in declaration order from information_schema for both transports.
+ * Reads columns in declaration order from information_schema for all read transports.
  * Driver ResultSetMetaData cannot describe all Arrow Flight nested types reliably, so the
  * server's column metadata is authoritative.
  */
@@ -83,7 +83,8 @@ final class ColumnMetaReader {
                         result.size(), db, table, result);
                 return result;
             }
-        } catch (SQLException e) {
+        } catch (SQLException | RuntimeException failure) {
+            SQLException e = connection.asSqlException(failure);
             connection.closeIfBroken(e);
             throw e;
         }

@@ -80,7 +80,8 @@ public class SqlBuilderTest {
      *
      * <p>ORDINAL_POSITION ordering is load-bearing, not cosmetic: the column list it produces is
      * matched positionally against the projected result set by {@code JdbcRowReader#readRow}, so any other
-     * order silently reads every value into the wrong field.
+     * order silently reads every value into the wrong field. The same assertion pins DATA_TYPE,
+     * COLUMN_TYPE and COLUMN_KEY for type decoding, exportability and key selection.
      */
     @Test
     public void testColumnsMetaSqlSelectsOrderedByOrdinalPosition() {
@@ -88,29 +89,6 @@ public class SqlBuilderTest {
                         + " FROM information_schema.columns WHERE TABLE_SCHEMA = 'db1'"
                         + " AND TABLE_NAME = 't1' ORDER BY ORDINAL_POSITION",
                 SqlBuilder.columnsMetaSql("db1", "t1"));
-    }
-
-    /**
-     * DATA_TYPE and COLUMN_TYPE are different answers and both are needed: the first names the
-     * StarRocks type ("array", "hll") and is the only way to tell a complex or non-exportable
-     * column from a VARCHAR, the second carries the full nesting ("array&lt;int&gt;"). Dropping
-     * either one silently disables a guard downstream, so both are asserted by name.
-     */
-    @Test
-    public void testColumnsMetaSqlSelectsBothTypeColumns() {
-        String sql = SqlBuilder.columnsMetaSql("db1", "t1");
-        assertTrue("DATA_TYPE is what the HLL/BITMAP guard reads", sql.contains("DATA_TYPE"));
-        assertTrue("COLUMN_TYPE carries the nested type", sql.contains("COLUMN_TYPE"));
-    }
-
-    /**
-     * Key columns come from COLUMN_KEY, not from {@code tables_config.PRIMARY_KEY}: FE computes the
-     * key columns of every model but publishes them only for PRIMARY_KEYS and UNIQUE_KEYS, so an AGG
-     * or DUP table would otherwise yield no key and every record would carry a null Kafka key.
-     */
-    @Test
-    public void testColumnsMetaSqlSelectsColumnKeyForEveryModel() {
-        assertTrue(SqlBuilder.columnsMetaSql("db1", "t1").contains("COLUMN_KEY"));
     }
 
     /** Identifiers reach information_schema as string literals, so they are quoted, not backticked. */

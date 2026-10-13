@@ -42,7 +42,7 @@ public final class OffsetState {
         this.snapshotDone = snapshotDone;
     }
 
-    /** No position: the table is captured from scratch. */
+    /** No durable position; the task consults held bookmarks and the configured startup policy. */
     public static final OffsetState NONE = new OffsetState(-1L, false);
 
     public static Map<String, String> sourcePartition(String db, String table) {
@@ -64,7 +64,8 @@ public final class OffsetState {
      * {@code Long}: the offset store round-trips through JSON, so a bookmark id small enough to fit
      * an int comes back as an {@code Integer}.
      *
-     * <p>Anything that is not a position leaves the table fresh. Pairing the {@code -1} sentinel
+     * <p>Anything that is not a position returns {@link #NONE}; the task decides how to recover.
+     * Pairing the {@code -1} sentinel
      * with {@code snapshot_done=true} would restore "done at -1": the snapshot is skipped forever
      * and {@code commit()}'s fence never rises above zero, so the table can never release again.
      */

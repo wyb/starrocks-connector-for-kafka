@@ -654,7 +654,7 @@ public class PipelineBench {
             long[] sorted = nanos.clone();
             Arrays.sort(sorted);
             latencies.add(String.format(Locale.ROOT, "%-24s %-6s n=%-4d p50 %8.2f ms   p99 %8.2f ms   max %8.2f ms",
-                    what, transport, nanos.length, sorted[sorted.length / 2] / 1e6,
+                    what, transport, nanos.length, median(nanos) / 1e6,
                     sorted[Math.min(sorted.length - 1, (int) Math.ceil(sorted.length * 0.99) - 1)] / 1e6,
                     sorted[sorted.length - 1] / 1e6));
         }
@@ -782,7 +782,8 @@ public class PipelineBench {
             for (String n : notes) {
                 sb.append("note: ").append(n).append('\n');
             }
-            sb.append("\nrows/s is from the p50 wall time; cpu s is process CPU over the round (all threads);")
+            sb.append("\np50 averages the two middle samples when the sample count is even.\n")
+                    .append("rows/s is from the p50 wall time; cpu s is process CPU over the round (all threads);")
                     .append(" alloc MB sums Java allocations across live threads (not Arrow native buffers);")
                     .append(" rss MB is the process peak seen after a round; json MB is encoded key+value bytes (MiB).\n")
                     .append("Totals measure pipeline=").append(mode.label())
@@ -825,7 +826,9 @@ public class PipelineBench {
         private static double median(long[] values) {
             long[] sorted = values.clone();
             Arrays.sort(sorted);
-            return sorted[sorted.length / 2];
+            int middle = sorted.length / 2;
+            return sorted.length % 2 == 0
+                    ? sorted[middle - 1] / 2.0 + sorted[middle] / 2.0 : sorted[middle];
         }
 
         private static double min(long[] values) {

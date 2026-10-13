@@ -165,9 +165,9 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.STRING,
                         ConfigDef.NO_DEFAULT_VALUE,
                         ConfigDef.Importance.HIGH,
-                        "JDBC URL of the StarRocks FE endpoint(s); the scheme selects the transport, jdbc:mysql:// or "
+                        "JDBC URL of the StarRocks FE endpoint(s); the scheme selects the JDBC driver, jdbc:mysql:// or "
                                 + "jdbc:arrow-flight-sql://. Comma-separate several FE hosts so bookmark calls can rotate "
-                                + "to the leader."
+                                + "to the leader and connection failures can move to another FE."
                 ).define(
                         READ_TRANSPORT,
                         ConfigDef.Type.STRING,
@@ -280,7 +280,8 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.INT,
                         3,
                         ConfigDef.Importance.LOW,
-                        "Attempts per FE URL for a leader-only bookmark call before giving up."
+                        "Maximum attempts per FE URL for a leader-only bookmark call. With multiple URLs, "
+                                + "connection failures and leader redirects move immediately to the next endpoint."
                 ).define(
                         POLL_RETRY_TIMEOUT_MS,
                         ConfigDef.Type.LONG,
@@ -310,7 +311,7 @@ public class StarRocksCdcSourceConfig extends AbstractConfig {
                         ConfigDef.Type.BOOLEAN,
                         false,
                         ConfigDef.Importance.LOW,
-                        "Collect JDBC query, next, row decode, and task record mapping timings for this connector "
+                        "Collect query, JDBC next or ADBC batch, row decode, and task record mapping timings "
                                 + "and log DEBUG summaries. Per-row timing adds overhead."
                 );
     }
